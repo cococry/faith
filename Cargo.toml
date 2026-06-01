@@ -4,8 +4,10 @@ name = "faith" # the name of the package
 version = "0.1.0"    # the current version, obeying semver
 authors = ["Luca Machiedo", "Luca Machiedo <cococry.btw@gmail.com>"]
 description = "Faith Instant Messaging Client"
+edition = "2024"
 
 [dependencies]
+anyhow = "1.0.102"
 glow = "0.17.0"
 khronos-egl = { version = "6.0.0", features = ["static"] }
 x11 = { version = "2.21", features = ["xlib", "xlib_xcb"] }
