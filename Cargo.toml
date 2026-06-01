@@ -18,3 +18,4 @@ x11rb = { version = "0.13", features = ["allow-unsafe-code"] }
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+bytemuck = {version = "1.25.0", features = ["derive"] }

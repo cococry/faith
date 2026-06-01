@@ -19,7 +19,7 @@ pub use device::{
     BufferDesc,
     DrawIndexed,
     PipelineDesc,
-    VertexStepMode
+    VertexStepMode,
+    GraphicsDevice,
+    DrawIndexedInstanced,
 };
-
-pub use device::GraphicsDevice;

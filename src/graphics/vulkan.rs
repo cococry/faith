@@ -1,4 +1,5 @@
 
+use crate::graphics::device::DrawIndexedInstanced;
 use crate::platform::Platform;
 use crate::graphics::{BufferDesc, BufferHandle, Color, DrawIndexed, GraphicsDevice, PipelineDesc, PipelineHandle};
 
@@ -28,6 +29,7 @@ impl GraphicsDevice for VulkanRenderer {
     fn write_buffer(
         &mut self,
         _handle: BufferHandle,
+        _binding: u32,
         _offset: usize,
         _data: &[u8],
     ) -> anyhow::Result<()> {
@@ -42,7 +44,7 @@ impl GraphicsDevice for VulkanRenderer {
         anyhow::bail!("Vulkan set_pipeline not implemented yet")
     }
 
-    fn set_vertex_buffer(&mut self, _handle: BufferHandle) -> anyhow::Result<()> {
+    fn set_vertex_buffer(&mut self, _handle: BufferHandle, _binding: u32) -> anyhow::Result<()> {
         anyhow::bail!("Vulkan set_vertex_buffer not implemented yet")
     }
 
@@ -62,5 +64,9 @@ impl GraphicsDevice for VulkanRenderer {
 
     fn draw_indexed(&mut self, _draw: DrawIndexed) -> anyhow::Result<()> {
         anyhow::bail!("Vulkan draw_indexed not implemented yet")
+    }
+    
+    fn draw_indexed_instanced(&mut self, _draw: DrawIndexedInstanced) -> anyhow::Result<()> {
+        anyhow::bail!("Vulkan draw_indexed_instanced not implemented yet")
     }
 }

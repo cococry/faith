@@ -5,11 +5,13 @@ use anyhow::Ok;
 use glow::HasContext;
 use khronos_egl::{Display, Surface, Context};
 
-use crate::graphics::device::VertexFormat;
+use crate::graphics::device::{DrawIndexedInstanced, VertexFormat};
 use crate::graphics::opengl::{GlBuffer, GlPipeline, GlTexture};
 use crate::platform::Platform;
 use crate::platform::window::WindowHandleInfo;
 use crate::graphics::{BufferDesc, BufferHandle, BufferTarget, BufferUsage, Color, DrawIndexed, GraphicsDevice, PipelineDesc, PipelineHandle, VertexStepMode};
+
+const MAX_VBOS: usize = 8;
 
 pub struct OpenGLRenderer {
     gl: glow::Context,
@@ -27,7 +29,7 @@ pub struct OpenGLRenderer {
     pipelines: Vec<Option<GlPipeline>>,
 
     current_pipeline: Option<PipelineHandle>,
-    current_vbo: Option<BufferHandle>,
+    current_vbos: [Option<BufferHandle>; MAX_VBOS],
     current_ibo: Option<BufferHandle>,
 }
 
@@ -126,7 +128,7 @@ impl OpenGLRenderer {
             textures: Vec::new(),
             pipelines: Vec::new(),
             current_pipeline: None,
-            current_vbo: None,
+            current_vbos: [None; MAX_VBOS],
             current_ibo: None,
         })
     }
@@ -273,7 +275,7 @@ impl OpenGLRenderer {
             let vao = self.gl.create_vertex_array()
                 .map_err(|e| anyhow::anyhow!("Failed to create VAO: {e}"))?; 
 
-            self.pipelines.push(Some(GlPipeline { program, vao, vert_layout: desc.vert_layout }));
+            self.pipelines.push(Some(GlPipeline { program, vao, vert_layouts: desc.vert_layouts }));
 
             Ok(PipelineHandle((self.pipelines.len() - 1) as u32))
         }
@@ -315,10 +317,17 @@ impl OpenGLRenderer {
             .ok_or_else(|| anyhow::anyhow!("invalid buffer handle: {:?}", handle))
     } 
 
-    pub fn set_vertex_buffer(&mut self, handle: BufferHandle) -> anyhow::Result<()> {
-        if self.current_vbo == Some(handle) {
+    pub fn set_vertex_buffer(&mut self, handle: BufferHandle, binding: u32) -> anyhow::Result<()> {
+        let binding_idx = binding as usize;
+
+        if binding_idx >= self.current_vbos.len() {
+            anyhow::bail!("vertex buffer binding {} is out of range", binding);
+        }
+
+        if self.current_vbos[binding_idx] == Some(handle) {
             return Ok(());
         }
+
         let crnt_pipeline = self.current_pipeline
             .ok_or_else(|| anyhow::anyhow!("set_vertex_buffer called before set_pipeline"))?;
 
@@ -331,7 +340,16 @@ impl OpenGLRenderer {
             buffer.raw
         };
         
-        let layout = &self.get_pipeline(crnt_pipeline)?.vert_layout;
+        let layout = {
+            let pipeline = self.get_pipeline(crnt_pipeline)?;
+
+            pipeline.vert_layouts.iter().find(|layout| layout.binding == binding)
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow::anyhow!("pipeline does not have vertex buffer layout for binding {}",
+                        binding)
+                })?
+        };
 
         unsafe {
             self.gl.bind_buffer(glow::ARRAY_BUFFER, Some(buffer_raw));
@@ -376,7 +394,7 @@ impl OpenGLRenderer {
 
         }
 
-        self.current_vbo = Some(handle);
+        self.current_vbos[binding_idx] = Some(handle);
 
         Ok(())
     }
@@ -393,7 +411,7 @@ impl OpenGLRenderer {
             self.gl.bind_vertex_array(Some(pipeline.vao));
         }
         self.current_pipeline = Some(handle);
-        self.current_vbo = None;
+        self.current_vbos = [None; MAX_VBOS];
         self.current_ibo = None;
 
         Ok(())
@@ -420,9 +438,10 @@ impl OpenGLRenderer {
     }
 
     pub fn write_buffer(
-        &mut self, 
+        &mut self,
         handle: BufferHandle,
-        offset: usize, 
+        _binding: u32,
+        offset: usize,
         data: &[u8],
     ) -> anyhow::Result<()> {
         let (raw, target, size) = {
@@ -440,11 +459,21 @@ impl OpenGLRenderer {
         }
 
         unsafe {
-            if self.current_vbo != Some(handle) {
-                self.gl.bind_buffer(self.gl_buffer_target(target), Some(raw));
-                self.current_vbo = Some(handle);
+            let gl_target = self.gl_buffer_target(target);
+
+            self.gl.bind_buffer(gl_target, Some(raw));
+            self.gl.buffer_sub_data_u8_slice(gl_target, offset as i32, data);
+        }
+
+        // Conservative cache invalidation.
+        match target {
+            BufferTarget::Vertex => {
+                self.current_vbos = [None; MAX_VBOS];
             }
-            self.gl.buffer_sub_data_u8_slice(self.gl_buffer_target(target), offset as i32, data);
+            BufferTarget::Index => {
+                self.current_ibo = None;
+            }
+            BufferTarget::Uniform => {}
         }
 
         Ok(())
@@ -521,10 +550,11 @@ impl GraphicsDevice for OpenGLRenderer {
     fn write_buffer(
         &mut self,
         handle: BufferHandle,
+        binding: u32,
         offset: usize,
         data: &[u8],
     ) -> anyhow::Result<()> {
-        OpenGLRenderer::write_buffer(self, handle, offset, data)
+        OpenGLRenderer::write_buffer(self, handle, binding, offset, data)
     }
 
     fn create_pipeline(&mut self, desc: PipelineDesc<'_>) -> anyhow::Result<PipelineHandle> {
@@ -535,8 +565,8 @@ impl GraphicsDevice for OpenGLRenderer {
         OpenGLRenderer::set_pipeline(self, handle)
     }
 
-    fn set_vertex_buffer(&mut self, handle: BufferHandle) -> anyhow::Result<()> {
-        OpenGLRenderer::set_vertex_buffer(self, handle)
+    fn set_vertex_buffer(&mut self,handle: BufferHandle,  binding: u32) -> anyhow::Result<()> {
+        OpenGLRenderer::set_vertex_buffer(self, handle, binding)
     }
 
     fn set_index_buffer(&mut self, handle: BufferHandle) -> anyhow::Result<()> {
@@ -555,5 +585,21 @@ impl GraphicsDevice for OpenGLRenderer {
 
     fn draw_indexed(&mut self, draw: DrawIndexed) -> anyhow::Result<()> {
         OpenGLRenderer::draw_indexed(self, draw)
+    }
+    fn draw_indexed_instanced(&mut self, draw: DrawIndexedInstanced) -> anyhow::Result<()> {
+        unsafe {
+            let offset_bytes = draw.index_offset as i32 *std::mem::size_of::<u32>() as i32;
+
+            self.gl.draw_elements_instanced_base_vertex(
+                glow::TRIANGLES,
+                draw.index_count as i32, 
+                glow::UNSIGNED_INT,
+                offset_bytes,
+                draw.inst_count as i32, 
+                draw.vertex_offset
+            )
+        }
+
+        Ok(())
     }
 }

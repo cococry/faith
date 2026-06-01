@@ -28,6 +28,15 @@ pub struct DrawIndexed {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub struct DrawIndexedInstanced {
+    pub index_count: u32,
+    pub index_offset: u32,
+    pub vertex_offset: i32,
+    pub inst_count: u32,
+    pub inst_offset: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
 pub enum VertexFormat {
     Float32,
     Float32x2,
@@ -58,9 +67,13 @@ pub struct VertexAttribute {
     pub format: VertexFormat,
 }
 
+#[derive(Debug, Clone)]
 pub struct VertexBufferLayout {
     // Size of one vertex/instance in bytes
     pub stride : u32,
+
+    // Vertex buffer binding 
+    pub binding: u32,
 
     // Per-vertex or per-instance.
     pub step_mode: VertexStepMode,
@@ -73,7 +86,7 @@ pub struct PipelineDesc<'a> {
     pub vertex_source: &'a str,
     pub fragment_source: &'a str,
 
-    pub vert_layout: VertexBufferLayout
+    pub vert_layouts: Vec<VertexBufferLayout>
 
 }
 
@@ -97,6 +110,7 @@ pub trait GraphicsDevice {
     fn write_buffer(
         &mut self,
         handle: BufferHandle,
+        binding: u32,
         offset: usize,
         data: &[u8],
     ) -> anyhow::Result<()>;
@@ -105,7 +119,7 @@ pub trait GraphicsDevice {
 
     fn set_pipeline(&mut self, handle: PipelineHandle) -> anyhow::Result<()>;
 
-    fn set_vertex_buffer(&mut self, handle: BufferHandle) -> anyhow::Result<()>;
+    fn set_vertex_buffer(&mut self, handle: BufferHandle, binding: u32) -> anyhow::Result<()>;
 
     fn set_index_buffer(&mut self, handle: BufferHandle) -> anyhow::Result<()>;
 
@@ -118,4 +132,6 @@ pub trait GraphicsDevice {
     ) -> anyhow::Result<()>;
 
     fn draw_indexed(&mut self, draw: DrawIndexed) -> anyhow::Result<()>;
+    
+    fn draw_indexed_instanced(&mut self, draw: DrawIndexedInstanced) -> anyhow::Result<()>;
 }

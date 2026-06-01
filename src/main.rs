@@ -1,6 +1,9 @@
 mod platform;
 mod graphics;
 mod cli;
+mod ui;
+
+use crate::graphics::GraphicsDevice;
 
 use clap::Parser;
 use cli::Cli;
@@ -8,7 +11,7 @@ use cli::Cli;
 use platform::{Platform, WindowConfig, WindowEvent};
 use tracing_subscriber::EnvFilter;
 
-use crate::graphics::{GraphicsBackend, Renderer, Color};
+use crate::{graphics::{Color, GraphicsBackend, Renderer}, ui::UIRenderer};
 
 fn main() -> anyhow::Result<()> { 
     tracing_subscriber::fmt()
@@ -32,6 +35,8 @@ fn main() -> anyhow::Result<()> {
     let mut platform = Platform::new(&conf)?;
 
     let mut renderer = Renderer::new(GraphicsBackend::OpenGL, &platform)?;
+
+    let mut ui = UIRenderer::new(&mut renderer, conf.width, conf.height)?;
 
     let mut running = true; 
 
@@ -61,6 +66,15 @@ fn main() -> anyhow::Result<()> {
         if running && should_redraw {
             renderer.clear_color(Color::rgba(1.0, 1.0, 1.0, 1.0));
             renderer.begin_frame();
+
+            let (width, height) = platform.size();
+
+            ui.begin(width, height);
+            
+            ui.quad([20.0, 20.0, 200.0, 80.0], Color::rgba(1.0, 0.0, 0.0, 1.0))?;
+
+            ui.end(&mut renderer)?;
+
             renderer.end_frame()?;
         }
     }
