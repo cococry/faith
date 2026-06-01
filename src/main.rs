@@ -19,22 +19,30 @@ fn main() -> anyhow::Result<()> {
     while running {
         let events = platform.poll_events()?;
 
-        for events in events {
-            match events {
+        let mut should_redraw = false;
+
+        for event in events {
+            match event {
                 WindowEvent::CloseRequested => {
                     running = false;
                 }
-                WindowEvent::RedrawRequested => {
-                    renderer.clear_color(Color::rgba(1.0, 1.0, 1.0, 1.0));
-                    renderer.begin_frame();
-                    renderer.end_frame()?;
-                }
-                WindowEvent::Resized {width, height} => {
+
+                WindowEvent::Resized { width, height } => {
                     renderer.resize(width, height);
                 }
-                _ev => {
+
+                WindowEvent::RedrawRequested => {
+                    should_redraw = true;
                 }
+
+                _ => {}
             }
+        }
+
+        if running && should_redraw {
+            renderer.clear_color(Color::rgba(1.0, 1.0, 1.0, 1.0));
+            renderer.begin_frame();
+            renderer.end_frame()?;
         }
     }
     Ok(())

@@ -28,7 +28,7 @@ pub enum WindowHandleInfo {
     },
     Wayland { 
         display: *mut std::ffi::c_void,
-        surface: *mut std::ffi::c_void,
+        egl_win: *mut std::ffi::c_void,
     },
 }
 
@@ -56,7 +56,7 @@ impl Platform {
             Self::X11(platform) => platform.native_handle(),
             Self::Wayland(platform) => platform.native_handle()
         }
-    } 
+    }
 
     pub fn size(&self) -> (u32, u32) {
         match self {

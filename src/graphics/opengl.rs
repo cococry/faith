@@ -2,7 +2,7 @@ extern crate khronos_egl as egl;
 use std::ffi::c_void;
 
 use glow::HasContext;
-use khronos_egl::{Display, Surface};
+use khronos_egl::{Display, Surface, Context};
 
 use crate::platform::Platform;
 use crate::platform::window::WindowHandleInfo;
@@ -15,6 +15,7 @@ pub struct OpenGLRenderer {
     egl: egl::Instance<egl::Static>,
     egl_display: Display, 
     egl_surface: Surface, 
+    egl_context: Context, 
 
     width: u32,
     height: u32,
@@ -22,16 +23,20 @@ pub struct OpenGLRenderer {
 
 impl OpenGLRenderer {
     pub fn new(platform: &Platform) -> anyhow::Result<Self> {
+       
+        let handle = platform.native_handle();
+        let native_display = match handle {
+            WindowHandleInfo::X11 { display, .. } => display,
+            WindowHandleInfo::Wayland { display, .. } => display,
+        };
+
+        let native_window = match handle {
+            WindowHandleInfo::X11 { window, .. } => window as usize as *mut c_void,
+            WindowHandleInfo::Wayland { egl_win, .. } => egl_win,
+        };
 
         let egl = egl::Instance::new(egl::Static);
-        let egl_display = unsafe { egl.get_display(match platform.native_handle() {
-            WindowHandleInfo::X11 { display, .. } => {
-                display
-            },
-            WindowHandleInfo::Wayland { display, .. } => {
-                display
-            },
-        }as *mut c_void) 
+        let egl_display = unsafe { egl.get_display(native_display as *mut c_void) 
         }.expect("Failed to get EGL display from raw X display");
 
 
@@ -73,14 +78,7 @@ impl OpenGLRenderer {
             egl.create_window_surface(
                 egl_display, 
                 config,
-                match platform.native_handle() {
-                    WindowHandleInfo::X11 { display: _, window } => {
-                        window as usize as *mut c_void
-                    },
-                    WindowHandleInfo::Wayland { display, .. } => {
-                        display
-                    },
-                },
+                native_window,
                 None)
         }?;
 
@@ -100,6 +98,7 @@ impl OpenGLRenderer {
             egl,
             egl_display,
             egl_surface,
+            egl_context: context,
             width,
             height,
         })
@@ -112,26 +111,17 @@ impl OpenGLRenderer {
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
-        self.width = width;
-        self.height = height;
-
-        let surface_width = self
-            .egl
-            .query_surface(self.egl_display, self.egl_surface, egl::WIDTH)
-            .unwrap_or(width as i32);
-
-        let surface_height = self
-            .egl
-            .query_surface(self.egl_display, self.egl_surface, egl::HEIGHT)
-            .unwrap_or(height as i32);
-
-        self.width = surface_width as u32;
-        self.height = surface_height as u32;
-
-        unsafe {
-            self.gl.viewport(0, 0, surface_width, surface_height);
-        }
+    if width == 0 || height == 0 {
+        return;
     }
+
+    self.width = width;
+    self.height = height;
+
+    unsafe {
+        self.gl.viewport(0, 0, width as i32, height as i32);
+    }
+}
 
     pub fn begin_frame(&mut self) {
         unsafe {
@@ -145,4 +135,27 @@ impl OpenGLRenderer {
         Ok(())
     }
 
+}
+
+impl Drop for OpenGLRenderer {
+    fn drop(&mut self) {
+        let _ = self.egl.make_current(
+            self.egl_display,
+            None,
+            None,
+            None,
+        );
+
+        let _ = self.egl.destroy_surface(
+            self.egl_display,
+            self.egl_surface,
+        );
+
+        let _ = self.egl.destroy_context(
+            self.egl_display,
+            self.egl_context,
+        );
+
+        let _ = self.egl.terminate(self.egl_display);
+    }
 }
