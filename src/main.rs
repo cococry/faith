@@ -126,7 +126,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     egl.swap_buffers(egl_display, surface)?;
 
-
     conn.flush()?;
     loop {
         let event = conn.wait_for_event()?; 

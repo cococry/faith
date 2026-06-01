@@ -1,2 +1,2 @@
 # faith
-instant messager in rust in 24h
+Instant messenger in Rust in 24h
