@@ -89,6 +89,27 @@ impl X11Platform {
         conn.change_property32(PropMode::REPLACE, win_id, 
             wm_protocols, AtomEnum::ATOM, &[wm_delete_window])?;
 
+
+        let wm_name = conn.intern_atom(false, b"WM_NAME")?.reply()?.atom;
+        let net_wm_name = conn.intern_atom(false, b"_NET_WM_NAME")?.reply()?.atom;
+        let utf8_string = conn.intern_atom(false, b"UTF8_STRING")?.reply()?.atom;
+
+        conn.change_property8(
+            PropMode::REPLACE,
+            win_id,
+            wm_name,
+            AtomEnum::STRING,
+            window_config.title.as_bytes(),
+        )?;
+
+        conn.change_property8(
+            PropMode::REPLACE,
+            win_id,
+            net_wm_name,
+            utf8_string,
+            window_config.title.as_bytes(),
+        )?;
+
         conn.map_window(win_id)?;
         conn.flush()?;
 

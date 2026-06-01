@@ -1,14 +1,33 @@
-
 mod platform;
 mod graphics;
+mod cli;
+
+use clap::Parser;
+use cli::Cli;
 
 use platform::{Platform, WindowConfig, WindowEvent};
+use tracing_subscriber::EnvFilter;
 
 use crate::graphics::{GraphicsBackend, Renderer, Color};
 
-
 fn main() -> anyhow::Result<()> { 
-    let conf = WindowConfig::default(); 
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("faith=info")),
+        )
+        .init();
+
+    tracing::info!("Starting Faith client...");
+
+    let cli = Cli::parse();
+
+    let conf = WindowConfig{
+        backend:    cli.backend,
+        title:      WindowConfig::default().title,
+        width:      WindowConfig::default().width,
+        height:     WindowConfig::default().height,
+    };
 
     let mut platform = Platform::new(&conf)?;
 

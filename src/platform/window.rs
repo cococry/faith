@@ -1,6 +1,9 @@
 use super::event::WindowEvent;
+use crate::cli::Backend;
+use tracing::{info, warn};
 
 pub struct WindowConfig {
+    pub backend: Backend, 
     pub title: String,
     pub width: u32,
     pub height: u32,
@@ -8,8 +11,9 @@ pub struct WindowConfig {
 
 impl Default for WindowConfig {
     fn default() -> Self {
-        Self { 
-            title: "Messenger".to_string(),
+        Self {
+            backend: Backend::Auto,
+            title: "Faith Messenger".to_string(),
             width: 1280, 
             height: 720, 
         }
@@ -34,15 +38,38 @@ pub enum WindowHandleInfo {
 
 impl Platform {
     pub fn new(config: &WindowConfig) -> anyhow::Result<Self> {
+        info!("Window '{0}' at {1}x{2}", config.title, config.width, config.height);
+        match config.backend {
+            Backend::Auto => Self::new_auto(config),
+
+            Backend::Wayland => {
+                info!("using Wayland backend");
+                Ok(Self::Wayland(super::wayland::WaylandPlatform::new(config)?))
+            }
+
+            Backend::X11 => {
+                info!("using X11 backend");
+                Ok(Self::X11(super::x11::X11Platform::new(config)?))
+            }
+        }
+    }
+
+    fn new_auto(config: &WindowConfig) -> anyhow::Result<Self> {
         if std::env::var_os("WAYLAND_DISPLAY").is_some() {
             match super::wayland::WaylandPlatform::new(config) {
-                Ok(platform) => return Ok(Self::Wayland(platform)),
-                Err(err) => eprintln!("Wayland windowing failed, failling back to X11: {err}") 
+                Ok(platform) => {
+                    info!("using Wayland backend");
+                    return Ok(Self::Wayland(platform));
+                }
+                Err(err) => {
+                    warn!("Wayland windowing failed, falling back to X11: {err}");
+                }
             }
         }
 
+        info!("using X11 backend");
         Ok(Self::X11(super::x11::X11Platform::new(config)?))
-    }
+    } 
 
     pub fn poll_events(&mut self) -> anyhow::Result<Vec<WindowEvent>> {
         match self {
