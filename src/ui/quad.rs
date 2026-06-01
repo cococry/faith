@@ -1,7 +1,7 @@
 use bytemuck::{Pod, Zeroable};
 
 use crate::graphics::{
-    Color,
+    Color, TextureHandle,
 };
 
 
@@ -91,10 +91,17 @@ pub const QUAD_INDICES: [u32; 6] = [
     0, 2, 3,
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatchKey {
+    pub texture: TextureHandle
+}
+
+
 #[derive(Debug, Clone, Copy)]
 pub struct QuadBatch {
     pub inst_start: u32,
     pub inst_count: u32,
+    pub key: BatchKey,
 }
 
 pub const UI_QUAD_VERTEX_SHADER: &str = r#"
@@ -146,9 +153,12 @@ in vec4 v_color;
 in vec4 v_rect;
 in vec4 v_params;
 
+uniform sampler2D u_texture;
+
 out vec4 out_color;
 
 void main() {
-    out_color = v_color;
+    vec4 tex = texture(u_texture, v_uv);
+    out_color = tex * v_color;
 }
 "#;

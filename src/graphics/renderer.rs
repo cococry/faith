@@ -1,3 +1,4 @@
+
 use crate::graphics::{
     BufferDesc,
     BufferHandle,
@@ -6,6 +7,8 @@ use crate::graphics::{
     GraphicsDevice,
     PipelineDesc,
     PipelineHandle,
+    TextureDesc,
+    TextureHandle,
 };
 
 use crate::graphics::device::DrawIndexedInstanced;
@@ -82,6 +85,35 @@ impl GraphicsDevice for Renderer {
         self.device_mut().write_buffer(handle, binding, offset, data)
     }
 
+    fn create_texture(
+        &mut self,
+        desc: TextureDesc,
+        data: Option<&[u8]>,
+    ) -> anyhow::Result<TextureHandle> {
+        self.device_mut().create_texture(desc, data)
+    }
+
+    fn write_texture(
+        &mut self,
+        texture: TextureHandle,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        data: &[u8],
+    ) -> anyhow::Result<()> {
+        self.device_mut()
+            .write_texture(texture, x, y, width, height, data)
+    }
+
+    fn set_texture(
+        &mut self,
+        slot: u32,
+        texture: TextureHandle,
+    ) -> anyhow::Result<()> {
+        self.device_mut().set_texture(slot, texture)
+    }
+
     fn create_pipeline(
         &mut self,
         desc: PipelineDesc<'_>,
@@ -120,6 +152,15 @@ impl GraphicsDevice for Renderer {
     ) -> anyhow::Result<()> {
         self.device_mut().set_uniform_2f(pipeline, name, x, y)
     }
+    fn set_uniform_1i(
+        &mut self,
+        pipeline: PipelineHandle,
+        name: &str,
+        value: i32,
+    ) -> anyhow::Result<()> {
+        self.device_mut().set_uniform_1i(pipeline, name, value)
+    }
+
 
     fn draw_indexed(
         &mut self,

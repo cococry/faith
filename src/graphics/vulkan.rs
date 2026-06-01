@@ -1,7 +1,7 @@
 
 use crate::graphics::device::DrawIndexedInstanced;
 use crate::platform::Platform;
-use crate::graphics::{BufferDesc, BufferHandle, Color, DrawIndexed, GraphicsDevice, PipelineDesc, PipelineHandle};
+use crate::graphics::{BufferDesc, BufferHandle, Color, DrawIndexed, GraphicsDevice, PipelineDesc, PipelineHandle, TextureDesc, TextureHandle};
 
 pub struct VulkanRenderer;
 
@@ -69,4 +69,42 @@ impl GraphicsDevice for VulkanRenderer {
     fn draw_indexed_instanced(&mut self, _draw: DrawIndexedInstanced) -> anyhow::Result<()> {
         anyhow::bail!("Vulkan draw_indexed_instanced not implemented yet")
     }
+
+    fn create_texture(
+          &mut self,
+        _desc: TextureDesc,
+        _data: Option<&[u8]>,
+    ) -> anyhow::Result<TextureHandle> {
+
+        anyhow::bail!("Vulkan create_texture not implemented yet")
+    }
+
+    fn write_texture(
+        &mut self,
+        _texture: TextureHandle,
+        _x: u32,
+        _y: u32,
+        _width: u32,
+        _height: u32,
+        _data: &[u8]) -> anyhow::Result<()> {
+
+        anyhow::bail!("Vulkan write_texture not implemented yet")
+    }
+
+    fn set_texture(&mut self,
+        _slot: u32,
+        _texture: TextureHandle)
+        -> anyhow::Result<()> {
+        anyhow::bail!("Vulkan set_texture not implemented yet")
+    }
+
+    fn set_uniform_1i(
+    &mut self,
+    _pipeline: PipelineHandle,
+    _name: &str,
+    _value: i32,
+) -> anyhow::Result<()> {
+        anyhow::bail!("Vulkan set_uniform_1i not implemented yet")
+    }
+
 }

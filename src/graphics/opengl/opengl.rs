@@ -9,7 +9,7 @@ use crate::graphics::device::{DrawIndexedInstanced, VertexFormat};
 use crate::graphics::opengl::{GlBuffer, GlPipeline, GlTexture};
 use crate::platform::Platform;
 use crate::platform::window::WindowHandleInfo;
-use crate::graphics::{BufferDesc, BufferHandle, BufferTarget, BufferUsage, Color, DrawIndexed, GraphicsDevice, PipelineDesc, PipelineHandle, VertexStepMode};
+use crate::graphics::{BufferDesc, BufferHandle, BufferTarget, BufferUsage, Color, DrawIndexed, GraphicsDevice, PipelineDesc, PipelineHandle, TextureDesc, TextureFormat, TextureHandle, VertexStepMode};
 
 const MAX_VBOS: usize = 8;
 
@@ -266,6 +266,138 @@ impl OpenGLRenderer {
         }
     }
 
+    fn gl_texture_format(&self, format: TextureFormat) -> (u32, u32, u32) {
+        match format {
+            TextureFormat::Rgba8 => (
+                glow::RGBA8,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+            ),
+            TextureFormat::Alpha8 => (
+                glow::R8,
+                glow::RED,
+                glow::UNSIGNED_BYTE,
+            ),
+        }
+    }
+
+    pub fn create_texture(
+        &mut self,
+        desc: TextureDesc,
+        data: Option<&[u8]>,
+    ) -> anyhow::Result<TextureHandle> {
+
+        unsafe {
+            let raw = self.gl.create_texture()
+                .map_err(|e| anyhow::anyhow!("Failed to create OpenGL texture: {e}"))?;
+
+            let (internal_format, format, gl_type) = self.gl_texture_format(desc.format);
+
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(raw));
+
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::LINEAR as i32,
+            );
+
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::LINEAR as i32,
+            );
+
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_S,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_T,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+
+            self.gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+
+            self.gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                internal_format as i32,
+                desc.width as i32,
+                desc.height as i32,
+                0,
+                format,
+                gl_type,
+                glow::PixelUnpackData::Slice(data),
+            );
+
+            self.gl.bind_texture(glow::TEXTURE_2D, None);
+
+            let handle = TextureHandle(self.textures.len() as u32);
+
+            self.textures.push(Some(GlTexture { raw, width: desc.width,  height: desc.height, format: desc.format }));
+
+            Ok(handle)
+        }
+    }
+
+    pub fn write_texture(
+        &mut self,
+        texture: TextureHandle,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        data: &[u8],
+    ) -> anyhow::Result<()> {
+        let tex = self.get_texture(texture)?;
+
+        if x + width > tex.width || y + height > tex.height {
+            anyhow::bail!("texture write out of bounds");
+        }
+
+        let raw = tex.raw;
+        let format = tex.format;
+
+        let (_, external_format, ty) = self.gl_texture_format(format);
+
+        unsafe {
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(raw));
+            self.gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+
+            self.gl.tex_sub_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                x as i32,
+                y as i32,
+                width as i32,
+                height as i32,
+                external_format,
+                ty,
+                glow::PixelUnpackData::Slice(Some(data)),
+            );
+        }
+
+        Ok(())
+    }
+
+    pub fn set_texture(
+        &mut self,
+        slot: u32,
+        texture: TextureHandle,
+    ) -> anyhow::Result<()> {
+        let tex = self.get_texture(texture)?;
+
+        unsafe {
+            self.gl.active_texture(glow::TEXTURE0 + slot);
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(tex.raw));
+        }
+
+        Ok(())
+    }
+
     pub fn create_pipeline(&mut self, desc: PipelineDesc<'_>) -> anyhow::Result<PipelineHandle> {
         unsafe {
             let vertex_shader = self.compile_shader(glow::VERTEX_SHADER, desc.vertex_source)?;
@@ -294,6 +426,14 @@ impl OpenGLRenderer {
         }
 
         Ok(())
+    }
+
+    fn get_texture(&self, handle: TextureHandle) -> anyhow::Result<&GlTexture> {
+        self
+            .textures
+            .get(handle.0 as usize)
+            .and_then(|handle| handle.as_ref())
+            .ok_or_else(|| anyhow::anyhow!("invalid texture handle: {:?}", handle))
     }
 
     fn get_pipeline(&self, handle: PipelineHandle) -> anyhow::Result<&GlPipeline> {
@@ -500,6 +640,44 @@ impl OpenGLRenderer {
 
         Ok(())
     }
+    pub fn set_uniform_1i(
+        &mut self,
+        pipeline: PipelineHandle,
+        name: &str,
+        value: i32,
+    ) -> anyhow::Result<()> {
+        self.set_pipeline(pipeline)?;
+
+        let program = self.get_pipeline(pipeline)?.program;
+
+        unsafe {
+            if let Some(location) = self.gl.get_uniform_location(program, name) {
+                self.gl.uniform_1_i32(Some(&location), value);
+            }
+        }
+
+        Ok(())
+    }
+
+
+    fn draw_indexed_instanced(&mut self, draw: DrawIndexedInstanced) -> anyhow::Result<()> {
+        unsafe {
+            let offset_bytes =
+                draw.index_offset as i32 * std::mem::size_of::<u32>() as i32;
+
+            self.gl.draw_elements_instanced_base_vertex_base_instance(
+                glow::TRIANGLES,
+                draw.index_count as i32,
+                glow::UNSIGNED_INT,
+                offset_bytes,
+                draw.inst_count as i32,
+                draw.vertex_offset,
+                draw.inst_offset,
+            );
+        }
+
+        Ok(())
+    }
 }
 
 impl Drop for OpenGLRenderer {
@@ -582,24 +760,48 @@ impl GraphicsDevice for OpenGLRenderer {
     ) -> anyhow::Result<()> {
         OpenGLRenderer::set_uniform_2f(self, pipeline, name, x, y)
     }
+    fn set_uniform_1i(
+        &mut self,
+        pipeline: PipelineHandle,
+        name: &str,
+        value: i32,
+    ) -> anyhow::Result<()> {
+        OpenGLRenderer::set_uniform_1i(self, pipeline, name, value)
+    }
 
     fn draw_indexed(&mut self, draw: DrawIndexed) -> anyhow::Result<()> {
         OpenGLRenderer::draw_indexed(self, draw)
     }
+
     fn draw_indexed_instanced(&mut self, draw: DrawIndexedInstanced) -> anyhow::Result<()> {
-        unsafe {
-            let offset_bytes = draw.index_offset as i32 *std::mem::size_of::<u32>() as i32;
-
-            self.gl.draw_elements_instanced_base_vertex(
-                glow::TRIANGLES,
-                draw.index_count as i32, 
-                glow::UNSIGNED_INT,
-                offset_bytes,
-                draw.inst_count as i32, 
-                draw.vertex_offset
-            )
-        }
-
-        Ok(())
+        OpenGLRenderer::draw_indexed_instanced(self, draw)
     }
-}
+
+    fn set_texture(
+        &mut self,
+        slot: u32,
+        texture: TextureHandle,
+    ) -> anyhow::Result<()> {
+        OpenGLRenderer::set_texture(self, slot, texture)
+    }
+
+    fn create_texture(
+        &mut self,
+        desc: TextureDesc,
+        data: Option<&[u8]>,
+    ) -> anyhow::Result<TextureHandle> {
+        OpenGLRenderer::create_texture(self, desc, data)
+    }
+
+    fn write_texture(
+        &mut self,
+        texture: TextureHandle,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        data: &[u8],
+    ) -> anyhow::Result<()> {
+        OpenGLRenderer::write_texture(self, texture, x, y, width, height, data)
+    }
+ }

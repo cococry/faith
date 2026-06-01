@@ -87,13 +87,26 @@ pub struct PipelineDesc<'a> {
     pub fragment_source: &'a str,
 
     pub vert_layouts: Vec<VertexBufferLayout>
-
 }
 
-use crate::graphics::{
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextureFormat{
+    Rgba8,
+    Alpha8,
+}
+
+
+#[derive(Debug, Clone, Copy)]
+pub struct TextureDesc {
+    pub width: u32,
+    pub height: u32,
+    pub format: TextureFormat,
+}
+
+pub use crate::graphics::{
     BufferHandle,
     Color,
-    PipelineHandle,
+    PipelineHandle, TextureHandle,
 };
 
 pub trait GraphicsDevice {
@@ -131,7 +144,35 @@ pub trait GraphicsDevice {
         y: f32,
     ) -> anyhow::Result<()>;
 
+    fn set_uniform_1i(
+    &mut self,
+    pipeline: PipelineHandle,
+    name: &str,
+    value: i32,
+) -> anyhow::Result<()>;
+
     fn draw_indexed(&mut self, draw: DrawIndexed) -> anyhow::Result<()>;
     
     fn draw_indexed_instanced(&mut self, draw: DrawIndexedInstanced) -> anyhow::Result<()>;
+
+    fn create_texture(
+        &mut self,
+        desc: TextureDesc,
+        data: Option<&[u8]>,
+    ) -> anyhow::Result<TextureHandle>;
+
+    fn write_texture(
+        &mut self,
+        texture: TextureHandle,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        data: &[u8]) -> anyhow::Result<()>;
+
+    fn set_texture(&mut self,
+        slot: u32,
+        texture: TextureHandle)
+        -> anyhow::Result<()>;
+
 }

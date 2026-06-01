@@ -3,7 +3,7 @@ mod graphics;
 mod cli;
 mod ui;
 
-use crate::graphics::GraphicsDevice;
+use crate::graphics::{GraphicsDevice, Image, ImageData, load_image};
 
 use clap::Parser;
 use cli::Cli;
@@ -38,7 +38,9 @@ fn main() -> anyhow::Result<()> {
 
     let mut ui = UIRenderer::new(&mut renderer, conf.width, conf.height)?;
 
-    let mut running = true; 
+    let mut running = true;
+
+    let image = load_image(&mut renderer, "assets/logo.png")?;
 
     while running {
         let events = platform.poll_events()?;
@@ -70,8 +72,22 @@ fn main() -> anyhow::Result<()> {
             let (width, height) = platform.size();
 
             ui.begin(width, height);
-            
-            ui.quad([20.0, 20.0, 200.0, 80.0], Color::rgba(1.0, 0.0, 0.0, 1.0))?;
+
+
+            ui.image(
+                20.0, 20.0,
+                Image {
+                    texture: image.texture,
+                    width: 64,
+                    height: 64,
+                }
+            )?;
+
+            ui.quad(
+                [104.0, 20.0, 64.0, 64.0],
+                Color::rgba(1.0, 0.0, 0.0, 1.0),
+            )?;
+
 
             ui.end(&mut renderer)?;
 

@@ -2,7 +2,7 @@ mod opengl;
 
 pub use opengl::OpenGLRenderer;
 
-use crate::graphics::{BufferTarget, device::VertexBufferLayout};
+use crate::graphics::{BufferTarget, TextureFormat, device::VertexBufferLayout};
 
 struct GlBuffer {
     raw: glow::NativeBuffer,
@@ -14,6 +14,7 @@ struct GlTexture {
     raw: glow::NativeTexture,
     width: u32,
     height: u32,
+    pub format: TextureFormat,
 }
 
 struct GlPipeline {

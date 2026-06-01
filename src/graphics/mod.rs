@@ -21,5 +21,12 @@ pub use device::{
     PipelineDesc,
     VertexStepMode,
     GraphicsDevice,
-    DrawIndexedInstanced,
+    TextureDesc,
+    TextureFormat,
 };
+
+pub mod image;
+
+pub use image::ImageData;
+pub use image::Image;
+pub use image::load_image;

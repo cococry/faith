@@ -2,14 +2,7 @@
 use crate::Color;
 
 use crate::graphics::{
-    BufferDesc,
-    BufferHandle,
-    BufferTarget,
-    BufferUsage,
-    GraphicsDevice,
-    PipelineDesc,
-    PipelineHandle,
-    VertexStepMode,
+    BufferDesc, BufferHandle, BufferTarget, BufferUsage, GraphicsDevice, Image, PipelineDesc, PipelineHandle, TextureDesc, TextureFormat, TextureHandle, VertexStepMode
 };
 
 use crate::graphics::device::{
@@ -27,9 +20,7 @@ use crate::ui::{
 };
 
 use crate::ui::quad::{
-    QuadBatch,
-    UI_QUAD_FRAGMENT_SHADER,
-    UI_QUAD_VERTEX_SHADER,
+    BatchKey, QuadBatch, UI_QUAD_FRAGMENT_SHADER, UI_QUAD_VERTEX_SHADER
 };
 
 pub struct UIRenderer {
@@ -46,6 +37,8 @@ pub struct UIRenderer {
     batches: Vec<QuadBatch>,
     max_instances: usize,
     batch_count: usize,
+
+    white_texture: TextureHandle
 }
 
 impl UIRenderer {
@@ -78,6 +71,17 @@ impl UIRenderer {
             usage: BufferUsage::Dynamic,
             size: MAX_INSTANCES_PER_FRAME * std::mem::size_of::<QuadInstance>()
         })?;
+
+        let white_pixel = [255u8, 255, 255, 255];
+
+        let white_texture = gpu.create_texture(
+            TextureDesc {
+                width: 1,
+                height: 1,
+                format: TextureFormat::Rgba8,
+            },
+            Some(&white_pixel),
+        )?;
 
         let pipeline = gpu.create_pipeline(PipelineDesc{
             vertex_source: UI_QUAD_VERTEX_SHADER,
@@ -137,6 +141,8 @@ impl UIRenderer {
             ]
         })?;
 
+        gpu.set_uniform_1i(pipeline, "u_texture", 0)?;
+
         Ok(Self { 
             screen_width: screen_width, 
             screen_height: screen_height,
@@ -148,6 +154,7 @@ impl UIRenderer {
             batches: Vec::with_capacity(256),
             max_instances: MAX_INSTANCES, 
             batch_count: 0,
+            white_texture
         })
     }
 
@@ -167,7 +174,7 @@ impl UIRenderer {
 
         let instance_bytes = bytemuck::cast_slice(&self.instances);
 
-        gpu.write_buffer(self.instance_vbo, 0, 0, instance_bytes)?;
+        gpu.write_buffer(self.instance_vbo, 1, 0, instance_bytes)?;
 
         gpu.set_pipeline(self.pipeline)?;
         gpu.set_uniform_2f(self.pipeline, "u_screen_size", 
@@ -177,17 +184,9 @@ impl UIRenderer {
         gpu.set_vertex_buffer(self.instance_vbo, 1)?;
         gpu.set_index_buffer(self.quad_ibo)?;
 
-        if self.batch_count != 0 {
-            let off = self.batches.len() as u32 * self.max_instances as u32; 
-
-            self.batches.push(
-                QuadBatch { 
-                    inst_start: off, 
-                    inst_count: self.batch_count as u32
-                });
-        }
-
         for batch in &self.batches {
+            gpu.set_texture(0, batch.key.texture)?;
+
             gpu.draw_indexed_instanced(DrawIndexedInstanced {
                 index_count: 6, 
                 index_offset: 0, 
@@ -199,25 +198,74 @@ impl UIRenderer {
 
         Ok(())
     }
-
-    pub fn quad(&mut self, rect: [f32; 4], color: Color) -> anyhow::Result<()> {
-        /*(if self.batch_count >= self.max_instances {
-          let off = self.batches.len() as u32 * self.max_instances as u32;
-          self.batches.push(
-          QuadBatch { 
-          inst_start: off, 
-          inst_count: self.max_instances as u32
-          });
-          self.batch_count = 0;
-          }*/
+    
+    pub fn textured_quad(
+        &mut self, 
+        rect: [f32; 4], 
+        texture: TextureHandle,
+        uv: [f32; 4],
+        color: Color,
+        ) -> anyhow::Result<()> {
         if self.instances.len() >= self.max_instances {
             anyhow::bail!("UI instance buffer overflow");
         }
-        self.instances.push(QuadInstance::colored(rect, color));
 
-        self.batch_count += 1;
+        let instance_start = self.instances.len() as u32;
+
+        let key = BatchKey { texture };
+
+        match self.batches.last_mut() {
+            Some(batch) if batch.key == key => {
+                batch.inst_count += 1;
+            }
+            _ => {
+                self.batches.push(QuadBatch{
+                    key,
+                    inst_start: instance_start,
+                    inst_count: 1
+                });
+            }
+        }
+        
+        self.instances.push(QuadInstance::textured(rect, uv, color));
 
         Ok(())
+    }
 
+    pub fn quad(&mut self, rect: [f32; 4], color: Color) -> anyhow::Result<()> {
+        self.textured_quad(
+            rect,
+            self.white_texture,
+            [0.0, 0.0, 1.0, 1.0],
+            color,
+        )
+    }
+
+    pub fn image(
+        &mut self,
+        x: f32,
+        y: f32,
+        image: Image
+    ) -> anyhow::Result<()> {
+        self.textured_quad(
+            [x, y, image.width as f32, image.height as f32],
+            image.texture,
+            [0.0, 0.0, 1.0, 1.0],
+            Color::rgba(1.0, 1.0, 1.0, 1.0),
+        )
+    }
+    pub fn image_tined(
+        &mut self,
+        x: f32,
+        y: f32,
+        image: Image,
+        color: Color
+    ) -> anyhow::Result<()> {
+        self.textured_quad(
+            [x, y, image.width as f32, image.height as f32],
+            image.texture,
+            [0.0, 0.0, 1.0, 1.0],
+            color
+        )
     }
 }
