@@ -42,8 +42,8 @@ fn main() -> anyhow::Result<()> {
 
     let mut running = true;
 
-    let font = text.load_font("assets/NotoColorEmoji.ttf", 32)?;
-    let font2 = text.load_font("assets/NotoSans-Regular.ttf", 32)?;
+    text.load_font("assets/NotoColorEmoji.ttf", 32)?;
+    let base_font= text.load_font("assets/NotoSans-Regular.ttf", 32)?;
 
     while running {
         let events = platform.poll_events()?;
@@ -77,12 +77,11 @@ fn main() -> anyhow::Result<()> {
             ui.begin(width, height);
 
 
-            text.render(20.0, 20.0, "hello", font2, &mut renderer, &mut ui)?;
             text.render(
     20.0,
     80.0,
-    "👨‍👩‍👧👨‍👩‍👦👨‍👩‍👧‍👦👨‍👩‍👦‍👦👨‍👩‍👧‍👧👩‍👩‍👧👩‍👩‍👦👩‍👩‍👧‍👦👩‍👩‍👦‍👦👩‍👩‍👧‍👧👨‍👨‍👧👨‍👨‍👦👨‍👨‍👧‍👦👨‍👨‍👦‍👦👨‍👨‍👧‍👧👩‍👧👩‍👦👩‍👧‍👦👩‍👦‍👦👩‍👧‍👧👨‍👧👨‍👦👨‍👧‍👦👨‍👦‍👦👨‍👧‍👧",
-    font,
+    "hello my name is 👨‍👩‍👧👨‍👩‍👦👨‍👩‍👧‍👦👨‍👩‍👦‍👦👨‍👩‍👧‍👧👩‍👩‍👧👩‍👩‍👦👩‍👩‍👧‍👦👩‍👩‍👦‍👦👩‍👩‍👧‍👧\n👨‍👨‍👧👨‍👨‍👦👨‍👨‍👧‍👦👨‍👨‍👦‍👦👨‍👨‍👧‍👧👩‍👧👩‍👦👩‍👧‍👦👩‍👦‍👦👩‍👧‍👧👨‍👧👨‍👦👨‍👧‍👦👨‍👦‍👦👨‍👧‍👧 and i like emojis",
+    base_font,
     &mut renderer,
     &mut ui,
 )?;
