@@ -804,4 +804,4 @@ impl GraphicsDevice for OpenGLRenderer {
     ) -> anyhow::Result<()> {
         OpenGLRenderer::write_texture(self, texture, x, y, width, height, data)
     }
- }
+}

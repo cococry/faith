@@ -50,17 +50,3 @@ impl ImageData {
         )
     }
 }
-
-pub fn load_image<G: GraphicsDevice>(
-    gpu: &mut G,
-    path: impl AsRef<std::path::Path>,
-) -> anyhow::Result<Image> {
-    let data = ImageData::load_rgba8(path)?;
-    let texture = data.upload(gpu)?;
-
-    Ok(Image {
-        texture,
-        width: data.width,
-        height: data.height,
-    })
-}

@@ -48,12 +48,13 @@ impl QuadInstance {
         rect: [f32; 4],
         uv: [f32; 4],
         tint: Color,
+        kind: f32 
     ) -> Self {
         Self {
             rect: rect, 
             color: [tint.r, tint.g, tint.b, tint.a],
             uv,
-            params: [0.0, 0.0, 0.0, 0.0],
+            params: [0.0, 0.0, 0.0, kind],
         }
     }
 
@@ -92,8 +93,15 @@ pub const QUAD_INDICES: [u32; 6] = [
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchKind {
+    Solid,
+    Textured,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BatchKey {
-    pub texture: TextureHandle
+    pub texture: Option<TextureHandle>,
+    pub kind: BatchKind
 }
 
 
@@ -158,7 +166,19 @@ uniform sampler2D u_texture;
 out vec4 out_color;
 
 void main() {
-    vec4 tex = texture(u_texture, v_uv);
-    out_color = tex * v_color;
+    float kind = v_params.w;
+
+    if(kind > 1.5) {
+        // text
+        vec4 tex_color = texture(u_texture, v_uv);
+        float alpha = tex_color.r;
+        out_color = vec4(v_color.rgb, v_color.a * alpha);
+    } else if(kind > 0.5) {
+        // image
+        vec4 tex_color = texture(u_texture, v_uv);
+        out_color = tex_color * v_color;
+    } else {
+        out_color = v_color;
+    }
 }
 "#;

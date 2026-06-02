@@ -11,6 +11,7 @@ pub use handles::{
     BufferHandle,
     TextureHandle,
     PipelineHandle,
+    FontHandle,
 };
 pub mod device;
 pub use device::{
@@ -29,4 +30,7 @@ pub mod image;
 
 pub use image::ImageData;
 pub use image::Image;
-pub use image::load_image;
+
+pub mod font;
+
+pub use font::FontManager;
