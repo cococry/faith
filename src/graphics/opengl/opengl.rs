@@ -5,8 +5,8 @@ use anyhow::Ok;
 use glow::HasContext;
 use khronos_egl::{Display, Surface, Context};
 
-use crate::graphics::device::{DrawIndexedInstanced, VertexFormat};
-use crate::graphics::opengl::{GlBuffer, GlPipeline, GlTexture};
+use crate::graphics::device::{DrawIndexedInstanced, TextureArrayDesc, TextureKind, VertexFormat};
+use crate::graphics::opengl::{GlBuffer, GlPipeline, GlTexture, GlTextureKind};
 use crate::platform::Platform;
 use crate::platform::window::WindowHandleInfo;
 use crate::graphics::{BufferDesc, BufferHandle, BufferTarget, BufferUsage, Color, DrawIndexed, GraphicsDevice, PipelineDesc, PipelineHandle, TextureDesc, TextureFormat, TextureHandle, VertexStepMode};
@@ -337,7 +337,13 @@ impl OpenGLRenderer {
 
             let handle = TextureHandle(self.textures.len() as u32);
 
-            self.textures.push(Some(GlTexture { raw, width: desc.width,  height: desc.height, format: desc.format }));
+            self.textures.push(Some(GlTexture { 
+                raw, 
+                width: desc.width,  
+                height: desc.height, 
+                format: desc.format,
+                kind: super::GlTextureKind::Texture2D
+            }));
 
             Ok(handle)
         }
@@ -391,9 +397,14 @@ impl OpenGLRenderer {
 
         let raw = tex.raw;
         unsafe {
-            self.gl.bind_texture(glow::TEXTURE_2D, Some(raw));
-            self.gl.generate_mipmap(glow::TEXTURE_2D);
-            self.gl.bind_texture(glow::TEXTURE_2D, None);
+            let ty = if tex.kind == GlTextureKind::Texture2DArray {
+                glow::TEXTURE_2D_ARRAY 
+            } else {
+                glow::TEXTURE_2D
+            };
+            self.gl.bind_texture(ty, Some(raw));
+            self.gl.generate_mipmap(ty);
+            self.gl.bind_texture(ty, None);
         }
         Ok(())
     }
@@ -406,11 +417,130 @@ impl OpenGLRenderer {
         let tex = self.get_texture(texture)?;
 
         unsafe {
+            let ty = if tex.kind == GlTextureKind::Texture2DArray {
+                glow::TEXTURE_2D_ARRAY 
+            } else {
+                glow::TEXTURE_2D
+            };
             self.gl.active_texture(glow::TEXTURE0 + slot);
-            self.gl.bind_texture(glow::TEXTURE_2D, Some(tex.raw));
+            self.gl.bind_texture(ty, Some(tex.raw));
         }
 
         Ok(())
+    }
+
+
+    pub fn create_texture_array(
+        &mut self,
+        desc: TextureArrayDesc,
+    ) -> anyhow::Result<TextureHandle> {
+        unsafe {
+            let raw = self.gl.create_texture()
+                .map_err(|e| anyhow::anyhow!("Failed to create OpenGL texture array: {e}"))?;
+
+            let (internal_format, format, gl_type) = self.gl_texture_format(desc.format);
+
+            self.gl.bind_texture(glow::TEXTURE_2D_ARRAY, Some(raw));
+
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D_ARRAY,
+                glow::TEXTURE_MIN_FILTER,
+                glow::LINEAR_MIPMAP_LINEAR as i32,
+            );
+
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D_ARRAY,
+                glow::TEXTURE_MAG_FILTER,
+                glow::LINEAR as i32,
+            );
+
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D_ARRAY,
+                glow::TEXTURE_WRAP_S,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D_ARRAY,
+                glow::TEXTURE_WRAP_T,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+
+            self.gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+
+            self.gl.tex_image_3d(
+                glow::TEXTURE_2D_ARRAY,
+                0,
+                internal_format as i32,
+                desc.width as i32,
+                desc.height as i32,
+                desc.layers as i32,
+                0,
+                format,
+                gl_type,
+                glow::PixelUnpackData::Slice(None),
+            );
+
+            self.gl.bind_texture(glow::TEXTURE_2D_ARRAY, None);
+
+            let handle = TextureHandle(self.textures.len() as u32);
+
+            self.textures.push(Some(GlTexture { 
+                raw, 
+                width: desc.width,  
+                height: desc.height, 
+                format: desc.format,
+                kind: super::GlTextureKind::Texture2DArray
+            }));
+
+            Ok(handle)
+        }
+
+    }
+
+    fn write_texture_array_layer(
+        &mut self,
+        texture: TextureHandle,
+        x: u32,
+        y: u32,
+        layer: u32,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+    ) -> anyhow::Result<()> {
+        let tex = self.get_texture(texture)?;
+
+        if x + width > tex.width || y + height > tex.height {
+            anyhow::bail!("texture write out of bounds");
+        }
+
+        let raw = tex.raw;
+
+        unsafe {
+            self.gl.bind_texture(glow::TEXTURE_2D_ARRAY, Some(raw));
+            self.gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+
+            let (_, external_format, ty) = self.gl_texture_format(tex.format);
+
+            self.gl.tex_sub_image_3d(
+                glow::TEXTURE_2D_ARRAY,
+                0,
+                x as i32,
+                y as i32,
+                layer as i32,
+                width as i32,
+                height as i32,
+                1,
+                external_format,
+                ty,
+                glow::PixelUnpackData::Slice(Some(pixels)),
+            );
+
+            self.gl.bind_texture(glow::TEXTURE_2D_ARRAY, None);
+        }
+
+        Ok(())
+
     }
 
     pub fn create_pipeline(&mut self, desc: PipelineDesc<'_>) -> anyhow::Result<PipelineHandle> {
@@ -693,6 +823,22 @@ impl OpenGLRenderer {
 
         Ok(())
     }
+
+    fn tex_kind_from_gl_kind(&self, kind: GlTextureKind) -> TextureKind {
+        match kind {
+            GlTextureKind::Texture2D => TextureKind::Texture2d, 
+            GlTextureKind::Texture2DArray => TextureKind::TextureArray2d, 
+        }
+    }
+
+    fn texture_get_kind(
+        &mut self,
+        texture: TextureHandle,
+    ) -> anyhow::Result<TextureKind> {
+
+        let tex = self.get_texture(texture)?;
+        Ok(self.tex_kind_from_gl_kind(tex.kind))
+    }
 }
 
 impl Drop for OpenGLRenderer {
@@ -826,4 +972,33 @@ impl GraphicsDevice for OpenGLRenderer {
     ) -> anyhow::Result<()> {
         OpenGLRenderer::texture_gen_mipmap(self, texture)
     }
+    fn create_texture_array(
+        &mut self,
+        desc: TextureArrayDesc,
+    ) -> anyhow::Result<TextureHandle> {
+        OpenGLRenderer::create_texture_array(self, desc)
+    }
+      fn write_texture_array_layer(
+        &mut self,
+        texture: TextureHandle,
+        x: u32,
+        y: u32,
+        layer: u32,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+    ) -> anyhow::Result<()> {
+        OpenGLRenderer::write_texture_array_layer(
+            self, texture,
+            x,y, layer, width, height,
+            pixels)
+      }
+      
+      fn texture_get_kind(
+          &mut self,
+          texture: TextureHandle,
+      ) -> anyhow::Result<TextureKind> {
+        OpenGLRenderer::texture_get_kind(
+            self, texture)
+      }
 }

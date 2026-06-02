@@ -1,14 +1,11 @@
 use crate::Color;
 
 use crate::graphics::{
-    BufferDesc, BufferHandle, BufferTarget, BufferUsage, GraphicsDevice, Image, ImageData, PipelineDesc, PipelineHandle, TextureHandle, VertexStepMode
+    BufferDesc, BufferHandle, BufferTarget, BufferUsage, GraphicsDevice, Image, ImageData, PipelineDesc, PipelineHandle, TextureFormat, TextureHandle, VertexStepMode
 };
 
 use crate::graphics::device::{
-    DrawIndexedInstanced,
-    VertexAttribute,
-    VertexBufferLayout,
-    VertexFormat,
+    DrawIndexedInstanced, TextureArrayDesc, TextureKind, VertexAttribute, VertexBufferLayout, VertexFormat
 };
 
 use crate::ui::{
@@ -21,6 +18,16 @@ use crate::ui::{
 use crate::ui::quad::{
     BatchKey, BatchKind, QuadBatch, UI_QUAD_FRAGMENT_SHADER, UI_QUAD_VERTEX_SHADER
 };
+
+
+pub struct ImageAtlasLayer {
+    width: u32,
+    height: u32,
+    layer: u32,
+    row_h: u32,
+    cursor_x: u32,
+    cursor_y: u32,
+}
 
 pub struct UIRenderer {
     screen_width: u32,
@@ -36,7 +43,14 @@ pub struct UIRenderer {
     batches: Vec<QuadBatch>,
     max_instances: usize,
     batch_count: usize,
+    
+    ui_texture_array: TextureHandle,
+    image_atlas_layers: Vec<ImageAtlasLayer>,
 }
+
+const UI_ATLAS_WIDTH: u32 = 2048;
+const UI_ATLAS_HEIGHT: u32 = 2048;
+const UI_ATLAS_LAYERS: u32 = 32;
 
 impl UIRenderer {
     pub fn new<G: GraphicsDevice>(
@@ -127,7 +141,15 @@ impl UIRenderer {
             ]
         })?;
 
-        gpu.set_uniform_1i(pipeline, "u_texture", 0)?;
+        gpu.set_uniform_1i(pipeline, "u_texture_array", 0)?;
+        gpu.set_uniform_1i(pipeline, "u_texture", 1)?;
+
+        let ui_texture_array = gpu.create_texture_array(TextureArrayDesc {
+            width: UI_ATLAS_WIDTH,
+            height: UI_ATLAS_HEIGHT,
+            layers: UI_ATLAS_LAYERS,
+            format: TextureFormat::Rgba8,
+        })?;
 
         Ok(Self { 
             screen_width: screen_width, 
@@ -140,6 +162,8 @@ impl UIRenderer {
             batches: Vec::with_capacity(256),
             max_instances: MAX_INSTANCES, 
             batch_count: 0,
+            ui_texture_array,
+            image_atlas_layers: Vec::new(),
         })
     }
 
@@ -171,7 +195,10 @@ impl UIRenderer {
 
         for batch in &self.batches {
             if let Some(texture) = batch.key.texture {
-                gpu.set_texture(0, texture)?;
+                let slot = if gpu.texture_get_kind(texture)? == TextureKind::TextureArray2d {
+                    0
+                } else { 1 };
+                gpu.set_texture(slot, texture)?;
             }
 
             gpu.draw_indexed_instanced(DrawIndexedInstanced {
@@ -194,7 +221,7 @@ impl UIRenderer {
         texture: TextureHandle,
         uv: [f32; 4],
         color: Color,
-        kind: f32
+        params: [f32; 4],
         ) -> anyhow::Result<()> {
         if self.instances.len() >= self.max_instances {
             anyhow::bail!("UI instance buffer overflow");
@@ -202,6 +229,7 @@ impl UIRenderer {
 
         let instance_start = self.instances.len() as u32;
 
+        let kind = params[3];
         let batch_key = match kind {
             0.0 => BatchKey {
                 kind: BatchKind::Solid,
@@ -235,7 +263,7 @@ impl UIRenderer {
         } 
 
 
-        self.instances.push(QuadInstance::textured(rect, uv, color, kind));
+        self.instances.push(QuadInstance::textured(rect, uv, color, params));
 
         Ok(())
     }
@@ -246,7 +274,7 @@ impl UIRenderer {
             TextureHandle(0),
             [0.0, 0.0, 1.0, 1.0],
             color,
-            0.0 
+            [0.0, 0.0, 0.0, 0.0] 
         )
     }
 
@@ -258,10 +286,10 @@ impl UIRenderer {
     ) -> anyhow::Result<()> {
         self.textured_quad(
             [x, y, image.width as f32, image.height as f32],
-            image.texture,
+            self.ui_texture_array,
             [0.0, 0.0, 1.0, 1.0],
             Color::rgba(1.0, 1.0, 1.0, 1.0),
-            1.0 
+            [0.0, 0.0, image.layer as f32, 3.0] 
         )
     }
 
@@ -275,29 +303,111 @@ impl UIRenderer {
     ) -> anyhow::Result<()> {
         self.textured_quad(
             [x, y, image.width as f32, image.height as f32],
-            image.texture,
+            self.ui_texture_array,
             [0.0, 0.0, 1.0, 1.0],
             color,
-            1.0 
+            [0.0, 0.0, image.layer as f32, 3.0] 
         )
     }
 
+    fn allocate_image_rect(
+    &mut self,
+    width: u32,
+    height: u32,
+    padding: u32,
+) -> anyhow::Result<(u32, u32, u32, u32, u32)> {
+    if width + padding > UI_ATLAS_WIDTH || height + padding > UI_ATLAS_HEIGHT {
+        anyhow::bail!("image is larger than UI atlas layer");
+    }
+
+    if self.image_atlas_layers.is_empty() {
+        self.create_new_image_layer()?;
+    }
+
+    let mut layer_idx = self.image_atlas_layers.len() - 1;
+
+    {
+        let layer = &mut self.image_atlas_layers[layer_idx];
+
+        if layer.cursor_x + width + padding > layer.width {
+            layer.cursor_x = 0;
+            layer.cursor_y += layer.row_h + padding;
+            layer.row_h = 0;
+        }
+
+        if layer.cursor_y + height + padding > layer.height {
+            self.create_new_image_layer()?;
+            layer_idx = self.image_atlas_layers.len() - 1;
+        }
+    }
+
+    let layer = &mut self.image_atlas_layers[layer_idx];
+
+    let x = layer.cursor_x;
+    let y = layer.cursor_y;
+    let layer_id = layer.layer;
+
+    layer.cursor_x += width + padding;
+    layer.row_h = layer.row_h.max(height);
+
+    Ok((layer_id, x, y, layer.width, layer.height))
+    }
+
+    fn create_new_image_layer(&mut self) -> anyhow::Result<u32> {
+        let layer = self.image_atlas_layers.len() as u32;
+
+        if layer >= UI_ATLAS_LAYERS {
+            anyhow::bail!("UI image atlas texture array is full");
+        }
+
+        self.image_atlas_layers.push(ImageAtlasLayer {
+            width: UI_ATLAS_WIDTH,
+            height: UI_ATLAS_HEIGHT,
+            layer,
+            row_h: 0,
+            cursor_x: 0,
+            cursor_y: 0,
+        });
+
+        Ok(layer)
+    }
+
     pub fn load_image<G: GraphicsDevice>(
-        &self,
+        &mut self,
         gpu: &mut G,
         path: impl AsRef<std::path::Path>,
     ) -> anyhow::Result<Image> {
         let data = ImageData::load_rgba8(path)?;
-        let texture = data.upload(gpu)?;
-        
-        gpu.texture_gen_mipmap(texture);
+
+        let (layer, x, y, atlas_w, atlas_h) =
+            self.allocate_image_rect(data.width, data.height, 1)?;
+
+        gpu.write_texture_array_layer(
+            self.ui_texture_array,
+            x,
+            y,
+            layer,
+            data.width,
+            data.height,
+            &data.pixels,
+        )?;
+
+        gpu.texture_gen_mipmap(self.ui_texture_array)?;
 
         Ok(Image {
-            texture,
+            layer,
             width: data.width,
             height: data.height,
+            uv_min: [
+                x as f32 / atlas_w as f32,
+                y as f32 / atlas_h as f32,
+            ],
+            uv_max: [
+                (x + data.width) as f32 / atlas_w as f32,
+                (y + data.height) as f32 / atlas_h as f32,
+            ],
         })
-
     }
+
 
 }

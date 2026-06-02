@@ -1,5 +1,5 @@
 
-use crate::graphics::device::DrawIndexedInstanced;
+use crate::graphics::device::{DrawIndexedInstanced, TextureArrayDesc, TextureKind};
 use crate::platform::Platform;
 use crate::graphics::{BufferDesc, BufferHandle, Color, DrawIndexed, GraphicsDevice, PipelineDesc, PipelineHandle, TextureDesc, TextureHandle};
 
@@ -112,6 +112,32 @@ impl GraphicsDevice for VulkanRenderer {
         _texture: TextureHandle,
     ) -> anyhow::Result<()> {
         anyhow::bail!("Vulkan texture_gen_mipmap not implemented yet")
+    }
+
+    fn create_texture_array(
+        &mut self,
+        _desc: TextureArrayDesc,
+    ) -> anyhow::Result<TextureHandle> {
+        anyhow::bail!("Vulkan create_texture_array not implemented yet")
+    }
+    
+    fn write_texture_array_layer(
+        &mut self,
+        _texture: TextureHandle,
+        _x: u32,
+        _y: u32,
+        _layer: u32,
+        _width: u32,
+        _height: u32,
+        _pixels: &[u8],
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("Vulkan write_texture_array_layer not implemented yet")
+    }
+    fn texture_get_kind(
+        &mut self,
+        _texture: TextureHandle,
+    ) -> anyhow::Result<TextureKind> {
+        anyhow::bail!("Vulkan texture_get_kind not implemented yet")
     }
 
 }

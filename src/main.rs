@@ -38,12 +38,14 @@ fn main() -> anyhow::Result<()> {
 
     let mut ui = UIRenderer::new(&mut renderer, conf.width, conf.height)?;
     
-    let mut text = TextRenderer::new()?; 
+    let mut text = TextRenderer::new(&mut renderer)?; 
 
     let mut running = true;
 
     text.load_font("assets/NotoColorEmoji.ttf", 32)?;
     let base_font= text.load_font("assets/NotoSans-Regular.ttf", 32)?;
+
+    let img = ui.load_image(&mut renderer, "assets/logo.png")?;
 
     while running {
         let events = platform.poll_events()?;
@@ -76,15 +78,16 @@ fn main() -> anyhow::Result<()> {
 
             ui.begin(width, height);
 
+            ui.image(20.0, 200.0, img)?;
 
             text.render(
-    20.0,
-    80.0,
-    "hello my name is 👨‍👩‍👧👨‍👩‍👦👨‍👩‍👧‍👦👨‍👩‍👦‍👦👨‍👩‍👧‍👧👩‍👩‍👧👩‍👩‍👦👩‍👩‍👧‍👦👩‍👩‍👦‍👦👩‍👩‍👧‍👧\n👨‍👨‍👧👨‍👨‍👦👨‍👨‍👧‍👦👨‍👨‍👦‍👦👨‍👨‍👧‍👧👩‍👧👩‍👦👩‍👧‍👦👩‍👦‍👦👩‍👧‍👧👨‍👧👨‍👦👨‍👧‍👦👨‍👦‍👦👨‍👧‍👧 and i like emojis",
-    base_font,
-    &mut renderer,
-    &mut ui,
-)?;
+                20.0,
+                20.0,
+                "hello my name is 👨‍👩‍👧👨‍👩‍👦👨‍👩‍👧‍👦👨‍👩‍👦‍👦👨‍👩‍👧‍👧👩‍👩‍👧👩‍👩‍👦👩‍👩‍👧‍👦👩‍👩‍👦‍👦👩‍👩‍👧‍👧\n👨‍👨‍👧👨‍👨‍👦👨‍👨‍👧‍👦👨‍👨‍👦‍👦👨‍👨‍👧‍👧👩‍👧👩‍👦👩‍👧‍👦👩‍👦‍👦👩‍👧‍👧👨‍👧👨‍👦👨‍👧‍👦👨‍👦‍👦👨‍👧‍👧 and i like emojis",
+                base_font,
+                &mut renderer,
+                &mut ui,
+            )?;
 
             ui.end(&mut renderer)?;
 

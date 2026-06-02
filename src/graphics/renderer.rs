@@ -13,7 +13,7 @@ use crate::graphics::{
     TextureHandle,
 };
 
-use crate::graphics::device::DrawIndexedInstanced;
+use crate::graphics::device::{DrawIndexedInstanced, TextureArrayDesc, TextureKind};
 use crate::graphics::opengl::OpenGLRenderer;
 use crate::graphics::vulkan::VulkanRenderer;
 use crate::platform::Platform;
@@ -184,4 +184,35 @@ impl GraphicsDevice for Renderer {
     ) -> anyhow::Result<()> {
         self.device_mut().texture_gen_mipmap(texture)
     }
+    fn create_texture_array(
+        &mut self,
+        desc: TextureArrayDesc,
+    ) -> anyhow::Result<TextureHandle> {
+        self.device_mut().create_texture_array(desc)
+    }
+
+    fn write_texture_array_layer(
+        &mut self,
+        texture: TextureHandle,
+        x: u32,
+        y: u32,
+        layer: u32,
+        width: u32,
+        height: u32,
+        pixels_rgba: &[u8],
+    ) -> anyhow::Result<()> {
+        self.device_mut().write_texture_array_layer(
+            texture, x, y, layer, 
+            width, height, pixels_rgba
+        )
+    }
+
+    fn texture_get_kind(
+        &mut self,
+        texture: TextureHandle,
+    ) -> anyhow::Result<TextureKind> {
+        self.device_mut().texture_get_kind(texture)
+    }
+
+
 }

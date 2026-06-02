@@ -10,11 +10,18 @@ struct GlBuffer {
     size: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GlTextureKind {
+    Texture2D,
+    Texture2DArray,
+}
+
 struct GlTexture {
     raw: glow::NativeTexture,
     width: u32,
     height: u32,
     pub format: TextureFormat,
+    kind: GlTextureKind
 }
 
 struct GlPipeline {

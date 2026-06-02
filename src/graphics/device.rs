@@ -89,6 +89,19 @@ pub struct PipelineDesc<'a> {
     pub vert_layouts: Vec<VertexBufferLayout>
 }
 
+pub struct TextureArrayDesc {
+    pub width: u32,
+    pub height: u32,
+    pub layers: u32,
+    pub format: TextureFormat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextureKind {
+    Texture2d,
+    TextureArray2d,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextureFormat{
     Rgba8,
@@ -179,4 +192,25 @@ pub trait GraphicsDevice {
         &mut self, 
         texture: TextureHandle,
     ) -> anyhow::Result<()>;
+
+    fn create_texture_array(
+        &mut self,
+        desc: TextureArrayDesc,
+    ) -> anyhow::Result<TextureHandle>;
+
+    fn write_texture_array_layer(
+        &mut self,
+        texture: TextureHandle,
+        x: u32,
+        y: u32,
+        layer: u32,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+    ) -> anyhow::Result<()>;
+
+    fn texture_get_kind(
+        &mut self,
+        texture: TextureHandle,
+    ) -> anyhow::Result<TextureKind>;
 }

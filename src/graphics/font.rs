@@ -90,6 +90,16 @@ impl FontManager {
         }
         dst
     } 
+    
+    fn alpha_to_rgba(&self, src_alpha: &[u8]) -> Vec<u8> {
+        let mut dst = Vec::with_capacity(src_alpha.len());
+
+        for &a in src_alpha {
+            dst.extend_from_slice(&[255, 255, 255, a]);
+        }
+        dst
+    } 
+
     fn rasterize_glyph(
         &mut self, 
         font_handle: FontHandle,
@@ -114,6 +124,7 @@ impl FontManager {
 
         let pixels_rgba = match bitmap.pixel_mode()? {
             bitmap::PixelMode::Bgra => self.bgra_to_rgba(bitmap.buffer()),
+            bitmap::PixelMode::Gray =>  self.alpha_to_rgba(bitmap.buffer()),
             _ => bitmap.buffer().to_vec()
         };
 

@@ -48,13 +48,13 @@ impl QuadInstance {
         rect: [f32; 4],
         uv: [f32; 4],
         tint: Color,
-        kind: f32 
+        params: [f32; 4],
     ) -> Self {
         Self {
             rect: rect, 
             color: [tint.r, tint.g, tint.b, tint.a],
             uv,
-            params: [0.0, 0.0, 0.0, kind],
+            params, 
         }
     }
 
@@ -130,6 +130,7 @@ out vec2 v_uv;
 out vec4 v_color;
 out vec4 v_rect;
 out vec4 v_params;
+flat out int v_layer;
 
 void main() {
     vec2 pixel_pos = i_rect.xy + a_local_pos * i_rect.zw;
@@ -147,6 +148,8 @@ void main() {
     v_color = i_color;
     v_rect = i_rect;
     v_params = i_params;
+    
+    v_layer = int(i_params.z + 0.5);
 
     gl_Position = vec4(ndc, 0.0, 1.0);
 }
@@ -161,22 +164,29 @@ in vec4 v_color;
 in vec4 v_rect;
 in vec4 v_params;
 
-uniform sampler2D u_texture;
+uniform sampler2DArray u_glpyh_texture_array;
+uniform sampler2DArray u_ui_texture_array;
+
+flat in int v_layer;
 
 out vec4 out_color;
 
 void main() {
     float kind = v_params.w;
 
-    if(kind > 1.5) {
-        // text
-        vec4 tex_color = texture(u_texture, v_uv);
-        float alpha = tex_color.r;
-        out_color = vec4(v_color.rgb, v_color.a * alpha);
-    } else if(kind > 0.5) {
+    if (kind > 2.5) {
         // image
-        vec4 tex_color = texture(u_texture, v_uv);
-        out_color = tex_color; 
+        vec4 tex_color = texture(u_ui_texture_array, vec3(v_uv, float(v_layer)));
+        out_color = tex_color * v_color;
+    } else if (kind > 1.5) {
+        // text glyph 
+        vec4 tex_color = texture(u_glpyh_texture_array, vec3(v_uv, float(v_layer)));
+        float alpha = tex_color.a;
+        out_color = vec4(v_color.rgb, v_color.a * alpha);
+    } else if (kind > 0.5) {
+        // color emoji
+        vec4 tex_color = texture(u_glpyh_texture_array, vec3(v_uv, float(v_layer)));
+        out_color = tex_color * v_color;
     } else {
         out_color = v_color;
     }
