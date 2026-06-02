@@ -1,14 +1,21 @@
-use std::{cmp::max, collections::HashMap};
+use std::{cmp::max, collections::HashMap, num::NonZeroUsize};
 
 use anyhow::Ok;
+use lru::LruCache;
 
-use crate::{graphics::{FontHandle, FontManager, GraphicsDevice, TextureDesc, TextureFormat, TextureHandle, font::{Glyph, GlyphKey}}, ui::UIRenderer};
+use crate::{graphics::{FontHandle, FontManager, GraphicsDevice, TextureDesc, TextureFormat, TextureHandle, font::{Glyph, GlyphKey, ShapedGlyph}}, ui::UIRenderer};
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ShapedTextKey {
+    font_handle: FontHandle,
+    text: String,
+}
 
 pub struct TextRenderer {
     glyph_atlases: Vec<GlyphAtlas>,
     glyph_locations: HashMap<GlyphKey, AtlasGlyph>,
-    font_manager: FontManager
+    font_manager: FontManager,
+    shaped_cache: LruCache<ShapedTextKey, Vec<ShapedGlyph>>,
 }
 
 pub struct GlyphAtlas {
@@ -37,10 +44,28 @@ impl TextRenderer {
         Ok(Self {
             glyph_atlases: Vec::new(),
             glyph_locations: HashMap::new(),
-            font_manager
+            font_manager,
+            shaped_cache: LruCache::new(NonZeroUsize::new(4096).unwrap()),
         })
 
     }
+
+    fn shape_cached(&mut self, font_handle: FontHandle, text: &str) ->
+        anyhow::Result<Vec<ShapedGlyph>> {
+            let key = ShapedTextKey {
+                font_handle,
+                text: text.to_owned()
+            };
+
+            if let Some(shaped) = self.shaped_cache.get(&key) {
+                return Ok(shaped.clone());
+            }
+
+            let shaped = self.font_manager.shape_text(font_handle, text)?;
+            self.shaped_cache.put(key, shaped.clone());
+
+            Ok(shaped)
+        }
 
     fn upload_pixels_to_atlas<G: GraphicsDevice>(&self, 
         atlas_id: usize, 
@@ -140,73 +165,74 @@ impl TextRenderer {
         gpu: &mut G,
         ui: &mut UIRenderer,
     ) -> anyhow::Result<()> {
-        let start_x = x;
-        let mut cursor_x = x;
 
         // y is top of the text box.
         let mut baseline_y = y + self.font_manager.ascender(font_handle)? as f32;
         let line_height = self.font_manager.line_height(font_handle)? as f32;
 
-        for ch in text.chars() {
-            if ch == '\n' {
-                cursor_x = start_x;
-                baseline_y += line_height;
-                continue;
-            }
+        for line in text.split('\n') {
+            let shaped_glyphs = self.shape_cached(font_handle, line)?;
 
-            let Some(glyph_idx) = self.font_manager.glyph_idx_for_char(font_handle, ch)? else {
-                continue;
-            };
+            let mut cursor_x = x;
 
-            let key = GlyphKey {
-                font_handle,
-                glyph_idx,
-            };
-
-            if !self.glyph_locations.contains_key(&key) {
-                let glyph = {
-                    let glyph_ref = self.font_manager.get_or_load_glyph(font_handle, glyph_idx)?;
-                    glyph_ref.clone()
+            for shaped in shaped_glyphs {
+                let key = GlyphKey {
+                    font_handle,
+                    glyph_idx: shaped.glyph_idx,
                 };
+                if !self.glyph_locations.contains_key(&key) {
+                    let glyph = {
+                        let glyph_ref = self.font_manager.get_or_load_glyph(font_handle, shaped.glyph_idx)?;
+                        glyph_ref.clone()
+                    };
 
-                self.upload_glyph(key, glyph, gpu)?;
+                    self.upload_glyph(key, glyph, gpu)?;
+                }
+
+                let atlas_glyph = &self.glyph_locations[&key];
+
+                let size = atlas_glyph.size;
+                let uv_min = atlas_glyph.uv_min;
+                let uv_max = atlas_glyph.uv_max;
+                let atlas_id = atlas_glyph.atlas_id;
+
+                let texture = self.glyph_atlases[atlas_id as usize].texture;
+
+                let render_x =
+                    cursor_x
+                    + shaped.x_off
+                    + atlas_glyph.bearing[0] as f32;
+
+                let render_y =
+                    baseline_y
+                    - shaped.y_off
+                    - atlas_glyph.bearing[1] as f32;
+
+                ui.textured_quad(
+                    [
+                    render_x,
+                    render_y,
+                    size[0] as f32,
+                    size[1] as f32,
+                    ],
+                    texture,
+                    [
+                    uv_min[0],
+                    uv_min[1],
+                    uv_max[0],
+                    uv_max[1],
+                    ],
+                    crate::graphics::Color::rgba(0.0, 0.0, 0.0, 1.0),
+                    2.0,
+                )?;
+
+                cursor_x += shaped.x_adv;
+                baseline_y += shaped.y_adv;
+
             }
-
-            let atlas_glyph = &self.glyph_locations[&key];
-
-            let size = atlas_glyph.size;
-            let bearing = atlas_glyph.bearing;
-            let advance_x = atlas_glyph.advance_x;
-            let uv_min = atlas_glyph.uv_min;
-            let uv_max = atlas_glyph.uv_max;
-            let atlas_id = atlas_glyph.atlas_id;
-
-            let render_x = cursor_x + bearing[0] as f32;
-            let render_y = baseline_y - bearing[1] as f32;
-
-            let texture = self.glyph_atlases[atlas_id as usize].texture;
-
-            ui.textured_quad(
-                [
-                render_x,
-                render_y,
-                size[0] as f32,
-                size[1] as f32,
-                ],
-                texture,
-                [
-                uv_min[0],
-                uv_min[1],
-                uv_max[0],
-                uv_max[1],
-                ],
-                crate::graphics::Color::rgba(0.0, 0.0, 0.0, 1.0),
-                2.0,
-            )?;
-
-            cursor_x += (advance_x >> 6) as f32;
+            baseline_y += line_height;
         }
-
+     
         Ok(())
     }
 

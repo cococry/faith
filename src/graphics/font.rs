@@ -3,6 +3,8 @@ use std::{collections::HashMap, path::{Path, PathBuf}};
 
 use crate::graphics::FontHandle;
 
+use harfbuzz_rs::{shape, UnicodeBuffer};
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GlyphKey {
@@ -27,10 +29,21 @@ pub struct Glyph {
     pub pixels: Vec<u8>
 }
 
+#[derive(Debug, Clone)]
+pub struct ShapedGlyph {
+    pub glyph_idx: u32,
+    pub cluster: u32,
+    pub x_adv: f32,
+    pub y_adv: f32,
+    pub x_off: f32,
+    pub y_off: f32,
+}
+
 pub struct Font {
-    size: u32,
-    path: PathBuf,
-    face: ft::Face,
+    pub size: u32,
+    pub path: PathBuf,
+    pub face: ft::Face,
+    pub hb_font: harfbuzz_rs::Owned<harfbuzz_rs::Font<'static>>,
 }
 
 impl FontManager {
@@ -111,8 +124,13 @@ impl FontManager {
         let face = self.lib_handle.new_face(path, face_idx)?;
         face.set_pixel_sizes(0, size)?;
 
+        let hb_face = harfbuzz_rs::Face::from_file(path, face_idx as u32)?;
+        let mut hb_font = harfbuzz_rs::Font::new(hb_face);
+
+        hb_font.set_scale((size as i32) * 64, (size as i32) * 64);
+
         let handle = FontHandle(self.fonts.len() as u32);
-        self.fonts.push(Font { size, path: path.to_path_buf(), face });
+        self.fonts.push(Font { size, path: path.to_path_buf(), face, hb_font});
 
         Ok(handle)
     }
@@ -132,6 +150,31 @@ impl FontManager {
     pub fn line_height(&self, font_handle: FontHandle) -> anyhow::Result<i32>  {
         let font = self.get_font(font_handle)?;
         Ok(font.face.size_metrics().unwrap().height as i32 >> 6)
+    }
+
+    pub fn shape_text(&self, font_handle: FontHandle, text: &str) -> anyhow::Result<Vec<ShapedGlyph>> {
+        let font = self.get_font(font_handle)?;
+
+        let buffer = UnicodeBuffer::new().add_str(text);
+
+        let output = shape(&font.hb_font, buffer, &[]);
+
+        let infos = output.get_glyph_infos();
+        let positions = output.get_glyph_positions();
+
+        let shaped = infos.iter().zip(positions.iter())
+            .map(|(info, pos)| ShapedGlyph {
+                glyph_idx: info.codepoint,
+                cluster: info.cluster,
+
+                // convert from fixed point vals
+                x_adv: pos.x_advance as f32 / 64.0,
+                y_adv: pos.y_advance as f32 / 64.0,
+                x_off: pos.x_offset as f32 / 64.0,
+                y_off: pos.y_offset as f32 / 64.0,
+            }).collect();
+
+        Ok(shaped)
     }
 
 }

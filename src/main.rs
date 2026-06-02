@@ -42,9 +42,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut running = true;
 
-    let image = ui.load_image(&mut renderer, "assets/logo.png")?;
-    let font = text.load_font("assets/Inter-Regular.ttf", 28)?;
-
+    let font = text.load_font("assets/JetBrainsMonoNerdFont-Regular.ttf", 32)?;
 
     while running {
         let events = platform.poll_events()?;
@@ -78,7 +76,7 @@ fn main() -> anyhow::Result<()> {
             ui.begin(width, height);
 
 
-            text.render(104.0 + 64.0 + 20.0, 20.0, "Hello", font, &mut renderer, &mut ui)?;
+            text.render(104.0 + 64.0 + 20.0, 20.0, "== != <= >= -> => ffi fi fl office", font, &mut renderer, &mut ui)?;
             
             ui.quad(
                 [104.0, 20.0, 64.0, 64.0],

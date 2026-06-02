@@ -18,6 +18,12 @@ x11rb = { version = "0.13", features = ["allow-unsafe-code"] }
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-bytemuck = {version = "1.25.0", features = ["derive"] }
+bytemuck = { version = "1.25.0", features = ["derive"] }
 image = "0.25.10"
 freetype-rs = "0.38.0"
+harfbuzz_rs = {
+    version = "2.0.1",
+    default-features = false,
+    features = ["build-native-harfbuzz"]
+}
+lru = "0.18.0"
