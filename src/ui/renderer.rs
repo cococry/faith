@@ -69,9 +69,6 @@ impl UIRenderer {
             size: MAX_INSTANCES_PER_FRAME * std::mem::size_of::<QuadInstance>()
         })?;
 
-        let white_pixel = [255u8, 255, 255, 255];
-
-
         let pipeline = gpu.create_pipeline(PipelineDesc{
             vertex_source: UI_QUAD_VERTEX_SHADER,
             fragment_source: UI_QUAD_FRAGMENT_SHADER,
@@ -292,12 +289,15 @@ impl UIRenderer {
     ) -> anyhow::Result<Image> {
         let data = ImageData::load_rgba8(path)?;
         let texture = data.upload(gpu)?;
+        
+        gpu.texture_gen_mipmap(texture);
 
         Ok(Image {
             texture,
             width: data.width,
             height: data.height,
         })
+
     }
 
 }

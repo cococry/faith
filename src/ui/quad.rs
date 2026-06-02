@@ -176,7 +176,7 @@ void main() {
     } else if(kind > 0.5) {
         // image
         vec4 tex_color = texture(u_texture, v_uv);
-        out_color = tex_color * v_color;
+        out_color = tex_color; 
     } else {
         out_color = v_color;
     }

@@ -177,4 +177,11 @@ impl GraphicsDevice for Renderer {
     ) -> anyhow::Result<()> {
         self.device_mut().draw_indexed_instanced(draw)
     }
+
+    fn texture_gen_mipmap(
+        &mut self, 
+        texture: TextureHandle,
+    ) -> anyhow::Result<()> {
+        self.device_mut().texture_gen_mipmap(texture)
+    }
 }

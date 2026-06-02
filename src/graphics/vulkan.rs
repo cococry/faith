@@ -107,4 +107,11 @@ impl GraphicsDevice for VulkanRenderer {
         anyhow::bail!("Vulkan set_uniform_1i not implemented yet")
     }
 
+    fn texture_gen_mipmap(
+        &mut self, 
+        _texture: TextureHandle,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("Vulkan texture_gen_mipmap not implemented yet")
+    }
+
 }

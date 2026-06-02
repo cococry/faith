@@ -298,7 +298,7 @@ impl OpenGLRenderer {
             self.gl.tex_parameter_i32(
                 glow::TEXTURE_2D,
                 glow::TEXTURE_MIN_FILTER,
-                glow::LINEAR as i32,
+                glow::LINEAR_MIPMAP_LINEAR as i32,
             );
 
             self.gl.tex_parameter_i32(
@@ -380,6 +380,21 @@ impl OpenGLRenderer {
             );
         }
 
+        Ok(())
+    }
+
+    pub fn texture_gen_mipmap(
+        &mut self, 
+        texture: TextureHandle,
+    ) -> anyhow::Result<()> {
+        let tex = self.get_texture(texture)?;
+
+        let raw = tex.raw;
+        unsafe {
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(raw));
+            self.gl.generate_mipmap(glow::TEXTURE_2D);
+            self.gl.bind_texture(glow::TEXTURE_2D, None);
+        }
         Ok(())
     }
 
@@ -803,5 +818,12 @@ impl GraphicsDevice for OpenGLRenderer {
         data: &[u8],
     ) -> anyhow::Result<()> {
         OpenGLRenderer::write_texture(self, texture, x, y, width, height, data)
+    }
+
+    fn texture_gen_mipmap(
+        &mut self, 
+        texture: TextureHandle,
+    ) -> anyhow::Result<()> {
+        OpenGLRenderer::texture_gen_mipmap(self, texture)
     }
 }

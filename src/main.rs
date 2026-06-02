@@ -42,7 +42,8 @@ fn main() -> anyhow::Result<()> {
 
     let mut running = true;
 
-    let font = text.load_font("assets/JetBrainsMonoNerdFont-Regular.ttf", 32)?;
+    let font = text.load_font("assets/NotoColorEmoji.ttf", 32)?;
+    let font2 = text.load_font("assets/NotoSans-Regular.ttf", 32)?;
 
     while running {
         let events = platform.poll_events()?;
@@ -76,12 +77,8 @@ fn main() -> anyhow::Result<()> {
             ui.begin(width, height);
 
 
-            text.render(104.0 + 64.0 + 20.0, 20.0, "== != <= >= -> => ffi fi fl office", font, &mut renderer, &mut ui)?;
-            
-            ui.quad(
-                [104.0, 20.0, 64.0, 64.0],
-                Color::rgba(1.0, 0.0, 0.0, 1.0),
-            )?;
+            text.render(20.0, 20.0, "hello", font2, &mut renderer, &mut ui)?;
+            text.render(104.0 + 64.0 + 20.0, 20.0, "🙂", font, &mut renderer, &mut ui)?;
 
             ui.end(&mut renderer)?;
 

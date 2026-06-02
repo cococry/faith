@@ -18,6 +18,12 @@ pub struct TextRenderer {
     shaped_cache: LruCache<ShapedTextKey, Vec<ShapedGlyph>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum GlyphAtlasKind {
+    Alpha,
+    Color,
+}
+
 pub struct GlyphAtlas {
     width: u32,
     height: u32,
@@ -25,6 +31,7 @@ pub struct GlyphAtlas {
     row_h: u32,
     cursor_x: u32,
     cursor_y: u32,
+    kind: GlyphAtlasKind
 }
 
 pub struct AtlasGlyph {
@@ -79,13 +86,23 @@ impl TextRenderer {
         gpu.write_texture(texture_handle, x, y, width, height, pixels)
     }
 
-    fn upload_glyph<G: GraphicsDevice>(&mut self, key: GlyphKey, glyph: Glyph, gpu: &mut G) -> anyhow::Result<()> {
+    fn latest_atlas_id_of_kind(&self, kind: &GlyphAtlasKind) -> Option<usize> {
+        self.glyph_atlases
+            .iter()
+            .rposition(|atlas| atlas.kind == *kind)
+    }
+    fn upload_glyph<G: GraphicsDevice>(&mut self, key: GlyphKey, glyph: Glyph, gpu: &mut G, colored: bool) -> anyhow::Result<()> {
         let padding = 1;
+        let atlas_kind = if colored { GlyphAtlasKind::Color } else { GlyphAtlasKind::Alpha };
 
-        if self.glyph_atlases.is_empty() {
-            self.create_new_atlas(gpu)?;
+        if !self.latest_atlas_id_of_kind(&atlas_kind).is_some() {
+            self.create_new_atlas(gpu, atlas_kind.clone())?;
         }
-        let mut atlas_id = self.glyph_atlases.len() - 1;
+
+        let mut atlas_id = self.latest_atlas_id_of_kind(&atlas_kind).expect(
+            "Atlas should exist after creation"
+        );
+
         {
             let atlas = &mut self.glyph_atlases[atlas_id]; 
 
@@ -100,7 +117,8 @@ impl TextRenderer {
             }
 
             if atlas.cursor_y + glyph.height + padding > atlas.height {
-                self.create_new_atlas(gpu)?;
+                let atlas_kind = if colored { GlyphAtlasKind::Color } else { GlyphAtlasKind::Alpha };
+                self.create_new_atlas(gpu, atlas_kind)?;
                 atlas_id = self.glyph_atlases.len() - 1;
             }
 
@@ -122,7 +140,6 @@ impl TextRenderer {
             &glyph.pixels,
             gpu
         )?;
-
 
         self.glyph_locations.insert(key, AtlasGlyph{
             size: [glyph.width, glyph.height],
@@ -167,8 +184,11 @@ impl TextRenderer {
     ) -> anyhow::Result<()> {
 
         // y is top of the text box.
-        let mut baseline_y = y + self.font_manager.ascender(font_handle)? as f32;
-        let line_height = self.font_manager.line_height(font_handle)? as f32;
+        let scale = self.font_manager.scale(font_handle)?;
+        let mut baseline_y = y + self.font_manager.ascender(font_handle)? as f32 * scale;
+        let line_height = self.font_manager.line_height(font_handle)? as f32 * scale;
+
+        let mut seen_atlases: HashMap<u32, TextureHandle> = HashMap::with_capacity(self.glyph_atlases.len());
 
         for line in text.split('\n') {
             let shaped_glyphs = self.shape_cached(font_handle, line)?;
@@ -180,40 +200,54 @@ impl TextRenderer {
                     font_handle,
                     glyph_idx: shaped.glyph_idx,
                 };
+                let mut have_uploaded_glyph = false;
                 if !self.glyph_locations.contains_key(&key) {
                     let glyph = {
                         let glyph_ref = self.font_manager.get_or_load_glyph(font_handle, shaped.glyph_idx)?;
                         glyph_ref.clone()
                     };
 
-                    self.upload_glyph(key, glyph, gpu)?;
+                    let is_colored = self.font_manager.is_colored(font_handle)?;
+                    self.upload_glyph(key, glyph, gpu, is_colored)?;
+
+                    have_uploaded_glyph = true;
                 }
 
                 let atlas_glyph = &self.glyph_locations[&key];
 
-                let size = atlas_glyph.size;
                 let uv_min = atlas_glyph.uv_min;
                 let uv_max = atlas_glyph.uv_max;
-                let atlas_id = atlas_glyph.atlas_id;
 
+                let atlas_id = atlas_glyph.atlas_id;
                 let texture = self.glyph_atlases[atlas_id as usize].texture;
 
+                if have_uploaded_glyph && !seen_atlases.contains_key(&atlas_id) {
+                    seen_atlases.insert(atlas_id, texture);
+                }
+
+                let font_scale = self.font_manager.scale(font_handle)?;
                 let render_x =
                     cursor_x
                     + shaped.x_off
-                    + atlas_glyph.bearing[0] as f32;
+                    + atlas_glyph.bearing[0] as f32 * font_scale;
 
                 let render_y =
                     baseline_y
                     - shaped.y_off
-                    - atlas_glyph.bearing[1] as f32;
+                    - atlas_glyph.bearing[1] as f32 * font_scale;
+
+                // emojis are handled as if they were images
+                let kind = if self.font_manager.is_colored(font_handle)? { 1.0 } else { 2.0 };
+
+                let w = atlas_glyph.size[0] as f32 * font_scale;
+                let h = atlas_glyph.size[1] as f32 * font_scale;
 
                 ui.textured_quad(
                     [
                     render_x,
                     render_y,
-                    size[0] as f32,
-                    size[1] as f32,
+                    w,
+                    h
                     ],
                     texture,
                     [
@@ -223,7 +257,7 @@ impl TextRenderer {
                     uv_max[1],
                     ],
                     crate::graphics::Color::rgba(0.0, 0.0, 0.0, 1.0),
-                    2.0,
+                    kind
                 )?;
 
                 cursor_x += shaped.x_adv;
@@ -232,20 +266,30 @@ impl TextRenderer {
             }
             baseline_y += line_height;
         }
+
+        for (_, atlas) in seen_atlases {
+            gpu.texture_gen_mipmap(atlas);
+        }
      
         Ok(())
     }
 
-    fn create_new_atlas<G: GraphicsDevice>(&mut self, gpu: &mut G) -> anyhow::Result<()> {
+    fn create_new_atlas<G: GraphicsDevice>(&mut self, gpu: &mut G, kind: GlyphAtlasKind) -> anyhow::Result<()> {
         const ATLAS_WIDTH: u32  = 1024; 
         const ATLAS_HEIGHT: u32 = 1024; 
+        let format = if kind == GlyphAtlasKind::Alpha {
+            TextureFormat::Alpha8
+        } else {
+            TextureFormat::Rgba8
+        };
+        let empty = vec![0u8; (ATLAS_WIDTH * ATLAS_HEIGHT * 4) as usize];
         let handle = gpu.create_texture(
             TextureDesc { 
                 width: ATLAS_WIDTH, 
                 height: ATLAS_HEIGHT, 
-                format: TextureFormat::Alpha8
+                format 
             },
-            None)?;
+            Some(&empty))?;
 
         self.glyph_atlases.push(
             GlyphAtlas { 
@@ -254,7 +298,8 @@ impl TextRenderer {
                 texture: handle, 
                 row_h: 0, 
                 cursor_x: 0, 
-                cursor_y: 0 
+                cursor_y: 0,
+                kind 
             });
 
         Ok(())

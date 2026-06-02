@@ -175,4 +175,8 @@ pub trait GraphicsDevice {
         texture: TextureHandle)
         -> anyhow::Result<()>;
 
+    fn texture_gen_mipmap(
+        &mut self, 
+        texture: TextureHandle,
+    ) -> anyhow::Result<()>;
 }

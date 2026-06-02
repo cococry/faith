@@ -27,3 +27,4 @@ harfbuzz_rs = {
     features = ["build-native-harfbuzz"]
 }
 lru = "0.18.0"
+unicode-segmentation = "1.13.3"
