@@ -225,19 +225,21 @@ impl TextRenderer {
                     seen_atlases.insert(atlas_id, texture);
                 }
 
+
+                // emojis are handled as if they were images
+                let kind = if self.font_manager.is_colored(font_handle)? { 1.0 } else { 2.0 };
+
                 let font_scale = self.font_manager.scale(font_handle)?;
+
                 let render_x =
                     cursor_x
-                    + shaped.x_off
+                    + shaped.x_off * font_scale
                     + atlas_glyph.bearing[0] as f32 * font_scale;
 
                 let render_y =
                     baseline_y
-                    - shaped.y_off
+                    - shaped.y_off * font_scale
                     - atlas_glyph.bearing[1] as f32 * font_scale;
-
-                // emojis are handled as if they were images
-                let kind = if self.font_manager.is_colored(font_handle)? { 1.0 } else { 2.0 };
 
                 let w = atlas_glyph.size[0] as f32 * font_scale;
                 let h = atlas_glyph.size[1] as f32 * font_scale;
@@ -260,15 +262,16 @@ impl TextRenderer {
                     kind
                 )?;
 
-                cursor_x += shaped.x_adv;
-                baseline_y += shaped.y_adv;
+                cursor_x += shaped.x_adv * font_scale;
+                baseline_y += shaped.y_adv * font_scale;
+
 
             }
             baseline_y += line_height;
         }
 
         for (_, atlas) in seen_atlases {
-            gpu.texture_gen_mipmap(atlas);
+            gpu.texture_gen_mipmap(atlas)?;
         }
      
         Ok(())

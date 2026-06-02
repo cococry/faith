@@ -78,7 +78,14 @@ fn main() -> anyhow::Result<()> {
 
 
             text.render(20.0, 20.0, "hello", font2, &mut renderer, &mut ui)?;
-            text.render(104.0 + 64.0 + 20.0, 20.0, "🙂", font, &mut renderer, &mut ui)?;
+            text.render(
+    20.0,
+    80.0,
+    "🙂😀😎😂🥲❤️♥️☺️☺✈️✈👍👍🏽👋🏿🧑‍💻👩‍🚀👨‍👩‍👧‍👦🏳️‍🌈🇩🇪🇺🇸1️⃣#️⃣*️⃣",
+    font,
+    &mut renderer,
+    &mut ui,
+)?;
 
             ui.end(&mut renderer)?;
 

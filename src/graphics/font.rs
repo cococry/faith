@@ -223,8 +223,10 @@ impl FontManager {
         let hb_face = harfbuzz_rs::Face::from_file(path, face_idx as u32)?;
         let mut hb_font = harfbuzz_rs::Font::new(hb_face);
 
-        // Layout remains in requested UI size.
-        hb_font.set_scale((size as i32) * 64, (size as i32) * 64);
+        hb_font.set_scale(
+            (raster_size as i32) * 64,
+            (raster_size as i32) * 64,
+        );
 
         let handle = FontHandle(self.fonts.len() as u32);
 
