@@ -1,5 +1,6 @@
 pub mod quad;
 pub mod renderer;
+pub mod text;
 
 pub use quad::{
     QuadInstance,
@@ -9,3 +10,4 @@ pub use quad::{
 };
 
 pub use renderer::UIRenderer;
+pub use text::TextRenderer;

@@ -3,7 +3,7 @@ mod graphics;
 mod cli;
 mod ui;
 
-use crate::graphics::{GraphicsDevice, Image};
+use crate::{graphics::{GraphicsDevice, Image}, ui::TextRenderer};
 
 use clap::Parser;
 use cli::Cli;
@@ -37,11 +37,14 @@ fn main() -> anyhow::Result<()> {
     let mut renderer = Renderer::new(GraphicsBackend::OpenGL, &platform)?;
 
     let mut ui = UIRenderer::new(&mut renderer, conf.width, conf.height)?;
+    
+    let mut text = TextRenderer::new()?; 
 
     let mut running = true;
 
     let image = ui.load_image(&mut renderer, "assets/logo.png")?;
-    let font = ui.load_font("assets/Inter-Regular.ttf", 28)?;
+    let font = text.load_font("assets/Inter-Regular.ttf", 28)?;
+
 
     while running {
         let events = platform.poll_events()?;
@@ -75,7 +78,7 @@ fn main() -> anyhow::Result<()> {
             ui.begin(width, height);
 
 
-            ui.text(104.0 + 64.0 + 20.0, 20.0, "Hello", font, &mut renderer)?;
+            text.render(104.0 + 64.0 + 20.0, 20.0, "Hello", font, &mut renderer, &mut ui)?;
             
             ui.quad(
                 [104.0, 20.0, 64.0, 64.0],
