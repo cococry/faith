@@ -25,8 +25,10 @@ rendered through a Vulkan & OpenGL layer, interfacing with the GPU directly.
 
 ## Build & Run
 
-As faith is written in Rust, use cargo to build and run faith:
+As faith is written in Rust, use cargo to build and run:
 ```console
+git clone https://github.com/cococry/faith
+cd faith
 cargo build
 cargo run
 ```
