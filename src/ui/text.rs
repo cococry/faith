@@ -41,10 +41,9 @@ pub struct TextRenderer {
     shaped_cache: LruCache<ShapedTextKey, Vec<ShapedGlyph>>,
 
     fallback_cache: HashMap<ClusterFontKey, FontHandle>,
-    font_run_cache: HashMap<FallbackRunKey, Vec<TextRun>>,
+    font_run_cache: LruCache<FallbackRunKey, Vec<TextRun>>,
     font_support_cache: HashMap<FontSupportKey, bool>,
     fallback_fonts: Vec<FontHandle>,
-
 }
 
 
@@ -65,7 +64,7 @@ impl TextRenderer {
             font_manager,
             shaped_cache: LruCache::new(NonZeroUsize::new(4096).unwrap()),
             fallback_cache: HashMap::new(),
-            font_run_cache: HashMap::new(),
+            font_run_cache: LruCache::new(NonZeroUsize::new(4096).unwrap()),
             font_support_cache: HashMap::new(),
             fallback_fonts: Vec::new(),
         })
@@ -137,7 +136,7 @@ impl TextRenderer {
             });
         }
         
-        self.font_run_cache.insert(key, runs.clone());
+        self.font_run_cache.put(key, runs.clone());
 
         Ok(runs)
     }
@@ -184,12 +183,17 @@ impl TextRenderer {
                 text: text.to_owned()
             };
 
-            if let Some(shaped) = self.shaped_cache.get(&key) {
-                return Ok(shaped.clone());
+            if text.len() <= 4096 {
+                if let Some(shaped) = self.shaped_cache.get(&key) {
+                    return Ok(shaped.clone());
+                }
             }
 
             let shaped = self.font_manager.shape_text(font_handle, text)?;
-            self.shaped_cache.put(key, shaped.clone());
+
+            if text.len() <= 4096 {
+                self.shaped_cache.put(key, shaped.clone());
+            }
 
             Ok(shaped)
         }
@@ -266,8 +270,6 @@ impl TextRenderer {
         let mut baseline_y = y + self.font_manager.ascender(font_handle)? as f32 * scale;
         let line_height = self.font_manager.line_height(font_handle)? as f32 * scale;
 
-        let mut have_uploaded_glyph = false;
-
         for line in text.split('\n') {
             let runs = self.build_fallback_runs(font_handle, line)?;
 
@@ -283,6 +285,7 @@ impl TextRenderer {
                 let kind = if is_colored { 1.0 } else { 2.0 };
 
                 let font_scale = self.font_manager.scale(run_font)?;
+                let font_render_scale = self.font_manager.render_scale(run_font)?;
 
                 let color = if is_colored {
                     crate::graphics::Color::rgba(1.0, 1.0, 1.0, 1.0)
@@ -303,8 +306,6 @@ impl TextRenderer {
                         };
 
                         self.upload_glyph(key, glyph, gpu, ui)?;
-
-                        have_uploaded_glyph = true;
                     }
 
                     let atlas_glyph = &self.glyph_locations[&key];
@@ -317,15 +318,15 @@ impl TextRenderer {
                     let render_x =
                         cursor_x
                         + shaped.x_off * font_scale
-                        + atlas_glyph.bearing[0] as f32 * font_scale;
+                        + atlas_glyph.bearing[0] as f32 * font_render_scale;
 
                     let render_y =
                         baseline_y
                         - shaped.y_off * font_scale
-                        - atlas_glyph.bearing[1] as f32 * font_scale;
+                        - atlas_glyph.bearing[1] as f32 * font_render_scale;
 
-                    let w = atlas_glyph.size[0] as f32 * font_scale;
-                    let h = atlas_glyph.size[1] as f32 * font_scale;
+                    let w = atlas_glyph.size[0] as f32 * font_render_scale;
+                    let h = atlas_glyph.size[1] as f32 * font_render_scale;
 
                     ui.raw_quad_atlas(
                         [
@@ -351,10 +352,6 @@ impl TextRenderer {
                 }
             }
             baseline_y += line_height;
-        }
-
-        if have_uploaded_glyph {
-            gpu.texture_gen_mipmap(ui.atlas_array_texture()?)?;
         }
      
         Ok(())

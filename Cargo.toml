@@ -28,3 +28,4 @@ harfbuzz_rs = {
 }
 lru = "0.18.0"
 unicode-segmentation = "1.13.3"
+nix = { version = "0.31.3", features = ["event", "poll"] }

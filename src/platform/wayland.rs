@@ -1,14 +1,17 @@
-use std::ffi::c_void;
+use std::{ffi::c_void, os::fd::AsFd, sync::Arc};
 
 use crate::platform::window::WindowHandleInfo;
 use super::event::WindowEvent;
 use super::window::WindowConfig;
 
+use nix::{poll::{PollFd, PollFlags, PollTimeout, poll}, sys::eventfd::{EfdFlags, EventFd}};
 use wayland_client::{
     Connection, Dispatch, EventQueue, Proxy, QueueHandle, protocol::{wl_compositor, wl_registry, wl_surface}
 };
 
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
+
+use nix::unistd::read;
 
 
 pub struct WaylandState {
@@ -31,11 +34,32 @@ pub struct WaylandState {
 pub struct WaylandPlatform {
     conn: Connection,
     ev_queue: EventQueue<WaylandState>,
-    state: WaylandState
+    state: WaylandState,
+    wake_fd: Arc<EventFd>
 }
 
 #[derive(Clone, Copy, Debug)]
 struct WaylandHandler;
+
+
+#[derive(Clone)]
+pub struct WaylandWaker {
+    wake_fd: Arc<EventFd>,
+}
+impl WaylandWaker {
+    pub fn request_redraw(&self) -> anyhow::Result<()> {
+        let val: u64 = 1;
+        let bytes = val.to_ne_bytes();
+
+        match nix::unistd::write(&*self.wake_fd, &bytes) {
+            Ok(_) => Ok(()),
+
+            Err(nix::errno::Errno::EAGAIN) => Ok(()),
+
+            Err(err) => Err(err.into()),
+        }
+    }
+}
 
 impl WaylandState {
     fn init_xdg_surface(&mut self, qh: &QueueHandle<WaylandState>) {
@@ -238,23 +262,103 @@ impl WaylandPlatform {
         while !state.configured {
             ev_queue.blocking_dispatch(&mut state)?;
         }
+        let wake_fd = Arc::new(EventFd::from_value_and_flags(
+            0,
+            EfdFlags::EFD_NONBLOCK | EfdFlags::EFD_CLOEXEC,
+        )?);
+
+
         Ok(Self {
             conn,
             ev_queue,
-            state
+            state,
+            wake_fd
         })
     }
 
-    pub fn poll_events(&mut self) -> anyhow::Result<Vec<WindowEvent>> {
-        while self.state.pending_events.is_empty() && self.state.running {
-            self.ev_queue.blocking_dispatch(&mut self.state)?;
+    fn drain_wake_fd(&self) -> anyhow::Result<()> {
+        let mut buf = [0u8; 8];
 
-            while self.ev_queue.dispatch_pending(&mut self.state)? > 0 {}
+        loop {
+            match read(&self.wake_fd, &mut buf) {
+                Ok(_) => {
+                    continue;
+                }
 
-            self.conn.flush()?;
+                Err(nix::errno::Errno::EAGAIN) => {
+                    break;
+                }
+
+                Err(err) => {
+                    return Err(err.into());
+                }
+            }
         }
 
+        Ok(())
+    }
+
+
+    pub fn poll_events(&mut self) -> anyhow::Result<Vec<WindowEvent>> {
+        while self.ev_queue.dispatch_pending(&mut self.state)? > 0 {}
+
+        if !self.state.pending_events.is_empty() {
+            return Ok(std::mem::take(&mut self.state.pending_events));
+        }
+
+
+        self.conn.flush()?;
+
+        // prepare_read() returns None when events became pending between
+        // dispatch_pending() and prepare_read(). In that case, dispatch again.
+        let guard = loop {
+            if let Some(guard) = self.conn.prepare_read() {
+                break guard;
+            }
+
+            while self.ev_queue.dispatch_pending(&mut self.state)? > 0 {}
+            self.conn.flush()?;
+        };
+
+        let wl_fd = guard.connection_fd();
+
+        let mut poll_fds = [
+            PollFd::new(wl_fd, PollFlags::POLLIN),
+            PollFd::new(self.wake_fd.as_fd(), PollFlags::POLLIN),
+        ];
+
+        poll(&mut poll_fds, PollTimeout::NONE)?;
+
+        let wake_readable = poll_fds[1]
+            .revents()
+            .unwrap_or(PollFlags::empty())
+            .contains(PollFlags::POLLIN);
+
+        let wl_readable = poll_fds[0]
+            .revents()
+            .unwrap_or(PollFlags::empty())
+            .contains(PollFlags::POLLIN);
+
+        if wl_readable {
+            guard.read()?;
+        } else {
+            // Dropping the guard cancels the prepared read.
+            drop(guard);
+        }
+
+        if wake_readable {
+            self.drain_wake_fd()?;
+            self.state
+                .pending_events
+                .push(WindowEvent::RedrawRequested);
+        }
+
+        while self.ev_queue.dispatch_pending(&mut self.state)? > 0 {}
+
+        self.conn.flush()?;
+
         Ok(std::mem::take(&mut self.state.pending_events))
+
     }
 
     pub fn size(&self) -> (u32, u32) {
@@ -270,4 +374,11 @@ impl WaylandPlatform {
                 .ptr() as *mut c_void
         }
     }
+
+    pub fn waker(&self) -> WaylandWaker {
+        WaylandWaker {
+            wake_fd: self.wake_fd.clone(),
+        }
+    }
+
 }

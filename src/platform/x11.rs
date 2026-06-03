@@ -1,3 +1,4 @@
+use crate::platform::wayland::WaylandWaker;
 use crate::platform::window::WindowHandleInfo;
 
 use super::event::WindowEvent;
@@ -9,7 +10,9 @@ extern crate anyhow;
 
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
+use std::sync::Arc;
 
+use nix::unistd::write;
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{
@@ -22,6 +25,12 @@ use x11rb::COPY_DEPTH_FROM_PARENT;
 
 use x11::xlib::{_XDisplay, XDefaultScreen, XOpenDisplay};
 use x11::xlib_xcb::{XGetXCBConnection, XSetEventQueueOwner, XEventQueueOwner::XCBOwnsEventQueue};
+use nix::sys::eventfd::{EfdFlags, EventFd};
+use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
+use nix::unistd::read;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
+
+
 
 pub struct X11Platform {
     width: u32,
@@ -31,8 +40,30 @@ pub struct X11Platform {
 
     xcb_conn: XCBConnection,
     window: u32,
-    wm_delete_window: u32 
+    wm_delete_window: u32,
+    wake_fd: Arc<EventFd> 
 }
+
+
+#[derive(Clone)]
+pub struct X11Waker {
+    wake_fd: Arc<EventFd>,
+}
+impl X11Waker {
+    pub fn request_redraw(&self) -> anyhow::Result<()> {
+        let val: u64 = 1;
+        let bytes = val.to_ne_bytes();
+
+        match nix::unistd::write(&*self.wake_fd, &bytes) {
+            Ok(_) => Ok(()),
+
+            Err(nix::errno::Errno::EAGAIN) => Ok(()),
+
+            Err(err) => Err(err.into()),
+        }
+    }
+}
+
 
 impl X11Platform {
     pub fn new(window_config: &WindowConfig) -> anyhow::Result<Self> {
@@ -113,13 +144,20 @@ impl X11Platform {
         conn.map_window(win_id)?;
         conn.flush()?;
 
+        
+        let wake_fd = Arc::new(EventFd::from_value_and_flags(
+            0,
+            EfdFlags::EFD_NONBLOCK | EfdFlags::EFD_CLOEXEC,
+        )?);
+
         Ok(Self {
             width: window_config.width,
             height: window_config.height,
             xdisplay: xdisplay, 
             xcb_conn: conn,
             window: win_id,
-            wm_delete_window: wm_delete_window
+            wm_delete_window: wm_delete_window,
+            wake_fd
         })
     }
 
@@ -160,31 +198,67 @@ impl X11Platform {
         }
     }
 
+    fn drain_wake_fd(&self) -> anyhow::Result<()> {
+        let mut buf = [0u8; 8];
+
+        loop {
+            match read(&self.wake_fd, &mut buf) {
+                Ok(_) => {
+                    continue;
+                }
+
+                Err(nix::errno::Errno::EAGAIN) => {
+                    break;
+                }
+
+                Err(err) => {
+                    return Err(err.into());
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn poll_events(&mut self) -> anyhow::Result<Vec<WindowEvent>> {
+
+        let x11_fd_raw = self.xcb_conn.as_raw_fd();
+
+        let x11_fd = unsafe {
+            BorrowedFd::borrow_raw(x11_fd_raw)
+        };
+
+        let mut poll_fds = [
+            PollFd::new(x11_fd, PollFlags::POLLIN),
+            PollFd::new(self.wake_fd.as_fd(), PollFlags::POLLIN),
+        ];
+        
+        // block forever until X11 event or app wake.
+        poll(&mut poll_fds, PollTimeout::NONE)?;
+        
         let mut close_requested = false;
         let mut redraw_requested = false;
         let mut latest_resize: Option<(u32, u32)> = None;
 
-        // Wait for at least one event.
-        let first = self.xcb_conn.wait_for_event()?;
-        self.collect_event(
-            first,
-            &mut close_requested,
-            &mut redraw_requested,
-            &mut latest_resize,
-        );
+        if poll_fds[1].revents().unwrap_or(PollFlags::empty()).contains(PollFlags::POLLIN) {
+            self.drain_wake_fd()?;
+            redraw_requested = true;
+        }
 
-        // Drain pending events, but don't generate one app event per raw X11 event.
-        while let Some(ev) = self.xcb_conn.poll_for_event()? {
-            self.collect_event(
-                ev,
-                &mut close_requested,
-                &mut redraw_requested,
-                &mut latest_resize,
-            );
+        if poll_fds[0].revents().unwrap_or(PollFlags::empty()).contains(PollFlags::POLLIN) {
 
-            if close_requested {
-                break;
+            // Drain pending events, but don't generate one app event per raw X11 event.
+            while let Some(ev) = self.xcb_conn.poll_for_event()? {
+                self.collect_event(
+                    ev,
+                    &mut close_requested,
+                    &mut redraw_requested,
+                    &mut latest_resize,
+                );
+
+                if close_requested {
+                    break;
+                }
             }
         }
 
@@ -217,4 +291,11 @@ impl X11Platform {
             window: self.window as u64
         }
     }
+
+    pub fn waker(&self) -> X11Waker {
+        X11Waker {
+            wake_fd: self.wake_fd.clone(),
+        }
+    }
+
 }

@@ -309,7 +309,7 @@ impl OpenGLRenderer {
             self.gl.tex_parameter_i32(
                 glow::TEXTURE_2D,
                 glow::TEXTURE_MIN_FILTER,
-                glow::LINEAR_MIPMAP_LINEAR as i32,
+                glow::LINEAR as i32,
             );
 
             self.gl.tex_parameter_i32(
@@ -456,7 +456,7 @@ impl OpenGLRenderer {
             self.gl.tex_parameter_i32(
                 glow::TEXTURE_2D_ARRAY,
                 glow::TEXTURE_MIN_FILTER,
-                glow::LINEAR_MIPMAP_LINEAR as i32,
+                glow::LINEAR as i32,
             );
 
             self.gl.tex_parameter_i32(

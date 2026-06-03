@@ -1,5 +1,5 @@
 use super::event::WindowEvent;
-use crate::cli::Backend;
+use crate::{cli::Backend, platform::{wayland::WaylandWaker, x11::X11Waker}};
 use tracing::{info, warn};
 
 pub struct WindowConfig {
@@ -7,6 +7,18 @@ pub struct WindowConfig {
     pub title: String,
     pub width: u32,
     pub height: u32,
+}
+
+
+#[derive(Clone)]
+pub struct PlatformWaker {
+    inner: PlatformWakerInner,
+}
+
+#[derive(Clone)]
+enum PlatformWakerInner {
+    X11(X11Waker),
+    Wayland(WaylandWaker),
 }
 
 impl Default for WindowConfig {
@@ -34,6 +46,15 @@ pub enum WindowHandleInfo {
         display: *mut std::ffi::c_void,
         egl_win: *mut std::ffi::c_void,
     },
+}
+
+impl PlatformWaker {
+    pub fn request_redraw(&self) -> anyhow::Result<()> {
+        match &self.inner {
+            PlatformWakerInner::X11(waker) => waker.request_redraw(),
+            PlatformWakerInner::Wayland(waker) => waker.request_redraw(),
+        }
+    }
 }
 
 impl Platform {
@@ -91,4 +112,24 @@ impl Platform {
             Self::Wayland(platform) => platform.size()
         }
     }
+
+
+    pub fn request_redraw(&self) -> anyhow::Result<()> {
+        self.waker().request_redraw()
+    }
+
+    pub fn waker(&self) -> PlatformWaker {
+        match self {
+            Platform::X11(platform) => PlatformWaker {
+                inner: PlatformWakerInner::X11(platform.waker()),
+            },
+
+            Platform::Wayland(platform) => PlatformWaker {
+                inner: PlatformWakerInner::Wayland(platform.waker()),
+            },
+        }
+    }
+
 }
+
+
