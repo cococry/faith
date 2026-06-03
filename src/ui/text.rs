@@ -28,7 +28,7 @@ struct ShapedTextKey {
 /// `font_handle` is the (fallback) font that 
 /// supports all grapheme clusters within the 
 /// `text` string. 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct ShapedTextRun {
     font_handle: FontHandle,
     text: String,
@@ -87,6 +87,43 @@ struct AtlasGlyph {
     pub bearing:    [i32; 2],
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct TextLayoutKey {
+    font_handle: FontHandle,
+    text: String,
+
+    // Store quantized width so float hashing is not needed.
+    max_width_px: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TextLayout {
+    lines: Vec<TextLine>,
+    width: f32,
+    height: f32,
+    line_height: f32,
+    ascender: f32
+}
+
+#[derive(Debug, Clone)]
+struct TextLine {
+    runs: Vec<ShapedTextRun>,
+    width: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TextLayoutOptions {
+    pub max_width: Option<f32>,
+}
+
+impl Default for TextLayoutOptions {
+    fn default() -> Self {
+        Self {
+            max_width: None,
+        }
+    }
+}
+
 /// Text rendering engine. 
 /// Manages glyph- and font caches 
 /// as well as loaded fallback fonts.
@@ -109,6 +146,8 @@ pub struct TextRenderer {
     shaped_cache: LruCache<ShapedTextKey, Vec<ShapedGlyph>>,
     font_run_cache: LruCache<ShapedRunKey, Vec<ShapedTextRun>>,
     fallback_choice_cache: LruCache<FallbackChoiceKey, Option<FontHandle>>,
+
+    layout_cache: LruCache<TextLayoutKey, TextLayout>,
 }
 
 impl TextRenderer {
@@ -129,6 +168,7 @@ impl TextRenderer {
             shaped_cache: LruCache::new(NonZeroUsize::new(8192).unwrap()),
             font_run_cache: LruCache::new(NonZeroUsize::new(2048).unwrap()),
             fallback_choice_cache: LruCache::new(NonZeroUsize::new(4096).unwrap()),
+            layout_cache: LruCache::new(NonZeroUsize::new(1024).unwrap()),
         })
 
     }
@@ -674,16 +714,16 @@ impl TextRenderer {
         );
 
         if glyph.width == 0 || glyph.height == 0 {
-    self.glyph_locations.insert(key, AtlasGlyph {
-        atlas_layer: 0,
-        uv_min: [0.0, 0.0],
-        uv_max: [0.0, 0.0],
-        size: [0, 0],
-        bearing: [glyph.bearing_x, glyph.bearing_y],
-    });
+            self.glyph_locations.insert(key, AtlasGlyph {
+                atlas_layer: 0,
+                uv_min: [0.0, 0.0],
+                uv_max: [0.0, 0.0],
+                size: [0, 0],
+                bearing: [glyph.bearing_x, glyph.bearing_y],
+            });
 
-    return Ok(());
-}
+            return Ok(());
+        }
 
         Ok(())
 
@@ -703,7 +743,7 @@ impl TextRenderer {
 
         self.fallback_fonts.push(font);
         self.fallback_choice_cache.clear();
-
+        self.layout_cache.clear();
         self.font_run_cache.clear();
 
         Ok(font)
@@ -836,4 +876,218 @@ impl TextRenderer {
         Ok(())
     }
 
+    fn layout_cached(
+        &mut self,
+        text: &str,
+        font_handle: FontHandle,
+        options: TextLayoutOptions,
+    ) -> anyhow::Result<TextLayout> {
+
+        let key = TextLayoutKey {
+            font_handle,
+            text: text.to_owned(),
+            max_width_px: options.max_width.map(|w| w.ceil() as u32),
+        };
+
+        if let Some(layout) = self.layout_cache.get(&key) {
+            return Ok(layout.clone());
+        }
+
+        let base_scale = self.font_manager.scale(font_handle)?;
+        let line_height = self.font_manager.line_height(font_handle)? as f32 * base_scale;
+        let ascender = self.font_manager.ascender(font_handle)? as f32 * base_scale;
+
+        let mut lines = Vec::new();
+
+        // TODO: Wrap lines by '\n' before layout 
+        // based wrapping.
+            self.layout_paragraph(
+                &text.replace('\n', ""),
+                font_handle,
+                options.max_width,
+                line_height,
+                &mut lines,
+            )?;
+
+        let width = lines.iter()
+            .map(|line| line.width)
+            .fold(0.0, f32::max);
+
+        let height = lines.len() as f32 * line_height;
+
+        let layout = TextLayout {
+            lines,
+            width,
+            height,
+            line_height, 
+            ascender
+        };
+
+        self.layout_cache.put(key, layout.clone());
+
+        Ok(layout)
+    }
+
+    fn runs_width(&mut self, runs: &[ShapedTextRun]) -> anyhow::Result<f32> {
+        // Gets the combined width of all 
+        // text runs in a given slice of runs,
+        // adjusted for the run font's 
+        // scale factor.
+        let mut width = 0.0;
+
+        for run in runs {
+            let scale = self.font_manager.scale(run.font_handle)?;
+            width += run.x_adv * scale;
+        }
+
+        Ok(width)
+    }
+
+    fn measure_text(
+        &mut self,
+        text: &str,
+        font_handle: FontHandle,
+    ) -> anyhow::Result<f32> {
+        let runs = self.build_shaped_runs_cached(font_handle, text)?;
+        self.runs_width(&runs)
+    }
+
+    fn is_leading_forbidden_token(&self, token: &str) -> bool {
+    token.chars().all(|ch| {
+        matches!(
+            ch,
+            '.' | ',' | ';' | ':' | '!' | '?' |
+            ')' | ']' | '}' |
+            '»' | '”' | '’' |
+            '،' | '؛' | '؟'
+        )
+    })
+    }
+
+    fn word_wrap_tokens(&self, paragraph: &str) -> Vec<String> {
+        let mut tokens: Vec<String> = Vec::new();
+
+        for token in paragraph.split_word_bounds() {
+            if self.is_leading_forbidden_token(token) {
+                if let Some(prev) = tokens.last_mut() {
+                    prev.push_str(token);
+                    continue;
+                }
+            }
+
+            tokens.push(token.to_owned());
+        }
+
+        tokens
+    }
+
+    fn layout_paragraph(
+        &mut self,
+        paragraph: &str,
+        font_handle: FontHandle,
+        max_width: Option<f32>,
+        _line_height: f32,
+        lines: &mut Vec<TextLine>,
+    ) -> anyhow::Result<()> {
+        let Some(max_width) = max_width else {
+            let runs = self.build_shaped_runs_cached(font_handle, paragraph)?;
+            let width = self.runs_width(&runs)?;
+
+            lines.push(TextLine { runs, width });
+            return Ok(());
+        };
+
+        let mut current_text = String::new();
+        let mut current_width = 0.0;
+
+        for token in self.word_wrap_tokens(paragraph) {
+            // Only build the word token's runs for 
+            // the current word.
+            let token_width = self.measure_text(&token, font_handle)?;
+
+            if !current_text.is_empty() && current_width + token_width > max_width {
+                // If there has been a line wrap, push a new 
+                // text line into the layout's lines and start 
+                // over from the next line.
+                let line_text = current_text.trim_end().to_owned();
+
+                // Build the entire line's runs once at the end 
+                let runs = self.build_shaped_runs_cached(font_handle, &line_text)?;
+                let width = self.runs_width(&runs)?;
+
+                lines.push(TextLine { runs, width });
+
+                current_text.clear();
+                current_width = 0.0;
+
+                let token = token.trim_start();
+                if token.is_empty() {
+                    continue;
+                }
+
+                // Consume the first token if not empty  
+                let token_width = self.measure_text(token, font_handle)?;
+                current_text.push_str(token);
+                current_width += token_width;
+            } else {
+                // Advance by the measured token width if there 
+                // has not been a line break caused by wrapping.
+                current_text.push_str(&token);
+                current_width += token_width;
+            }
+        }
+
+        if !current_text.is_empty() {
+            let line_text = current_text.trim_end().to_owned();
+            let runs = self.build_shaped_runs_cached(font_handle, &line_text)?;
+            let width = self.runs_width(&runs)?;
+
+            lines.push(TextLine { runs, width });
+        }
+
+
+        Ok(())
+    }
+
+    /// Renders text with word wrapping.
+    ///
+    /// Lays out the text into wrapped lines using 
+    /// `max_width` and renders the resulting layout 
+    /// at the given position.
+    pub fn render_wrapped<G: GraphicsDevice>(
+        &mut self,
+        x: f32,
+        y: f32,
+        text: &str,
+        font_handle: FontHandle,
+        max_width: f32,
+        gpu: &mut G,
+        ui: &mut UIRenderer,
+    ) -> anyhow::Result<()> {
+        let layout = self.layout_cached(
+            text,
+            font_handle,
+            TextLayoutOptions {
+                max_width: Some(max_width),
+            },
+        )?;
+
+        let mut baseline_y = y + layout.ascender;
+
+        for line in &layout.lines {
+            let mut cursor_x = x;
+
+            for run in &line.runs {
+                self.render_shaped_run(cursor_x, baseline_y, run, gpu, ui)?;
+
+                let scale = self.font_manager.scale(run.font_handle)?;
+                cursor_x += run.x_adv * scale;
+            }
+
+            baseline_y += layout.line_height; 
+        }
+
+        Ok(())
+
+    }
 }
