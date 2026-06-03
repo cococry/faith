@@ -1,6 +1,6 @@
 # faith
 
-<img align="left" style="width:260px" src="https://github.com/cococry/faith/blob/main/assets/logo.png" width="260px">
+<img align="left" style="width:260px" src="https://github.com/cococry/faith/blob/main/assets/logo.png" width="240px">
 
 **faith is an instant messenger optimized for security, 
 native performance & customization**
