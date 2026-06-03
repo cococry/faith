@@ -24,6 +24,8 @@ pub struct OpenGLRenderer {
     width: u32,
     height: u32,
 
+    global_vao: glow::NativeVertexArray,
+
     buffers: Vec<Option<GlBuffer>>,
     textures: Vec<Option<GlTexture>>,
     pipelines: Vec<Option<GlPipeline>>,
@@ -60,12 +62,11 @@ impl OpenGLRenderer {
             egl::SURFACE_TYPE, egl::WINDOW_BIT,
             egl::RENDERABLE_TYPE, egl::OPENGL_BIT,
 
-            egl::BUFFER_SIZE, 32,
             egl::RED_SIZE, 8,
             egl::GREEN_SIZE, 8,
             egl::BLUE_SIZE, 8,
-            egl::ALPHA_SIZE, 8,
-            egl::STENCIL_SIZE, 8,
+            egl::ALPHA_SIZE, 0,
+            egl::STENCIL_SIZE, 0,
 
             egl::NONE,
         ];
@@ -115,6 +116,14 @@ impl OpenGLRenderer {
             gl.viewport(0, 0, width as i32, height as i32);
         }
 
+        let global_vao = unsafe { 
+            let vao = gl.create_vertex_array()
+                .map_err(|e| anyhow::anyhow!("Failed to create VAO: {e}"))?; 
+            gl.bind_vertex_array(Some(vao));
+            vao
+        };
+
+
         Ok(Self {
             gl,
             egl,
@@ -123,6 +132,8 @@ impl OpenGLRenderer {
             egl_context: context,
             width,
             height,
+
+            global_vao,
 
             buffers: Vec::new(),
             textures: Vec::new(),
@@ -544,18 +555,14 @@ impl OpenGLRenderer {
     }
 
     pub fn create_pipeline(&mut self, desc: PipelineDesc<'_>) -> anyhow::Result<PipelineHandle> {
-        unsafe {
-            let vertex_shader = self.compile_shader(glow::VERTEX_SHADER, desc.vertex_source)?;
-            let fragment_shader = self.compile_shader(glow::FRAGMENT_SHADER, desc.fragment_source)?;
-            let program = self.link_program(&[vertex_shader, fragment_shader])?;
+        let vertex_shader = self.compile_shader(glow::VERTEX_SHADER, desc.vertex_source)?;
+        let fragment_shader = self.compile_shader(glow::FRAGMENT_SHADER, desc.fragment_source)?;
+        let program = self.link_program(&[vertex_shader, fragment_shader])?;
 
-            let vao = self.gl.create_vertex_array()
-                .map_err(|e| anyhow::anyhow!("Failed to create VAO: {e}"))?; 
 
-            self.pipelines.push(Some(GlPipeline { program, vao, vert_layouts: desc.vert_layouts }));
+        self.pipelines.push(Some(GlPipeline { program, vert_layouts: desc.vert_layouts }));
 
-            Ok(PipelineHandle((self.pipelines.len() - 1) as u32))
-        }
+        Ok(PipelineHandle((self.pipelines.len() - 1) as u32))
     }
     pub fn draw_indexed(&mut self, draw: DrawIndexed) -> anyhow::Result<()> {
         unsafe {
@@ -693,7 +700,7 @@ impl OpenGLRenderer {
 
         unsafe {
             self.gl.use_program(Some(pipeline.program));
-            self.gl.bind_vertex_array(Some(pipeline.vao));
+            self.gl.bind_vertex_array(Some(self.global_vao));
         }
         self.current_pipeline = Some(handle);
         self.current_vbos = [None; MAX_VBOS];

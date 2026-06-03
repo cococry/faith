@@ -13,15 +13,6 @@ pub struct ImageData {
     pub pixels: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct Image {
-    pub layer: u32,
-    pub uv_min: [f32; 2],
-    pub uv_max: [f32; 2],
-    pub width: u32,
-    pub height: u32,
-}
-
 impl ImageData {
     pub fn load_rgba8(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let path = path.as_ref();

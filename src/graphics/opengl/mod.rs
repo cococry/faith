@@ -26,6 +26,5 @@ struct GlTexture {
 
 struct GlPipeline {
     program: glow::NativeProgram,
-    vao: glow::NativeVertexArray,
     vert_layouts: Vec<VertexBufferLayout> 
 }

@@ -3,7 +3,7 @@ mod graphics;
 mod cli;
 mod ui;
 
-use crate::{graphics::{GraphicsDevice, Image}, ui::TextRenderer};
+use crate::{graphics::{GraphicsDevice}, ui::TextRenderer};
 
 use clap::Parser;
 use cli::Cli;
@@ -38,7 +38,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut ui = UIRenderer::new(&mut renderer, conf.width, conf.height)?;
     
-    let mut text = TextRenderer::new(&mut renderer)?; 
+    let mut text = TextRenderer::new()?; 
 
     let mut running = true;
 

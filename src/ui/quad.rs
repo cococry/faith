@@ -92,26 +92,6 @@ pub const QUAD_INDICES: [u32; 6] = [
     0, 2, 3,
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BatchKind {
-    Solid,
-    Textured,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BatchKey {
-    pub texture: Option<TextureHandle>,
-    pub kind: BatchKind
-}
-
-
-#[derive(Debug, Clone, Copy)]
-pub struct QuadBatch {
-    pub inst_start: u32,
-    pub inst_count: u32,
-    pub key: BatchKey,
-}
-
 pub const UI_QUAD_VERTEX_SHADER: &str = r#"
 #version 330 core
 
@@ -131,6 +111,7 @@ out vec4 v_color;
 out vec4 v_rect;
 out vec4 v_params;
 flat out int v_layer;
+flat out int v_kind;
 
 void main() {
     vec2 pixel_pos = i_rect.xy + a_local_pos * i_rect.zw;
@@ -150,6 +131,7 @@ void main() {
     v_params = i_params;
     
     v_layer = int(i_params.z + 0.5);
+    v_kind = int(v_params.w + 0.5);
 
     gl_Position = vec4(ndc, 0.0, 1.0);
 }
@@ -158,37 +140,51 @@ void main() {
 pub const UI_QUAD_FRAGMENT_SHADER: &str = r#"
 #version 330 core
 
-in vec2 v_local_pos;
 in vec2 v_uv;
 in vec4 v_color;
-in vec4 v_rect;
-in vec4 v_params;
-
-uniform sampler2DArray u_glpyh_texture_array;
-uniform sampler2DArray u_ui_texture_array;
 
 flat in int v_layer;
+flat in int v_kind;
+
+uniform sampler2DArray u_texture_array;
 
 out vec4 out_color;
 
 void main() {
-    float kind = v_params.w;
+    // 0 = solid rect
+    // 1 = color emoji or atlas image
+    // 2 = text glyph alpha mask
+    // 3 = regular atlas image
 
-    if (kind > 2.5) {
-        // image
-        vec4 tex_color = texture(u_ui_texture_array, vec3(v_uv, float(v_layer)));
-        out_color = tex_color * v_color;
-    } else if (kind > 1.5) {
-        // text glyph 
-        vec4 tex_color = texture(u_glpyh_texture_array, vec3(v_uv, float(v_layer)));
-        float alpha = tex_color.a;
-        out_color = vec4(v_color.rgb, v_color.a * alpha);
-    } else if (kind > 0.5) {
-        // color emoji
-        vec4 tex_color = texture(u_glpyh_texture_array, vec3(v_uv, float(v_layer)));
-        out_color = tex_color * v_color;
-    } else {
+    if (v_kind == 0) {
         out_color = v_color;
+        return;
     }
+
+    vec4 tex_color = texture(u_texture_array, vec3(v_uv, float(v_layer)));
+
+    if (v_kind == 2) {
+        // text glyph: use texture alpha only
+        out_color = vec4(v_color.rgb, v_color.a * tex_color.a);
+    } else {
+        // emoji/image: use full RGBA texture
+        out_color = tex_color * v_color;
+    }
+}
+"#;
+
+pub const UI_QUAD_FRAGMENT_SHADER_DEDICATED: &str = r#"
+#version 330 core
+
+in vec2 v_uv;
+in vec4 v_color;
+
+uniform sampler2D u_texture;
+
+out vec4 out_color;
+
+void main() {
+    vec4 tex_color = texture(u_texture, v_uv);
+    out_color = tex_color * v_color;
 }
 "#;

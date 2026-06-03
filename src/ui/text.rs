@@ -1,11 +1,9 @@
-use std::{cmp::max, collections::HashMap, num::NonZeroUsize};
+use std::{collections::HashMap, num::NonZeroUsize};
 
-use anyhow::{Ok, anyhow};
-use glow::MAX_LAYERS;
 use lru::LruCache;
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::{graphics::{FontHandle, FontManager, GraphicsDevice, TextureFormat, TextureHandle, device::TextureArrayDesc, font::{Glyph, GlyphKey, ShapedGlyph}}, ui::UIRenderer};
+use crate::{graphics::{FontHandle, FontManager, GraphicsDevice, font::{Glyph, GlyphKey, ShapedGlyph}}, ui::UIRenderer};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ShapedTextKey {
@@ -38,7 +36,6 @@ pub struct FallbackRunKey {
 }
 
 pub struct TextRenderer {
-    glyph_atlas_layers: Vec<GlyphAtlasLayer>,
     glyph_locations: HashMap<GlyphKey, AtlasGlyph>,
     font_manager: FontManager,
     shaped_cache: LruCache<ShapedTextKey, Vec<ShapedGlyph>>,
@@ -48,17 +45,8 @@ pub struct TextRenderer {
     font_support_cache: HashMap<FontSupportKey, bool>,
     fallback_fonts: Vec<FontHandle>,
 
-    glyph_atlas_array_texture: TextureHandle,
 }
 
-pub struct GlyphAtlasLayer {
-    width: u32,
-    height: u32,
-    row_h: u32,
-    cursor_x: u32,
-    cursor_y: u32,
-    layer: u32,
-}
 
 pub struct AtlasGlyph {
     pub atlas_layer: u32,
@@ -67,25 +55,12 @@ pub struct AtlasGlyph {
     pub size: [u32; 2],
     pub bearing: [i32; 2],
 }
-        
-const ATLAS_LAYERS: u32 = 64; 
-const ATLAS_WIDTH: u32  = 1024; 
-const ATLAS_HEIGHT: u32 = 1024; 
-
 
 impl TextRenderer {
-    pub fn new<G: GraphicsDevice>(gpu: &mut G) -> anyhow::Result<Self> {
+    pub fn new() -> anyhow::Result<Self> {
         let font_manager = FontManager::new()?;
-
-        let atlas_array_tex = gpu.create_texture_array(TextureArrayDesc{
-            width: ATLAS_WIDTH,
-            height: ATLAS_HEIGHT,
-            layers: ATLAS_LAYERS,
-            format: TextureFormat::Rgba8
-        })?;
         
         Ok(Self {
-            glyph_atlas_layers: Vec::new(),
             glyph_locations: HashMap::new(),
             font_manager,
             shaped_cache: LruCache::new(NonZeroUsize::new(4096).unwrap()),
@@ -93,7 +68,6 @@ impl TextRenderer {
             font_run_cache: HashMap::new(),
             font_support_cache: HashMap::new(),
             fallback_fonts: Vec::new(),
-            glyph_atlas_array_texture: atlas_array_tex 
         })
 
     }
@@ -220,89 +194,44 @@ impl TextRenderer {
             Ok(shaped)
         }
 
-    fn upload_pixels_to_atlas<G: GraphicsDevice>(&self, 
-        x: u32, 
-        y: u32, 
-        width: u32, 
-        height: u32, 
-        layer: u32,
-        pixels: &[u8],
-        gpu: &mut G) -> anyhow::Result<()> {
-        gpu.write_texture_array_layer(
-            self.glyph_atlas_array_texture, 
-            x, y, layer, 
-            width, height, 
-            pixels)
-    }
 
-    fn upload_glyph<G: GraphicsDevice>(&mut self, key: GlyphKey, glyph: Glyph, gpu: &mut G, colored: bool) -> anyhow::Result<()> {
-        let padding = 1;
+    fn upload_glyph<G: GraphicsDevice>(
+        &mut self, key: GlyphKey, glyph: 
+        Glyph, gpu: &mut G, 
+        ui: &mut UIRenderer) -> anyhow::Result<()> {
 
-        if self.glyph_atlas_layers.is_empty() { 
-            self.create_new_atlas_layer()?;
-        }
-
-        let mut layer_idx = self.glyph_atlas_layers.len() - 1; 
-
-        {
-            let atlas = &mut self.glyph_atlas_layers[layer_idx]; 
-
-            if glyph.width + padding > atlas.width || glyph.height + padding > atlas.height {
-                anyhow::bail!("glyph is larger than atlas");
-            }
-
-            if atlas.cursor_x + glyph.width + padding > atlas.width {
-                atlas.cursor_x = 0;
-                atlas.cursor_y += atlas.row_h + padding;
-                atlas.row_h = 0;
-            }
-
-            if atlas.cursor_y + glyph.height + padding > atlas.height {
-                self.create_new_atlas_layer();
-                layer_idx = self.glyph_atlas_layers.len() - 1;
-            }
-
-        }
-
-        let atlas = &self.glyph_atlas_layers[layer_idx]; 
-
-        let x = atlas.cursor_x;
-        let y = atlas.cursor_y;
-        let atlas_width = atlas.width;
-        let atlas_height = atlas.height;
-        let texture_layer = atlas.layer;
+        let (layer, x, y, atlas_w, atlas_h) =
+            ui.allocate_image_rect(glyph.width, glyph.height, 1)?;
 
 
-        self.upload_pixels_to_atlas(
+        ui.upload_pixels_to_atlas(
             x,
             y,
             glyph.width,
             glyph.height,
-            texture_layer,
+            layer,
             &glyph.pixels,
             gpu
         )?;
 
         self.glyph_locations.insert(key, AtlasGlyph{
             size: [glyph.width, glyph.height],
-            atlas_layer: texture_layer,
+            atlas_layer: layer,
             bearing: [glyph.bearing_x, glyph.bearing_y],
             uv_min: [
-                x as f32 /  atlas_width as f32, 
-                y as f32 /  atlas_height as f32
+                x as f32 /  atlas_w as f32, 
+                y as f32 /  atlas_h as f32
             ],
             uv_max: [
-                (x + glyph.width) as f32 /  atlas_width as f32, 
-                (y + glyph.height) as f32 /  atlas_height as f32
+                (x + glyph.width) as f32 /  atlas_w as f32, 
+                (y + glyph.height) as f32 /  atlas_h as f32
             ],
-        });
-
-        let atlas = &mut self.glyph_atlas_layers[layer_idx]; 
-
-        atlas.cursor_x += glyph.width + padding;
-        atlas.row_h = max(glyph.height, atlas.row_h); 
+        }
+        );
 
         Ok(())
+
+
     }
 
     pub fn load_font(
@@ -373,7 +302,7 @@ impl TextRenderer {
                             glyph_ref.clone()
                         };
 
-                        self.upload_glyph(key, glyph, gpu, is_colored)?;
+                        self.upload_glyph(key, glyph, gpu, ui)?;
 
                         have_uploaded_glyph = true;
                     }
@@ -398,14 +327,13 @@ impl TextRenderer {
                     let w = atlas_glyph.size[0] as f32 * font_scale;
                     let h = atlas_glyph.size[1] as f32 * font_scale;
 
-                    ui.textured_quad(
+                    ui.raw_quad_atlas(
                         [
                         render_x,
                         render_y,
                         w,
                         h
                         ],
-                        self.glyph_atlas_array_texture,
                         [
                         uv_min[0],
                         uv_min[1],
@@ -426,31 +354,10 @@ impl TextRenderer {
         }
 
         if have_uploaded_glyph {
-            gpu.texture_gen_mipmap(self.glyph_atlas_array_texture)?;
+            gpu.texture_gen_mipmap(ui.atlas_array_texture()?)?;
         }
      
         Ok(())
     }
-
-    fn create_new_atlas_layer(&mut self) -> anyhow::Result<u32> {
-        let layer = self.glyph_atlas_layers.len() as u32;
-
-        if layer >= ATLAS_LAYERS {
-            anyhow::bail!("Glyph atlas texture array is full");
-        }
-
-        self.glyph_atlas_layers.push(
-            GlyphAtlasLayer { 
-                width:  ATLAS_WIDTH, 
-                height: ATLAS_HEIGHT, 
-                row_h: 0, 
-                cursor_x: 0, 
-                cursor_y: 0,
-                layer 
-            });
-
-        Ok(layer)
-    } 
-
 
 }

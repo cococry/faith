@@ -1,13 +1,14 @@
 use crate::Color;
 
 use crate::graphics::{
-    BufferDesc, BufferHandle, BufferTarget, BufferUsage, GraphicsDevice, Image, ImageData, PipelineDesc, PipelineHandle, TextureFormat, TextureHandle, VertexStepMode
+    BufferDesc, BufferHandle, BufferTarget, BufferUsage, GraphicsDevice, ImageData, PipelineDesc, PipelineHandle, TextureDesc, TextureFormat, TextureHandle, VertexStepMode
 };
 
 use crate::graphics::device::{
-    DrawIndexedInstanced, TextureArrayDesc, TextureKind, VertexAttribute, VertexBufferLayout, VertexFormat
+    DrawIndexedInstanced, TextureArrayDesc, VertexAttribute, VertexBufferLayout, VertexFormat
 };
 
+use crate::ui::quad::{UI_QUAD_FRAGMENT_SHADER, UI_QUAD_FRAGMENT_SHADER_DEDICATED, UI_QUAD_VERTEX_SHADER};
 use crate::ui::{
     QuadInstance,
     QuadVertex,
@@ -15,10 +16,23 @@ use crate::ui::{
     QUAD_VERTICES,
 };
 
-use crate::ui::quad::{
-    BatchKey, BatchKind, QuadBatch, UI_QUAD_FRAGMENT_SHADER, UI_QUAD_VERTEX_SHADER
-};
+#[derive(Debug, Clone, Copy)]
+pub enum ImageStorage {
+    Atlas {
+        layer: u32,
+        uv_min: [f32; 2],
+        uv_max: [f32; 2],
+    },
+    Dedicated {
+        texture_handle: TextureHandle,
+    }
+}
 
+#[derive(Debug, Clone, Copy)]
+pub struct Image {
+    storage: ImageStorage,
+    size: [u32; 2],
+}
 
 pub struct ImageAtlasLayer {
     width: u32,
@@ -29,23 +43,34 @@ pub struct ImageAtlasLayer {
     cursor_y: u32,
 }
 
+pub struct DedicatedDraw {
+    texture_handle: TextureHandle,
+    start: u32,
+    count: u32
+}
+
 pub struct UIRenderer {
     screen_width: u32,
     screen_height: u32,
 
     pipeline: PipelineHandle,
+    pipeline_dedicated: PipelineHandle,
 
     quad_vbo: BufferHandle,
     quad_ibo: BufferHandle,
     instance_vbo: BufferHandle,
 
     instances: Vec<QuadInstance>,
-    batches: Vec<QuadBatch>,
+
+    atlas_instances: Vec<QuadInstance>,
+    dedicated_instances: Vec<QuadInstance>,
+
     max_instances: usize,
-    batch_count: usize,
-    
+
     ui_texture_array: TextureHandle,
     image_atlas_layers: Vec<ImageAtlasLayer>,
+
+    dedicated_draws: Vec<DedicatedDraw>,
 }
 
 const UI_ATLAS_WIDTH: u32 = 2048;
@@ -83,66 +108,74 @@ impl UIRenderer {
             size: MAX_INSTANCES_PER_FRAME * std::mem::size_of::<QuadInstance>()
         })?;
 
+        let quad_layouts =  vec![
+            VertexBufferLayout {
+                binding: 0,
+                stride: std::mem::size_of::<QuadVertex>() as u32,
+                step_mode: VertexStepMode::Vertex,
+                attrs: vec![
+                    // pos
+                    VertexAttribute {
+                        location: 0,
+                        offset: 0,
+                        format: VertexFormat::Float32x2,
+                    },
+                    // uv 
+                    VertexAttribute {
+                        location: 1,
+                        offset: 8,
+                        format: VertexFormat::Float32x2,
+                    }
+                ]
+            },
+            VertexBufferLayout {
+                binding: 1,
+                stride: std::mem::size_of::<QuadInstance>() as u32,
+                step_mode: VertexStepMode::Instance,
+                attrs: vec![
+                    // rect 
+                    VertexAttribute {
+                        location: 2,
+                        offset: 0,
+                        format: VertexFormat::Float32x4,
+                    },
+                    // color 
+                    VertexAttribute {
+                        location: 3,
+                        offset: 16,
+                        format: VertexFormat::Float32x4,
+                    },
+                    // uv 
+                    VertexAttribute {
+                        location: 4,
+                        offset: 32,
+                        format: VertexFormat::Float32x4,
+                    },
+                    // params
+                    VertexAttribute {
+                        location: 5,
+                        offset: 48,
+                        format: VertexFormat::Float32x4,
+                    }
+                ]
+            }
+
+        ];
+
+
         let pipeline = gpu.create_pipeline(PipelineDesc{
             vertex_source: UI_QUAD_VERTEX_SHADER,
             fragment_source: UI_QUAD_FRAGMENT_SHADER,
-            vert_layouts: vec![
-                VertexBufferLayout {
-                    binding: 0,
-                    stride: std::mem::size_of::<QuadVertex>() as u32,
-                    step_mode: VertexStepMode::Vertex,
-                    attrs: vec![
-                        // pos
-                        VertexAttribute {
-                            location: 0,
-                            offset: 0,
-                            format: VertexFormat::Float32x2,
-                        },
-                        // uv 
-                        VertexAttribute {
-                            location: 1,
-                            offset: 8,
-                            format: VertexFormat::Float32x2,
-                        }
-                    ]
-                },
-                VertexBufferLayout {
-                    binding: 1,
-                    stride: std::mem::size_of::<QuadInstance>() as u32,
-                    step_mode: VertexStepMode::Instance,
-                    attrs: vec![
-                        // rect 
-                        VertexAttribute {
-                            location: 2,
-                            offset: 0,
-                            format: VertexFormat::Float32x4,
-                        },
-                        // color 
-                        VertexAttribute {
-                            location: 3,
-                            offset: 16,
-                            format: VertexFormat::Float32x4,
-                        },
-                        // uv 
-                        VertexAttribute {
-                            location: 4,
-                            offset: 32,
-                            format: VertexFormat::Float32x4,
-                        },
-                        // params
-                        VertexAttribute {
-                            location: 5,
-                            offset: 48,
-                            format: VertexFormat::Float32x4,
-                        }
-                    ]
-                }
+            vert_layouts: quad_layouts.clone()
+        })?;
 
-            ]
+        let pipeline_dedicated = gpu.create_pipeline(PipelineDesc{
+            vertex_source: UI_QUAD_VERTEX_SHADER,
+            fragment_source: UI_QUAD_FRAGMENT_SHADER_DEDICATED,
+            vert_layouts: quad_layouts,
         })?;
 
         gpu.set_uniform_1i(pipeline, "u_texture_array", 0)?;
-        gpu.set_uniform_1i(pipeline, "u_texture", 1)?;
 
         let ui_texture_array = gpu.create_texture_array(TextureArrayDesc {
             width: UI_ATLAS_WIDTH,
@@ -151,19 +184,23 @@ impl UIRenderer {
             format: TextureFormat::Rgba8,
         })?;
 
+        gpu.set_uniform_1i(pipeline_dedicated, "u_texture", 0)?;
+
         Ok(Self { 
             screen_width: screen_width, 
             screen_height: screen_height,
             pipeline,
+            pipeline_dedicated,
             quad_vbo,
             quad_ibo,
             instance_vbo,
             instances: Vec::with_capacity(4096),
-            batches: Vec::with_capacity(256),
+            dedicated_instances: Vec::new(),
+            atlas_instances: Vec::with_capacity(4096),
             max_instances: MAX_INSTANCES, 
-            batch_count: 0,
             ui_texture_array,
             image_atlas_layers: Vec::new(),
+            dedicated_draws: Vec::new(),
         })
     }
 
@@ -172,109 +209,144 @@ impl UIRenderer {
         self.screen_height = height;
 
         self.instances.clear();
-        self.batches.clear();
-        self.batch_count = 0;
+        self.atlas_instances.clear();
+        self.dedicated_instances.clear();
+        self.dedicated_draws.clear();
     }
 
     pub fn end<G: GraphicsDevice>(&mut self, gpu: &mut G) -> anyhow::Result<()> {
-        if self.instances.is_empty() {
+        if self.atlas_instances.is_empty() && self.dedicated_instances.is_empty() {
             return Ok(());
         }
 
-        let instance_bytes = bytemuck::cast_slice(&self.instances);
+        self.instances.clear();
+
+        let (instances_to_upload, atlas_start) = if self.dedicated_instances.is_empty() {
+            (self.atlas_instances.as_slice(), 0)
+        } else {
+            self.instances
+                .extend_from_slice(&self.dedicated_instances);
+
+            let atlas_start = self.instances.len() as u32;
+
+            self.instances
+                .extend_from_slice(&self.atlas_instances);
+
+            (self.instances.as_slice(), atlas_start)
+        };
+
+        let instance_bytes = bytemuck::cast_slice(instances_to_upload);
 
         gpu.write_buffer(self.instance_vbo, 1, 0, instance_bytes)?;
-
-        gpu.set_pipeline(self.pipeline)?;
-        gpu.set_uniform_2f(self.pipeline, "u_screen_size", 
-            self.screen_width as f32, self.screen_height as f32)?;
 
         gpu.set_vertex_buffer(self.quad_vbo,    0)?;
         gpu.set_vertex_buffer(self.instance_vbo, 1)?;
         gpu.set_index_buffer(self.quad_ibo)?;
 
-        for batch in &self.batches {
-            if let Some(texture) = batch.key.texture {
-                let slot = if gpu.texture_get_kind(texture)? == TextureKind::TextureArray2d {
-                    0
-                } else { 1 };
-                gpu.set_texture(slot, texture)?;
+        if !self.dedicated_instances.is_empty() {
+            gpu.set_pipeline(self.pipeline_dedicated)?;
+            gpu.set_uniform_2f(self.pipeline_dedicated, "u_screen_size", 
+                self.screen_width as f32, self.screen_height as f32)?;
+
+            for draw in &self.dedicated_draws {
+                gpu.set_texture(0, draw.texture_handle)?;
+
+                gpu.draw_indexed_instanced(DrawIndexedInstanced {
+                    index_count: 6, 
+                    index_offset: 0, 
+                    vertex_offset: 0, 
+                    inst_count: draw.count, 
+                    inst_offset: draw.start,
+                })?;
             }
+        }
+
+
+        if !self.atlas_instances.is_empty() {
+            gpu.set_pipeline(self.pipeline)?;
+            gpu.set_uniform_2f(self.pipeline, "u_screen_size", 
+                self.screen_width as f32, self.screen_height as f32)?;
+
+
+            gpu.set_texture(0, self.ui_texture_array)?;
 
             gpu.draw_indexed_instanced(DrawIndexedInstanced {
                 index_count: 6, 
                 index_offset: 0, 
                 vertex_offset: 0, 
-                inst_count: batch.inst_count, 
-                inst_offset: batch.inst_start, 
+                inst_count: self.atlas_instances.len() as u32, 
+                inst_offset: atlas_start 
             })?;
         }
 
-        println!("{} drawcalls.", self.batches.len());
 
         Ok(())
     }
-    
-    pub fn textured_quad(
+
+    pub fn atlas_array_texture(&self) -> anyhow::Result<TextureHandle> {
+        Ok(self.ui_texture_array)
+    }
+
+    pub fn raw_quad_atlas(
         &mut self, 
         rect: [f32; 4], 
-        texture: TextureHandle,
         uv: [f32; 4],
         color: Color,
         params: [f32; 4],
-        ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<()> {
+
+        let total_instances =
+            self.atlas_instances.len() + self.dedicated_instances.len();
+
+        if total_instances >= self.max_instances {
+            anyhow::bail!("UI instance buffer overflow");
+        }
+
+
+        self.atlas_instances.push(QuadInstance::textured(rect, uv, color, params));
+
+        Ok(())
+    }
+    pub fn raw_quad_dedicated(
+        &mut self, 
+        texture_handle: TextureHandle,
+        rect: [f32; 4], 
+        uv: [f32; 4],
+        color: Color,
+        params: [f32; 4],
+    ) -> anyhow::Result<()> {
         if self.instances.len() >= self.max_instances {
             anyhow::bail!("UI instance buffer overflow");
         }
 
-        let instance_start = self.instances.len() as u32;
+        let start = self.dedicated_instances.len() as u32;
 
-        let kind = params[3];
-        let batch_key = match kind {
-            0.0 => BatchKey {
-                kind: BatchKind::Solid,
-                texture: None,
-            },
+        self.dedicated_instances
+            .push(QuadInstance::textured(rect, uv, color, params));
 
-            // image or glyph
-            _ => BatchKey {
-                kind: BatchKind::Textured,
-                texture: Some(texture),
-            },
-        };
-
-        match self.batches.last_mut() {
-            Some(batch) if 
-                batch.key.texture == batch_key.texture || 
-                batch.key.kind == BatchKind::Solid || 
-                batch_key.kind == BatchKind::Solid => {
-                    // can merge 
-                    batch.inst_count += 1;
+        match self.dedicated_draws.last_mut() {
+            Some(draw) if 
+                draw.texture_handle == texture_handle => {
+                    draw.count += 1;
             }
             _ => {
-                // spill instance to new batch
-                self.batches.push(
-                    QuadBatch { 
-                        inst_start: instance_start, 
-                        inst_count: 1, 
-                        key: batch_key 
-                    });
+                self.dedicated_draws.push(DedicatedDraw { 
+                    start,
+                    texture_handle, 
+                    count: 1});
             }
-        } 
+        }
 
-
-        self.instances.push(QuadInstance::textured(rect, uv, color, params));
 
         Ok(())
     }
 
     pub fn quad(&mut self, rect: [f32; 4], color: Color) -> anyhow::Result<()> {
-        self.textured_quad(
+        self.raw_quad_atlas(
             rect,
-            TextureHandle(0),
             [0.0, 0.0, 1.0, 1.0],
             color,
-            [0.0, 0.0, 0.0, 0.0] 
+            [0.0, 0.0, 0.0, 0.0],
         )
     }
 
@@ -284,15 +356,8 @@ impl UIRenderer {
         y: f32,
         image: Image
     ) -> anyhow::Result<()> {
-        self.textured_quad(
-            [x, y, image.width as f32, image.height as f32],
-            self.ui_texture_array,
-            [0.0, 0.0, 1.0, 1.0],
-            Color::rgba(1.0, 1.0, 1.0, 1.0),
-            [0.0, 0.0, image.layer as f32, 3.0] 
-        )
+        self.image_tined(x, y, image, Color::rgba(1.0, 1.0, 1.0, 1.0))
     }
-
 
     pub fn image_tined(
         &mut self,
@@ -301,56 +366,73 @@ impl UIRenderer {
         image: Image,
         color: Color
     ) -> anyhow::Result<()> {
-        self.textured_quad(
-            [x, y, image.width as f32, image.height as f32],
-            self.ui_texture_array,
-            [0.0, 0.0, 1.0, 1.0],
-            color,
-            [0.0, 0.0, image.layer as f32, 3.0] 
-        )
+        match image.storage {
+            ImageStorage::Dedicated { texture_handle } => { 
+                self.raw_quad_dedicated(
+                    texture_handle,
+                    [x, y, image.size[0] as f32, image.size[1] as f32],
+                    [0.0, 0.0, 1.0, 1.0],
+                    color,
+                    [0.0, 0.0, 0.0, 3.0],
+                )?;
+
+                Ok(())
+            }
+            ImageStorage::Atlas { layer, uv_min, uv_max } => { 
+                self.raw_quad_atlas(
+                    [x, y, image.size[0] as f32, image.size[1] as f32],
+                    [
+                    uv_min[0],
+                    uv_min[1],
+                    uv_max[0],
+                    uv_max[1],
+                    ],
+                    color,
+                    [0.0, 0.0, layer as f32, 3.0],
+                )?;
+
+                Ok(())
+            }
+        }
     }
 
-    fn allocate_image_rect(
-    &mut self,
-    width: u32,
-    height: u32,
-    padding: u32,
-) -> anyhow::Result<(u32, u32, u32, u32, u32)> {
-    if width + padding > UI_ATLAS_WIDTH || height + padding > UI_ATLAS_HEIGHT {
-        anyhow::bail!("image is larger than UI atlas layer");
-    }
+    pub fn allocate_image_rect(
+        &mut self,
+        width: u32,
+        height: u32,
+        padding: u32,
+    ) -> anyhow::Result<(u32, u32, u32, u32, u32)> {
+        if self.image_atlas_layers.is_empty() {
+            self.create_new_image_layer()?;
+        }
 
-    if self.image_atlas_layers.is_empty() {
-        self.create_new_image_layer()?;
-    }
+        let mut layer_idx = self.image_atlas_layers.len() - 1;
 
-    let mut layer_idx = self.image_atlas_layers.len() - 1;
+        {
+            let layer = &mut self.image_atlas_layers[layer_idx];
 
-    {
+            if layer.cursor_x + width + padding > layer.width {
+                layer.cursor_x = 0;
+                layer.cursor_y += layer.row_h + padding;
+                layer.row_h = 0;
+            }
+
+            if layer.cursor_y + height + padding > layer.height {
+                self.create_new_image_layer()?;
+                layer_idx = self.image_atlas_layers.len() - 1;
+            }
+        }
+
         let layer = &mut self.image_atlas_layers[layer_idx];
 
-        if layer.cursor_x + width + padding > layer.width {
-            layer.cursor_x = 0;
-            layer.cursor_y += layer.row_h + padding;
-            layer.row_h = 0;
-        }
+        let x = layer.cursor_x;
+        let y = layer.cursor_y;
+        let layer_id = layer.layer;
 
-        if layer.cursor_y + height + padding > layer.height {
-            self.create_new_image_layer()?;
-            layer_idx = self.image_atlas_layers.len() - 1;
-        }
-    }
+        layer.cursor_x += width + padding;
+        layer.row_h = layer.row_h.max(height);
 
-    let layer = &mut self.image_atlas_layers[layer_idx];
-
-    let x = layer.cursor_x;
-    let y = layer.cursor_y;
-    let layer_id = layer.layer;
-
-    layer.cursor_x += width + padding;
-    layer.row_h = layer.row_h.max(height);
-
-    Ok((layer_id, x, y, layer.width, layer.height))
+        Ok((layer_id, x, y, layer.width, layer.height))
     }
 
     fn create_new_image_layer(&mut self) -> anyhow::Result<u32> {
@@ -372,6 +454,22 @@ impl UIRenderer {
         Ok(layer)
     }
 
+
+    pub fn upload_pixels_to_atlas<G: GraphicsDevice>(&self, 
+        x: u32, 
+        y: u32, 
+        width: u32, 
+        height: u32, 
+        layer: u32,
+        pixels: &[u8],
+        gpu: &mut G) -> anyhow::Result<()> {
+        gpu.write_texture_array_layer(
+            self.ui_texture_array, 
+            x, y, layer, 
+            width, height, 
+            pixels)
+    }
+
     pub fn load_image<G: GraphicsDevice>(
         &mut self,
         gpu: &mut G,
@@ -379,35 +477,47 @@ impl UIRenderer {
     ) -> anyhow::Result<Image> {
         let data = ImageData::load_rgba8(path)?;
 
-        let (layer, x, y, atlas_w, atlas_h) =
-            self.allocate_image_rect(data.width, data.height, 1)?;
+        let padding = 1;
+        if data.width + padding > UI_ATLAS_WIDTH || 
+            data.height + padding > UI_ATLAS_HEIGHT {
 
-        gpu.write_texture_array_layer(
-            self.ui_texture_array,
-            x,
-            y,
-            layer,
-            data.width,
-            data.height,
-            &data.pixels,
-        )?;
+                let texture_handle = gpu.create_texture(
+                    TextureDesc {
+                        width: data.width,
+                        height: data.height,
+                        format: TextureFormat::Rgba8,
+                    },
+                    Some(&data.pixels),
+                )?;
+                gpu.texture_gen_mipmap(texture_handle)?;
+                Ok(Image { storage: ImageStorage::Dedicated {
+                    texture_handle
+                }, size: [data.width, data.height] })
 
-        gpu.texture_gen_mipmap(self.ui_texture_array)?;
+            } else {
 
-        Ok(Image {
-            layer,
-            width: data.width,
-            height: data.height,
-            uv_min: [
-                x as f32 / atlas_w as f32,
-                y as f32 / atlas_h as f32,
-            ],
-            uv_max: [
-                (x + data.width) as f32 / atlas_w as f32,
-                (y + data.height) as f32 / atlas_h as f32,
-            ],
-        })
+                let (layer, x, y, atlas_w, atlas_h) =
+                    self.allocate_image_rect(data.width, data.height, padding)?;
+
+                self.upload_pixels_to_atlas(x, y, data.width, data.height, layer, &data.pixels, gpu)?;
+
+                gpu.texture_gen_mipmap(self.ui_texture_array)?;
+
+                Ok(Image {
+                    storage: ImageStorage::Atlas {
+                        layer,
+                        uv_min: [
+                            x as f32 / atlas_w as f32,
+                            y as f32 / atlas_h as f32,
+                        ],
+                        uv_max: [
+                            (x + data.width) as f32 / atlas_w as f32,
+                            (y + data.height) as f32 / atlas_h as f32,
+                        ],
+                    },
+                    size: [data.width, data.height]
+                })
+        }
+
     }
-
-
 }

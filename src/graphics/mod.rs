@@ -29,7 +29,6 @@ pub use device::{
 pub mod image;
 
 pub use image::ImageData;
-pub use image::Image;
 
 pub mod font;
 
