@@ -5,19 +5,27 @@ use crate::graphics::FontHandle;
 
 use harfbuzz_rs::{shape, UnicodeBuffer};
 
-
+// Used as the key to get cached glyphs for 
+// a given font/glyph index combination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GlyphKey {
     pub font_handle: FontHandle,
     pub glyph_idx: u32,
 }
 
+// Font loading, shaping and glyph 
+// rasterization manager.
+//
+// Manages the FreeType library handle, 
+// loaded fonts and rasterized glyph cache.
 pub struct FontManager {
     lib_handle: ft::Library,
     fonts: Vec<Font>,
     glyph_cache: HashMap<GlyphKey, Glyph>
 }
 
+// Represents one rasterized glyph bitmap 
+// and its layout metrics.
 #[derive(Debug, Clone)]
 pub struct Glyph {
     pub width: u32,
@@ -29,6 +37,8 @@ pub struct Glyph {
     pub pixels: Vec<u8>
 }
 
+// Represents one glyph produced by text 
+// shaping.
 #[derive(Debug, Clone)]
 pub struct ShapedGlyph {
     pub glyph_idx: u32,
@@ -39,11 +49,23 @@ pub struct ShapedGlyph {
     pub y_off: f32,
 }
 
+// Represents one loaded font face.
+//
+// Stores both the FreeType face used for 
+// rasterization and the HarfBuzz font used 
+// for shaping.
 pub struct Font {
     pub size: u32,
-    // selected strike size for bitmap_strike fonts
+
+    // Selected strike size for bitmap-strike 
+    // fonts. This is equal to the size field 
+    // for almost all fonts except Emoji fonts.
     pub raster_size: u32,
-    // size / raster_size
+
+    // Scale factor from selected raster 
+    // size to the requested font size.
+    // This is 1.0 for almost all fonts 
+    // except Emoji fonts.
     pub scale: f32, 
 
     pub bitmap_strike: bool,
@@ -54,6 +76,8 @@ pub struct Font {
 }
 
 impl FontManager {
+    // Creates a new font manager and initializes 
+    // the FreeType library.
     pub fn new() -> anyhow::Result<Self> {
         let lib_handle = ft::Library::init()?;
 
@@ -74,6 +98,18 @@ impl FontManager {
     ) -> anyhow::Result<Vec<u8>> {
         use image::{ImageBuffer, Rgba};
 
+        // Resize the RGBa pixel buffer with 
+        // 'image' and FilterType::Triangle. 
+        // This is done to drastically improve 
+        // rendering quality of glyphs that need 
+        // scaling (meaning their font's raster size 
+        // is not equal to their actual preferred size).
+        //
+        // This is almost exclusively done for emojis.
+        //
+        // We have found that FilterType::Triangle is 
+        // the bets trade off between performance and 
+        // quality.
         let img: ImageBuffer<Rgba<u8>, Vec<u8>> =
             ImageBuffer::from_raw(width, height, pixels.to_vec())
             .ok_or_else(|| anyhow::anyhow!("invalid RGBA bitmap buffer"))?;
@@ -88,24 +124,15 @@ impl FontManager {
         Ok(resized.into_raw())
     }
 
-    pub fn glyph_idx_for_char(&self, font_handle: FontHandle, ch: char) ->
-        anyhow::Result<Option<u32>> {
-            let font = self.get_font(font_handle)?; 
-
-            let idx = font.face.get_char_index(ch as usize) as Option<u32>;
-
-            if idx.is_some() {
-                Ok(idx)
-            } else {
-                Ok(None)
-            } 
-        }
-
-
     fn alpha_to_rgba(
         &self,
         bitmap: &freetype::Bitmap,
     ) -> Vec<u8> {
+        // Convert an alpha-only bitmap to a RGBA 
+        // bitmap by extending the given u8 Vec
+        // with 1 btye per pixel to a newly |allocate|d 
+        // u8 Vec with 4 bytes per pixel with 
+        // R,G,B=255 A=alpha and returning the result 
         let width = bitmap.width() as usize;
         let height = bitmap.rows() as usize;
         let pitch = bitmap.pitch().abs() as usize;
@@ -129,6 +156,12 @@ impl FontManager {
         &self,
         bitmap: &freetype::Bitmap,
     ) -> Vec<u8> {
+        // Convert a BGRA bitmap to a RGBA 
+        // bitmap by reversing the given u8 Vec's
+        // B,G,R bytes -> R,G,B bytes and storing 
+        // the result + the A byte in a newly 
+        // |allocate|d u8 Vec with 4 bytes per pixel with 
+        // R,G,B,A and returning the result 
         let width = bitmap.width() as usize;
         let height = bitmap.rows() as usize;
         let pitch = bitmap.pitch().abs() as usize;
@@ -166,8 +199,15 @@ impl FontManager {
         font_handle: FontHandle,
         glyph_idx: u32
     ) -> anyhow::Result<Glyph> {
+        // Get the font from the opaque handle 
         let font = self.get_font(font_handle)?; 
 
+        // If the font has bitmap_strike set to 
+        // true, it means the font has fixed 
+        // sizes, e.g 32px, 64px, 128px. This is 
+        // true for all Emoji fonts, making it a 
+        // reasonable way to determine if a glyph
+        // needs color loaded.
         let flags = if font.bitmap_strike {
             ft::face::LoadFlag::RENDER | 
                 ft::face::LoadFlag::COLOR 
@@ -175,29 +215,32 @@ impl FontManager {
             ft::face::LoadFlag::RENDER 
         };
 
+        // Load/rasterize the glyph with freetype
         font.face.load_glyph(
             glyph_idx,
             flags
         )?;
 
-        let glyph = font.face.glyph();
-        let bitmap = glyph.bitmap();
+        let glyph           = font.face.glyph();
+        let bitmap          = glyph.bitmap();
+        let mut width       = bitmap.width() as u32;
+        let mut height      = bitmap.rows() as u32;
 
-
-
-        let mut width = bitmap.width() as u32;
-        let mut height = bitmap.rows() as u32;
-
+        // Convert the pixels to RGBA
         let mut pixels_rgba = match bitmap.pixel_mode()? {
             bitmap::PixelMode::Bgra => self.bgra_to_rgba(&bitmap),
             bitmap::PixelMode::Gray => self.alpha_to_rgba(&bitmap),
             _ => bitmap.buffer().to_vec(),
         };
 
-        let mut bearing_x = glyph.bitmap_left();
-        let mut bearing_y = glyph.bitmap_top();
-        let mut advance_x = glyph.advance().x;
+        let mut bearing_x   = glyph.bitmap_left();
+        let mut bearing_y   = glyph.bitmap_top();
+        let mut advance_x   = glyph.advance().x;
 
+        // If the font is an emoji font and it's
+        // preferred font size is not equal to 
+        // selected strike size, resize the glyph 
+        // bitmap to include the font's scale factor. 
         if font.bitmap_strike && font.scale != 1.0 {
             let new_width = ((width as f32 * font.scale).round() as u32).max(1);
             let new_height = ((height as f32 * font.scale).round() as u32).max(1);
@@ -228,6 +271,8 @@ impl FontManager {
         })
     }
 
+    // Gets a cached glyph or rasterizes and 
+    // caches it if it has not been loaded yet.
     pub fn get_or_load_glyph(
         &mut self,
         font_handle: FontHandle,
@@ -238,6 +283,7 @@ impl FontManager {
             glyph_idx
         };
 
+        // Cached rasterization of glyphs
         if !self.glyph_cache.contains_key(&key) {
             let glyph = self.rasterize_glyph(font_handle, glyph_idx)?;
             self.glyph_cache.insert(key, glyph);
@@ -255,10 +301,13 @@ impl FontManager {
 
         let num_fixed_sizes = raw.num_fixed_sizes;
 
+        // No available sizes -> Return None to 
+        // indicate.
         if num_fixed_sizes <= 0 || raw.available_sizes.is_null() {
             return Ok(None);
         }
 
+        // Get available strikes (no safe function available)
         let strikes = unsafe {
             std::slice::from_raw_parts(
                 raw.available_sizes,
@@ -266,6 +315,7 @@ impl FontManager {
             )
         };
 
+        // Get closest strike match  
         let mut best_larger_or_equal: Option<(usize, u32)> = None;
         let mut best_smaller: Option<(usize, u32)> = None;
 
@@ -303,6 +353,12 @@ impl FontManager {
         Ok(Some(raster_size))
     }
 
+    // Loads a font from disk and stores it in 
+    // the font manager.
+    //
+    // Selects the best bitmap strike when the 
+    // font has fixed-size strikes, otherwise 
+    // configures the face for scalable rendering.
     pub fn load_font(
         &mut self,
         path: impl AsRef<Path>,
@@ -320,16 +376,21 @@ impl FontManager {
         let mut raster_size = size;
         let mut bitmap_strike = false;
 
+        // Select best fixed size if the font is a 
+        // fixed-size font
         if let Some(selected_raster_size) = self.select_best_bitmap_strike(&face, size)? {
             raster_size = selected_raster_size;
             bitmap_strike = true;
         } else {
+            // If the font supports it, set exact preferred 
+            // pixel size
             face.set_pixel_sizes(0, size)?;
         }
 
         let hb_face = harfbuzz_rs::Face::from_file(path, face_idx as u32)?;
         let mut hb_font = harfbuzz_rs::Font::new(hb_face);
 
+        // HarfBuzz needs * 64
         hb_font.set_scale(
             (raster_size as i32) * 64,
             (raster_size as i32) * 64,
@@ -357,20 +418,31 @@ impl FontManager {
             .ok_or_else(|| anyhow::anyhow!("invalid texture handle: {:?}", handle))
     }
 
+    // Returns the font ascender in pixels.
     pub fn ascender(&self, font_handle: FontHandle) -> anyhow::Result<i32> {
         let font = self.get_font(font_handle)?;
         Ok(font.face.size_metrics().unwrap().ascender as i32 >> 6)
     }
 
+    // Returns the font line height in pixels.
     pub fn line_height(&self, font_handle: FontHandle) -> anyhow::Result<i32>  {
         let font = self.get_font(font_handle)?;
         Ok(font.face.size_metrics().unwrap().height as i32 >> 6)
     }
 
+    // Returns the font scale from selected raster 
+    // size to requested font size.
     pub fn scale(&self, font_handle: FontHandle) -> anyhow::Result<f32>  {
         let font = self.get_font(font_handle)?;
         Ok(font.scale)
     }
+
+    // Returns the scale that should be applied 
+    // during rendering.
+    //
+    // Bitmap-strike fonts are already rasterized 
+    // at their target size and use a render scale 
+    // of 1.0.
     pub fn render_scale(&self, font_handle: FontHandle) -> anyhow::Result<f32>  {
         let font = self.get_font(font_handle)?;
 
@@ -381,21 +453,28 @@ impl FontManager {
         }
     }
 
+    // Returns whether the font uses colored 
+    // bitmap-strike glyphs.
     pub fn is_colored(&self, font_handle: FontHandle) -> anyhow::Result<bool>  {
         let font = self.get_font(font_handle)?;
         Ok(font.bitmap_strike)
     }
 
+    // Shapes text into positioned glyphs using 
+    // HarfBuzz.
     pub fn shape_text(&self, font_handle: FontHandle, text: &str) -> anyhow::Result<Vec<ShapedGlyph>> {
         let font = self.get_font(font_handle)?;
 
         let buffer = UnicodeBuffer::new().add_str(text);
 
+        // Use HarfBuzz to Shape the text
         let output = shape(&font.hb_font, buffer, &[]);
 
         let infos = output.get_glyph_infos();
         let positions = output.get_glyph_positions();
 
+        // Iterate HarfBuzz positions and infos to 
+        // collect shaped glyph information
         let shaped = infos.iter().zip(positions.iter())
             .map(|(info, pos)| ShapedGlyph {
                 glyph_idx: info.codepoint,

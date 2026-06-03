@@ -18,12 +18,14 @@ use crate::graphics::opengl::OpenGLRenderer;
 use crate::graphics::vulkan::VulkanRenderer;
 use crate::platform::Platform;
 
+// Available graphics rendering backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GraphicsBackend {
     OpenGL,
     Vulkan,
 }
 
+// Graphics-backend renderer implementation.
 pub enum Renderer {
     OpenGL(OpenGLRenderer),
     Vulkan(VulkanRenderer),
@@ -46,6 +48,13 @@ impl Renderer {
     }
 
     fn device_mut(&mut self) -> &mut dyn GraphicsDevice {
+        match self {
+            Self::OpenGL(renderer) => renderer,
+            Self::Vulkan(renderer) => renderer,
+        }
+    }
+    
+    fn device(&self) -> &dyn GraphicsDevice {
         match self {
             Self::OpenGL(renderer) => renderer,
             Self::Vulkan(renderer) => renderer,
@@ -214,5 +223,8 @@ impl GraphicsDevice for Renderer {
         self.device_mut().texture_get_kind(texture)
     }
 
+    fn size(&self) -> (u32, u32) {
+        self.device().size()
+    }
 
 }

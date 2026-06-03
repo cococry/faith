@@ -3,76 +3,130 @@ use std::{collections::HashMap, num::NonZeroUsize};
 use lru::LruCache;
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::{graphics::{FontHandle, FontManager, GraphicsDevice, font::{Glyph, GlyphKey, ShapedGlyph}}, ui::UIRenderer};
+use crate::{graphics::{FontHandle, FontManager, GraphicsDevice, font::{Glyph, GlyphKey, ShapedGlyph}}, ui::{UIRenderer, renderer::QuadType}};
 
+
+// Used as the key to get cached shaped 
+// glyphs for a given font/string combination
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ShapedTextKey {
     font_handle: FontHandle,
     text: String,
 }
 
+// Used as the key to get the cached font 
+// that was chosen to be ideal to render/shape 
+// a given cluster in an original font.
+//
+// If the cluster is available in the original 
+// font, the original font is chosen as ideal. 
+//
+// If neither any of the provided fallback fonts 
+// in TextRenderer.falllback_fonts nor the given
+// original font supports the cluster, the 
+// original font is chosen as ideal, effictively
+// making the cluster not renderable.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ClusterFontKey {
     original: FontHandle,
     cluster: String,
 }
 
+// Used as the key to get the boolean value 
+// wether or not a given cluster in a given 
+// font is supported by that font. 
+//
+// This is cached because evaluating support 
+// for clusters involves using 
+// FontManager.shape_text for the cluster 
+// which can get expensive.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FontSupportKey{
     cluster: String,
     font_handle: FontHandle
 }
 
+// A sub-region of a text string for which 
+// `font_handle` is the (fallback) font that 
+// supports all clusters within the `text` 
+// string. 
 #[derive(Debug, Clone)]
 struct TextRun {
     font_handle: FontHandle,
     text: String,
 }
 
+// Used as the key to get cached text runs 
+// for a given font/string combination
+// (in LRU cache)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FallbackRunKey {
     original_font: FontHandle,
     text: String,
 }
 
-pub struct TextRenderer {
-    glyph_locations: HashMap<GlyphKey, AtlasGlyph>,
-    font_manager: FontManager,
-    shaped_cache: LruCache<ShapedTextKey, Vec<ShapedGlyph>>,
+// Represents a glyph's UV coordinate- 
+// and layer-information within the  
+// UIRenderer.ui_texture_array
+pub struct AtlasGlyph {
+    pub atlas_layer: u32,
+    pub uv_min:     [f32; 2],
+    pub uv_max:     [f32; 2],
+    pub size:       [u32; 2],
+    pub bearing:    [i32; 2],
+}
 
+// Text rendering engine. 
+// Manages glyph-, fallback-font-
+// text-shaping- and glyph-shaping-caches.
+//
+// Uses FontManager to shape texts/glyphs 
+// with HarfBuzz and load glyphs/fonts with 
+// FreeType.
+pub struct TextRenderer {
+    font_manager: FontManager,
+   
+    // Provided possible fallback fonts 
+    // for glyphs. We do not do dynamic
+    // fallback font discovery such as 
+    // DirectWrite or fontconfig.
+    fallback_fonts: Vec<FontHandle>,
+
+    // Cached atlas locations (uv, atlas layer) of glyphs
+    glyph_locations: HashMap<GlyphKey, AtlasGlyph>,
+
+    shaped_cache: LruCache<ShapedTextKey, Vec<ShapedGlyph>>,
     fallback_cache: HashMap<ClusterFontKey, FontHandle>,
     font_run_cache: LruCache<FallbackRunKey, Vec<TextRun>>,
     font_support_cache: HashMap<FontSupportKey, bool>,
-    fallback_fonts: Vec<FontHandle>,
-}
-
-
-pub struct AtlasGlyph {
-    pub atlas_layer: u32,
-    pub uv_min: [f32; 2],
-    pub uv_max: [f32; 2],
-    pub size: [u32; 2],
-    pub bearing: [i32; 2],
 }
 
 impl TextRenderer {
+    // Creates a new text renderer with empty 
+    // glyph-, fallback-font-, text-shaping- and 
+    // font-support-caches.
+    // Initializes FreeType internally by 
+    // calling FontManager::new() 
     pub fn new() -> anyhow::Result<Self> {
         let font_manager = FontManager::new()?;
         
         Ok(Self {
-            glyph_locations: HashMap::new(),
             font_manager,
+            fallback_fonts: Vec::new(),
+
+            glyph_locations: HashMap::new(),
+
             shaped_cache: LruCache::new(NonZeroUsize::new(4096).unwrap()),
             fallback_cache: HashMap::new(),
             font_run_cache: LruCache::new(NonZeroUsize::new(4096).unwrap()),
             font_support_cache: HashMap::new(),
-            fallback_fonts: Vec::new(),
         })
 
     }
 
     fn font_supports_cluster_cached(&mut self, font_handle: FontHandle, 
         cluster: &str) -> anyhow::Result<bool> {
+
         let key = FontSupportKey {
             font_handle,
             cluster: cluster.to_owned(),
@@ -84,6 +138,10 @@ impl TextRenderer {
 
         let shaped = self.font_manager.shape_text(font_handle, cluster)?;
 
+        // If any of the resulting shaped glyphs for the 
+        // cluster have a glyph index of 0 
+        // (meaning not supported), we mark the entire 
+        // cluster as not supported by the font.
         let supported = !shaped.is_empty()
             && shaped.iter().all(|g| g.glyph_idx != 0);
 
@@ -93,7 +151,7 @@ impl TextRenderer {
 
     }
 
-    fn build_fallback_runs(
+    fn build_fallback_runs_cached(
         &mut self,
         original_font: FontHandle,
         text: &str,
@@ -114,10 +172,14 @@ impl TextRenderer {
         let mut current_text = String::new();
 
         for cluster in text.graphemes(true) {
+            // Get the cached ideal font for the 
+            // grapheme cluster
             let font = self.font_for_cluster(original_font, cluster)?;
 
             if current_font != Some(font) {
                 if let Some(font_handle) = current_font {
+                    // Insert new run if the ideal font 
+                    // changed
                     runs.push(TextRun {
                         font_handle,
                         text: std::mem::take(&mut current_text),
@@ -128,7 +190,10 @@ impl TextRenderer {
 
             current_text.push_str(cluster);
         }
-                
+        
+        // Insert new run for the remaining text 
+        // using the ideal font for the current text,
+        // `current_font`.
         if let Some(font_handle) = current_font {
             runs.push(TextRun {
                 font_handle,
@@ -152,26 +217,33 @@ impl TextRenderer {
             return Ok(*font)
         }
 
+        // If the original font supports the cluster, cache it 
+        // and return the original font.
         if self.font_supports_cluster_cached(original_font, cluster)? {
             self.fallback_cache.insert(key, original_font);
             return Ok(original_font)
         }
 
-
+        // Check all provided fallback fonts
         for i in 0..self.fallback_fonts.len() {
             let static_fallback = self.fallback_fonts[i];
 
             if static_fallback == original_font {
+                // Skip original font, we know 
+                // it does not support the cluster 
                 continue;
             }
 
             if self.font_supports_cluster_cached(static_fallback, cluster)? {
-                // found fallback
+                // Found fallback
                 self.fallback_cache.insert(key, static_fallback);
                 return Ok(static_fallback);
             }
         }
 
+        // No fallback found, use `original_font`, which
+        // also does not support the cluster -> 
+        // Cluster is not renderable.
         self.fallback_cache.insert(key, original_font);
         Ok(original_font)
     }
@@ -183,6 +255,10 @@ impl TextRenderer {
                 text: text.to_owned()
             };
 
+            // We do not cache texts above a threshold
+            // of 4096 characters as we believe that 
+            // the LRU overhead is grater than the shape 
+            // overhead from that point on.
             if text.len() <= 4096 {
                 if let Some(shaped) = self.shaped_cache.get(&key) {
                     return Ok(shaped.clone());
@@ -198,15 +274,15 @@ impl TextRenderer {
             Ok(shaped)
         }
 
-
     fn upload_glyph<G: GraphicsDevice>(
         &mut self, key: GlyphKey, glyph: 
         Glyph, gpu: &mut G, 
         ui: &mut UIRenderer) -> anyhow::Result<()> {
 
+        // Use UIRenderer to allocate a region 
+        // for the glyph in the texture array
         let (layer, x, y, atlas_w, atlas_h) =
             ui.allocate_image_rect(glyph.width, glyph.height, 1)?;
-
 
         ui.upload_pixels_to_atlas(
             x,
@@ -238,6 +314,10 @@ impl TextRenderer {
 
     }
 
+    // Loads a given font path and returns the FontHandle 
+    // for it. 
+    // Clears the text engine's font-run-, fallback-,
+    // and font-support-caches.
     pub fn load_font(
         &mut self,
         path: impl AsRef<std::path::Path>,
@@ -255,6 +335,17 @@ impl TextRenderer {
     }
 
 
+    // Renders a given text with a given font. 
+    //
+    // The given font is the preferred font to 
+    // render glyphs with. If a grapheme cluster 
+    // is not supported by the preferred font, 
+    // it is rendered using a fallback font within 
+    // TextRenderer.fallback_fonts. 
+    // If no font supports a glyph, it is not rendered. 
+    //
+    // The rendered text is split into horizontal lines 
+    // by `\n` characters in the provided string.  
     pub fn render<G: GraphicsDevice>(
         &mut self,
         x: f32,
@@ -265,13 +356,14 @@ impl TextRenderer {
         ui: &mut UIRenderer,
     ) -> anyhow::Result<()> {
 
-        // y is top of the text box.
-        let scale = self.font_manager.scale(font_handle)?;
-        let mut baseline_y = y + self.font_manager.ascender(font_handle)? as f32 * scale;
-        let line_height = self.font_manager.line_height(font_handle)? as f32 * scale;
+        // Use baseline-y and line height of the 
+        // base, preferred font.
+        let base_scale = self.font_manager.scale(font_handle)?;
+        let mut baseline_y = y + self.font_manager.ascender(font_handle)? as f32 * base_scale;
+        let line_height = self.font_manager.line_height(font_handle)? as f32 * base_scale;
 
         for line in text.split('\n') {
-            let runs = self.build_fallback_runs(font_handle, line)?;
+            let runs = self.build_fallback_runs_cached(font_handle, line)?;
 
             let mut cursor_x = x;
 
@@ -281,24 +373,36 @@ impl TextRenderer {
 
                 let is_colored = self.font_manager.is_colored(run_font)?;
 
-                // emojis are handled as if they were images
-                let kind = if is_colored { 1.0 } else { 2.0 };
+                // Emojis are handled as if they were images
+                // in the shader, so we set ColoredImage kind.
+                let kind = if is_colored { 
+                    QuadType::ColoredImage 
+                } else { 
+                    QuadType::TextGlyph 
+                };
 
                 let font_scale = self.font_manager.scale(run_font)?;
                 let font_render_scale = self.font_manager.render_scale(run_font)?;
 
+                // TODO: Add color to API. 
+                // Regular text is rendered black, emojis are 
+                // rendered with a white tint (thus no tint).
                 let color = if is_colored {
                     crate::graphics::Color::rgba(1.0, 1.0, 1.0, 1.0)
                 } else {
                     crate::graphics::Color::rgba(0.0, 0.0, 0.0, 1.0)
                 };
 
-
                 for shaped in shaped_glyphs {
                     let key = GlyphKey {
                         font_handle: run_font,
                         glyph_idx: shaped.glyph_idx,
                     };
+
+                    // Load the glyph (rasterization with FreeType), 
+                    // and upload the bitmap to the GPU texture atlas
+                    // in it's allocated region (texture layer, UV), 
+                    // IF the glyph is not cached yet.
                     if !self.glyph_locations.contains_key(&key) {
                         let glyph = {
                             let glyph_ref = self.font_manager.get_or_load_glyph(run_font, shaped.glyph_idx)?;
@@ -310,17 +414,16 @@ impl TextRenderer {
 
                     let atlas_glyph = &self.glyph_locations[&key];
 
-                    let uv_min = atlas_glyph.uv_min;
-                    let uv_max = atlas_glyph.uv_max;
-
+                    let uv_min      = atlas_glyph.uv_min;
+                    let uv_max      = atlas_glyph.uv_max;
                     let atlas_layer = atlas_glyph.atlas_layer;
 
-                    let render_x =
+                    let render_x    =
                         cursor_x
                         + shaped.x_off * font_scale
                         + atlas_glyph.bearing[0] as f32 * font_render_scale;
 
-                    let render_y =
+                    let render_y    =
                         baseline_y
                         - shaped.y_off * font_scale
                         - atlas_glyph.bearing[1] as f32 * font_render_scale;
@@ -328,6 +431,9 @@ impl TextRenderer {
                     let w = atlas_glyph.size[0] as f32 * font_render_scale;
                     let h = atlas_glyph.size[1] as f32 * font_render_scale;
 
+                    // Submit the textured quad of the glyph 
+                    // to be rendered by the UIRenderer in 
+                    // UIRenderer.end()
                     ui.raw_quad_atlas(
                         [
                         render_x,
@@ -342,7 +448,7 @@ impl TextRenderer {
                         uv_max[1],
                         ],
                         color,
-                        [0.0, 0.0, atlas_layer as f32, kind]
+                        [0.0, 0.0, atlas_layer as f32, kind.as_f32()]
                     )?;
 
                     cursor_x += shaped.x_adv * font_scale;

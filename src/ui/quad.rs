@@ -4,8 +4,10 @@ use crate::graphics::{
     Color, TextureHandle,
 };
 
-
-
+// Represents one vertex of the shared UI quad.
+//
+// The local position and UV are expanded by 
+// per-instance data in the UI vertex shader.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct QuadVertex {
@@ -13,37 +15,29 @@ pub struct QuadVertex {
     pub local_uv: [f32; 2],
 }
 
+// Represents one renderable UI quad instance.
+//
+// Stores the screen-space rectangle, color, 
+// UV coordinates and shader parameters used 
+// to render one quad.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct QuadInstance {
-    /// x, y, w, h in screen pixels.
     pub rect: [f32; 4],
-
-    /// r, g, b, a.
     pub color: [f32; 4],
-
-    /// uv_min.x, uv_min.y, uv_max.x, uv_max.y.
     pub uv: [f32; 4],
 
-    /// radius, softness, border_width, kind.
-    ///
-    /// kind:
-    /// 0.0 = normal quad
-    /// 1.0 = rounded rect
-    /// 2.0 = glyph/text
+    // Extra shader parameters.
+    //
+    // Currently used for atlas layer and 
+    // QuadType information.
     pub params: [f32; 4],
 }
 
 impl QuadInstance {
-    pub fn colored(rect: [f32; 4], color: Color) -> Self {
-        Self {
-            rect: rect, 
-            color: [color.r, color.g, color.b, color.a],
-            uv: [0.0, 0.0, 1.0, 1.0],
-            params: [0.0, 0.0, 0.0, 0.0],
-        }
-    }
-
+    // Creates a textured quad instance using 
+    // the given rectangle, UV coordinates, 
+    // tint color and shader parameters.
     pub fn textured(
         rect: [f32; 4],
         uv: [f32; 4],
@@ -57,17 +51,10 @@ impl QuadInstance {
             params, 
         }
     }
-
-    pub fn rounded(rect: [f32; 4], radius: f32, color: Color) -> Self {
-        Self {
-            rect: rect, 
-            color: [color.r, color.g, color.b, color.a],
-            uv: [0.0, 0.0, 1.0, 1.0],
-            params: [radius, 0.0, 0.0, 1.0],
-        }
-    }
 }
 
+// Shared unit quad vertices used by all UI 
+// quad instances.
 pub const QUAD_VERTICES: [QuadVertex; 4] = [
     QuadVertex {
         local_pos: [0.0, 0.0],
@@ -87,6 +74,8 @@ pub const QUAD_VERTICES: [QuadVertex; 4] = [
     },
 ];
 
+// Indices for rendering the shared unit quad 
+// as two triangles.
 pub const QUAD_INDICES: [u32; 6] = [
     0, 1, 2,
     0, 2, 3,
@@ -129,7 +118,7 @@ void main() {
     v_color = i_color;
     v_rect = i_rect;
     v_params = i_params;
-    
+
     v_layer = int(i_params.z + 0.5);
     v_kind = int(v_params.w + 0.5);
 
@@ -152,9 +141,8 @@ out vec4 out_color;
 
 void main() {
     // 0 = solid rect
-    // 1 = color emoji or atlas image
-    // 2 = text glyph alpha mask
-    // 3 = regular atlas image
+    // 1 = text glyph alpha mask
+    // 2 = emoji/atlas image 
 
     if (v_kind == 0) {
         out_color = v_color;
@@ -163,7 +151,7 @@ void main() {
 
     vec4 tex_color = texture(u_texture_array, vec3(v_uv, float(v_layer)));
 
-    if (v_kind == 2) {
+    if (v_kind == 1) {
         // text glyph: use texture alpha only
         out_color = vec4(v_color.rgb, v_color.a * tex_color.a);
     } else {

@@ -1,3 +1,5 @@
+// Implementation following: https://github.com/Smithay/wayland-rs/blob/master/wayland-client/examples/simple_window.rs
+//
 use std::{ffi::c_void, os::fd::AsFd, sync::Arc};
 
 use crate::platform::window::WindowHandleInfo;
@@ -13,9 +15,12 @@ use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_ba
 
 use nix::unistd::read;
 
-
+// Wayland window state.
+//
+// Stores the current Wayland objects & state,
+// as well as pending events to be collected by 
+// Wayland protocol handler callbacks.
 pub struct WaylandState {
-    running: bool,
     width: u32,
     height: u32,
     title: String,
@@ -25,28 +30,51 @@ pub struct WaylandState {
     xdg_surface: Option<xdg_surface::XdgSurface>, 
     toplevel: Option<xdg_toplevel::XdgToplevel>, 
     egl_win: Option<wayland_egl::WlEglSurface>,
+
+    // Whether the initial xdg_surface configure 
+    // event has been received and acknowledged.
     configured: bool,
 
     pending_events: Vec<WindowEvent>,
     pending_resize: Option<(u32, u32)>,
 }
 
+// Wayland window platform implementation.
+//
+// Owns the Wayland connection, event queue, 
+// window state and wake file descriptor used 
+// to drive the window event loop.
 pub struct WaylandPlatform {
     conn: Connection,
     ev_queue: EventQueue<WaylandState>,
     state: WaylandState,
+
+    // Eventfd used to wake the blocking Wayland 
+    // event poll from another thread.
     wake_fd: Arc<EventFd>
 }
 
+// Marker type used as user data for Wayland 
+// protocol dispatch handlers. (thread safe)
 #[derive(Clone, Copy, Debug)]
 struct WaylandHandler;
 
 
+// Waker handle for requesting redraws from 
+// outside the Wayland event loop.
 #[derive(Clone)]
 pub struct WaylandWaker {
     wake_fd: Arc<EventFd>,
 }
+
+
 impl WaylandWaker {
+    // Unix implementation to request a redraw in the 
+    // Wayland platform window.
+    //
+    // Uses nix::unistd::write to wake up the self.wake_fd 
+    // file descriptor.
+
     pub fn request_redraw(&self) -> anyhow::Result<()> {
         let val: u64 = 1;
         let bytes = val.to_ne_bytes();
@@ -62,6 +90,8 @@ impl WaylandWaker {
 }
 
 impl WaylandState {
+    // Called when the XDG surface is initialized.
+    // At this point, we can set the tile of the toplevel.
     fn init_xdg_surface(&mut self, qh: &QueueHandle<WaylandState>) {
         let wm_base = self.wm_base.as_ref().unwrap();
         let base_surface = self.surface.as_ref().unwrap();
@@ -86,6 +116,9 @@ impl Dispatch<xdg_wm_base::XdgWmBase, WaylandHandler> for WaylandState {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
+        // We need to respond to a 'ping' with a 'pong' 
+        // in order to make the wayland compositor know 
+        // that our window is still active.
         if let xdg_wm_base::Event::Ping { serial } = event {
             wm_base.pong(serial);
         }
@@ -111,11 +144,10 @@ impl Dispatch<wl_registry::WlRegistry, WaylandHandler> for WaylandState {
                         WaylandHandler,
                     );
 
-                    let surface = compositor.create_surface(qh, WaylandHandler);
+                    let surface     = compositor.create_surface(qh, WaylandHandler);
+                    state.surface   = Some(surface);
 
-                    state.surface = Some(surface);
-
-
+                    // Call our init handler when the xdg surface has spawned 
                     if state.wm_base.is_some() && state.xdg_surface.is_none() {
                         state.init_xdg_surface(qh);
                     }
@@ -131,6 +163,7 @@ impl Dispatch<wl_registry::WlRegistry, WaylandHandler> for WaylandState {
 
                     state.wm_base = Some(wm_base);
 
+                    // Call our init handler when the xdg surface has spawned 
                     if state.surface.is_some() && state.xdg_surface.is_none() {
                         state.init_xdg_surface(qh);
                     }
@@ -142,6 +175,7 @@ impl Dispatch<wl_registry::WlRegistry, WaylandHandler> for WaylandState {
     }
 }
 
+// Not needed
 impl Dispatch<wl_compositor::WlCompositor, WaylandHandler> for WaylandState {
     fn event(
         _: &mut Self,
@@ -154,6 +188,7 @@ impl Dispatch<wl_compositor::WlCompositor, WaylandHandler> for WaylandState {
     }
 }
 
+// Not needed
 impl Dispatch<wl_surface::WlSurface, WaylandHandler> for WaylandState {
     fn event(
         _: &mut Self,
@@ -181,6 +216,8 @@ impl Dispatch<xdg_surface::XdgSurface, WaylandHandler> for WaylandState {
             if state.egl_win.is_none() {
                 let surface = state.surface.as_ref().unwrap();
 
+                // We need to create an EGL window for OpenGL/EGL 
+                // interop on Wayland.
                 let egl_win = wayland_egl::WlEglSurface::new(
                     surface.id(),
                     state.width as i32,
@@ -216,11 +253,13 @@ impl Dispatch<xdg_toplevel::XdgToplevel, WaylandHandler> for WaylandState {
     ) {
         match event {
             xdg_toplevel::Event::Close => {
-                state.running = false;
+                // respond to close event 
                 state.pending_events.push(WindowEvent::CloseRequested);
             }
 
             xdg_toplevel::Event::Configure { width, height, .. } => {
+                // respond to configure event.
+                // basically a resize event
                 if width > 0 && height > 0 {
                     state.width = width as u32;
                     state.height = height as u32;
@@ -241,7 +280,6 @@ impl WaylandPlatform {
 
 
         let mut state = WaylandState {
-            running: true, 
             width: config.width, 
             height: config.height, 
             title: config.title.clone(),
@@ -300,8 +338,12 @@ impl WaylandPlatform {
 
 
     pub fn poll_events(&mut self) -> anyhow::Result<Vec<WindowEvent>> {
+
+        // Collect any already queued events 
         while self.ev_queue.dispatch_pending(&mut self.state)? > 0 {}
 
+        // If there are still any queued/pending events, 
+        // do not block yet and return.
         if !self.state.pending_events.is_empty() {
             return Ok(std::mem::take(&mut self.state.pending_events));
         }
@@ -320,14 +362,21 @@ impl WaylandPlatform {
             self.conn.flush()?;
         };
 
+        // Get Wayland FD
         let wl_fd = guard.connection_fd();
 
+        // Set up FDs to poll on. Those being 
+        // the Wayland FD and the wake FD.
         let mut poll_fds = [
             PollFd::new(wl_fd, PollFlags::POLLIN),
             PollFd::new(self.wake_fd.as_fd(), PollFlags::POLLIN),
         ];
 
+        // Poll on the file descriptors
         poll(&mut poll_fds, PollTimeout::NONE)?;
+
+        // Repond to potential events on either 
+        // of the file descriptors 
 
         let wake_readable = poll_fds[1]
             .revents()
@@ -346,6 +395,8 @@ impl WaylandPlatform {
             drop(guard);
         }
 
+
+        // Respond to a requested redraw event
         if wake_readable {
             self.drain_wake_fd()?;
             self.state
@@ -353,6 +404,7 @@ impl WaylandPlatform {
                 .push(WindowEvent::RedrawRequested);
         }
 
+        // respond to pending Wayland events
         while self.ev_queue.dispatch_pending(&mut self.state)? > 0 {}
 
         self.conn.flush()?;
@@ -361,10 +413,13 @@ impl WaylandPlatform {
 
     }
 
+    // Returns the current Wayland window size.
     pub fn size(&self) -> (u32, u32) {
         (self.state.width, self.state.height)
     }
 
+    // Returns the native Wayland window handle 
+    // information used by graphics backends.
     pub fn native_handle(&self) -> WindowHandleInfo {
         WindowHandleInfo::Wayland {
             display: self.conn.backend().display_ptr() as *mut c_void, 
@@ -375,6 +430,8 @@ impl WaylandPlatform {
         }
     }
 
+    // Creates a waker handle that can request a 
+    // redraw from outside the Wayland event loop.
     pub fn waker(&self) -> WaylandWaker {
         WaylandWaker {
             wake_fd: self.wake_fd.clone(),

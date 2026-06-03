@@ -846,6 +846,11 @@ impl OpenGLRenderer {
         let tex = self.get_texture(texture)?;
         Ok(self.tex_kind_from_gl_kind(tex.kind))
     }
+
+    fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
 }
 
 impl Drop for OpenGLRenderer {
@@ -1007,5 +1012,11 @@ impl GraphicsDevice for OpenGLRenderer {
       ) -> anyhow::Result<TextureKind> {
         OpenGLRenderer::texture_get_kind(
             self, texture)
+      }
+      
+      fn size(
+          &self
+      ) -> (u32, u32) {
+        OpenGLRenderer::size(self)
       }
 }

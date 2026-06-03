@@ -7,8 +7,6 @@ use crate::{graphics::{GraphicsDevice}, ui::TextRenderer};
 
 use clap::Parser;
 use cli::Cli;
-use std::time::{Duration, Instant};
-
 
 use platform::{Platform, WindowConfig, WindowEvent};
 use tracing_subscriber::EnvFilter;
@@ -34,42 +32,18 @@ fn main() -> anyhow::Result<()> {
         height:     WindowConfig::default().height,
     };
 
-    let mut platform = Platform::new(&conf)?;
+    let mut platform    = Platform::new(&conf)?;
+    let mut renderer    = Renderer::new(GraphicsBackend::OpenGL, &platform)?;
+    let mut ui          = UIRenderer::new(&mut renderer, conf.width, conf.height)?;
+    let mut text        = TextRenderer::new()?; 
 
-    let mut renderer = Renderer::new(GraphicsBackend::OpenGL, &platform)?;
 
-    let mut ui = UIRenderer::new(&mut renderer, conf.width, conf.height)?;
+    text.load_font("assets/NotoColorEmoji.ttf", 16)?;
+    let base_font = text.load_font("assets/NotoSans-Regular.ttf", 16)?;
 
-    let mut text = TextRenderer::new()?; 
-
+    let text_str = "Hello, World! This is a text which should display correctly.";
+    
     let mut running = true;
-
-    text.load_font("assets/NotoColorEmoji.ttf", 160)?;
-    let base_font = text.load_font("assets/NotoSans-Regular.ttf", 160)?;
-
-
-
-    let emojis = [
-        "😀", "😃", "😄", "😁", "😆", "😅", "😂", "🤣", "😊", "😇",
-        "🙂", "🙃", "😉", "😍", "😘", "😋", "😜", "🤪", "🤨", "🧐",
-        "🤓", "😎", "🥳", "😤", "😭", "😱", "🤯", "🥶", "🥵", "😈",
-        "👻", "💀", "☠️", "👽", "🤖", "🎃", "🐶", "🐱", "🐭", "🐹",
-        "🐰", "🦊", "🐻", "🐼", "🐨", "🐯", "🦁", "🐮", "🐷", "🐸",
-    ];
-
-    let waker = platform.waker();
-
-    std::thread::spawn(move || {
-        loop {
-            std::thread::sleep(Duration::from_millis(100));
-
-            if waker.request_redraw().is_err() {
-                break;
-            }
-        }
-    });
-
-    let animation_start = Instant::now();
 
     while running {
         let events = platform.poll_events()?;
@@ -84,7 +58,6 @@ fn main() -> anyhow::Result<()> {
 
                 WindowEvent::Resized { width, height } => {
                     renderer.resize(width, height);
-                    should_redraw = true;
                 }
 
                 WindowEvent::RedrawRequested => {
@@ -103,24 +76,20 @@ fn main() -> anyhow::Result<()> {
 
             ui.begin(width, height);
 
-            let emoji_idx =
-                ((animation_start.elapsed().as_millis() / 100) % emojis.len() as u128) as usize;
-
-            let text_str = emojis[emoji_idx];
-
             text.render(
                 20.0,
                 20.0,
                 text_str,
+
                 base_font,
                 &mut renderer,
                 &mut ui,
             )?;
 
             ui.end(&mut renderer)?;
+
             renderer.end_frame()?;
         }
     }
-
     Ok(())
 }

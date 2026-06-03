@@ -140,4 +140,8 @@ impl GraphicsDevice for VulkanRenderer {
         anyhow::bail!("Vulkan texture_get_kind not implemented yet")
     }
 
+    fn size(&self) -> (u32, u32) {
+        (0, 0)
+    }
+
 }
