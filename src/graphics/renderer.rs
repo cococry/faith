@@ -18,14 +18,14 @@ use crate::graphics::opengl::OpenGLRenderer;
 use crate::graphics::vulkan::VulkanRenderer;
 use crate::platform::Platform;
 
-// Available graphics rendering backends.
+/// Available graphics rendering backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GraphicsBackend {
     OpenGL,
     Vulkan,
 }
 
-// Graphics-backend renderer implementation.
+/// Graphics-backend renderer implementation.
 pub enum Renderer {
     OpenGL(OpenGLRenderer),
     Vulkan(VulkanRenderer),

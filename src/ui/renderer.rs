@@ -16,22 +16,22 @@ use crate::ui::{
     QUAD_VERTICES,
 };
 
-// Represents where an image is stored
-// for rendering by UIRenderer.
-//
-// Atlas images are stored in 
-// UIRenderer.ui_texture_array.
-//
-// Dedicated images are stored in their 
-// own texture and rendered through the 
-// dedicated image pipeline.
-//
-// Dedicated images exist to avoid creating an 
-// extremely large atlas texture array. 
-// They are used when a loaded image 
-// (through UIRenderer.image()) does not fit 
-// into the atlas dimensions (
-// UI_ATLAS_WIDTH x UI_ATLAS_HEIGHT).
+/// Represents where an image is stored
+/// for rendering by UIRenderer.
+///
+/// Atlas images are stored in 
+/// UIRenderer.ui_texture_array.
+///
+/// Dedicated images are stored in their 
+/// own texture and rendered through the 
+/// dedicated image pipeline.
+///
+/// Dedicated images exist to avoid creating an 
+/// extremely large atlas texture array. 
+/// They are used when a loaded image 
+/// (through UIRenderer.image()) does not fit 
+/// into the atlas dimensions (
+/// UI_ATLAS_WIDTH x UI_ATLAS_HEIGHT).
 #[derive(Debug, Clone, Copy)]
 pub enum ImageStorage {
     Atlas {
@@ -44,23 +44,23 @@ pub enum ImageStorage {
     }
 }
 
-// Represents an image that can be rendered 
-// by UIRenderer.
-//
-// The texture for the image can either be 
-// stored inside the shared UI atlas texture 
-// array or in a dedicated GPU texture.
+/// Represents an image that can be rendered 
+/// by UIRenderer.
+///
+/// The texture for the image can either be 
+/// stored inside the shared UI atlas texture 
+/// array or in a dedicated GPU texture.
 #[derive(Debug, Clone, Copy)]
 pub struct Image {
     storage: ImageStorage,
     size: [u32; 2],
 }
 
-// Represents one layer in the image atlas 
-// texture array.
-//
-// Uses a simple row-based allocator to place 
-// uploaded images into the layer.
+/// Represents one layer in the image atlas 
+/// texture array.
+///
+/// Uses a simple row-based allocator to place 
+/// uploaded images into the layer.
 pub struct ImageAtlasLayer {
     width: u32,
     height: u32,
@@ -76,21 +76,21 @@ pub struct ImageAtlasLayer {
     cursor_y: u32,
 }
 
-// Represents one instanced draw call for a 
-// sequence of quads that all use the same 
-// dedicated texture.
+/// Represents one instanced draw call for a 
+/// sequence of quads that all use the same 
+/// dedicated texture.
 pub struct DedicatedDraw {
     texture_handle: TextureHandle,
     start: u32,
     count: u32
 }
 
-// UI rendering engine.
-// 
-// Manages UI quad pipelines, vertex/index/
-// instance buffers, image atlas storage, 
-// dedicated image draws and per-frame 
-// quad instance batching.
+/// UI rendering engine.
+/// 
+/// Manages UI quad pipelines, vertex/index/
+/// instance buffers, image atlas storage, 
+/// dedicated image draws and per-frame 
+/// quad instance batching.
 pub struct UIRenderer {
     screen_width: u32,
     screen_height: u32,
@@ -123,10 +123,10 @@ pub struct UIRenderer {
     dedicated_draws: Vec<DedicatedDraw>,
 }
 
-// Type of quad rendered by the UI shader.
-//
-// Passed to the shader as a float through 
-// QuadInstance.params.
+/// Type of quad rendered by the UI shader.
+///
+/// Passed to the shader as a float through 
+/// QuadInstance.params.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuadType {
@@ -149,14 +149,14 @@ const MAX_INSTANCES: usize = 65_536;
 const MAX_INSTANCES_PER_FRAME: usize = 65_536 * 8;
 
 impl UIRenderer {
-    // Creates a new UI renderer and initializes 
-    // the GPU resources needed for rendering 
-    // UI quads.
-    //
-    // Creates the shared quad vertex/index 
-    // buffers, the dynamic instance buffer, 
-    // atlas- and dedicated-image-pipelines and 
-    // the UI atlas texture array.
+    /// Creates a new UI renderer and initializes 
+    /// the GPU resources needed for rendering 
+    /// UI quads.
+    ///
+    /// Creates the shared quad vertex/index 
+    /// buffers, the dynamic instance buffer, 
+    /// atlas- and dedicated-image-pipelines and 
+    /// the UI atlas texture array.
     pub fn new<G: GraphicsDevice>(
         gpu: &mut G,
         screen_width: u32,
@@ -293,10 +293,10 @@ impl UIRenderer {
         })
     }
 
-    // Begins a new UI frame.
-    //
-    // Updates the current screen size and clears 
-    // all per-frame quad instance batches.
+    /// Begins a new UI frame.
+    ///
+    /// Updates the current screen size and clears 
+    /// all per-frame quad instance batches.
     pub fn begin(&mut self, width: u32, height: u32) {
         self.screen_width = width;
         self.screen_height = height;
@@ -307,13 +307,13 @@ impl UIRenderer {
         self.dedicated_draws.clear();
     }
 
-    // Ends the current UI frame and submits all 
-    // submitted quad instances to the GPU.
-    //
-    // Uploads the instance data, binds the 
-    // required buffers and renders dedicated 
-    // atlas texture array-backed quads, 
-    // then optionally the dedicated texture quads.
+    /// Ends the current UI frame and submits all 
+    /// submitted quad instances to the GPU.
+    ///
+    /// Uploads the instance data, binds the 
+    /// required buffers and renders dedicated 
+    /// atlas texture array-backed quads, 
+    /// then optionally the dedicated texture quads.
     pub fn end<G: GraphicsDevice>(&mut self, gpu: &mut G) -> anyhow::Result<()> {
         if self.atlas_instances.is_empty() && self.dedicated_instances.is_empty() {
             return Ok(());
@@ -389,11 +389,11 @@ impl UIRenderer {
         Ok(())
     }
 
-    // Submits an atlas-based quad to be 
-    // rendered this frame.
-    //
-    // Used for solid quads, text glyphs (including emojis)
-    // and texture-based images.
+    /// Submits an atlas-based quad to be 
+    /// rendered this frame.
+    ///
+    /// Used for solid quads, text glyphs (including emojis)
+    /// and texture-based images.
     pub fn raw_quad_atlas(
         &mut self, 
         rect: [f32; 4], 
@@ -415,11 +415,11 @@ impl UIRenderer {
         Ok(())
     }
 
-    // Submits a dedicated texture-based quad 
-    // to be rendered this frame.
-    //
-    // Consecutive quads using the same dedicated 
-    // texture are batched into one draw range.
+    /// Submits a dedicated texture-based quad 
+    /// to be rendered this frame.
+    ///
+    /// Consecutive quads using the same dedicated 
+    /// texture are batched into one draw range.
     pub fn raw_quad_dedicated(
         &mut self, 
         texture_handle: TextureHandle,
@@ -460,8 +460,8 @@ impl UIRenderer {
         Ok(())
     }
 
-    // Submits a solid-colored quad to be rendered 
-    // this frame.
+    /// Submits a solid-colored quad to be rendered 
+    /// this frame.
     pub fn quad(&mut self, rect: [f32; 4], color: Color) -> anyhow::Result<()> {
         self.raw_quad_atlas(
             rect,
@@ -471,11 +471,11 @@ impl UIRenderer {
         )
     }
 
-    // Submits an image to be rendered this frame 
-    // at the given position.
-    //
-    // The image is rendered using its original 
-    // loaded size and full white tint.
+    /// Submits an image to be rendered this frame 
+    /// at the given position.
+    ///
+    /// The image is rendered using its original 
+    /// loaded size and full white tint.
     pub fn image(
         &mut self,
         x: f32,
@@ -485,11 +485,11 @@ impl UIRenderer {
         self.image_tined(x, y, image, Color::rgba(1.0, 1.0, 1.0, 1.0))
     }
 
-    // Submits a tinted image to be rendered 
-    // this frame at the given position.
-    //
-    // The image is rendered using its original 
-    // loaded size. 
+    /// Submits a tinted image to be rendered 
+    /// this frame at the given position.
+    ///
+    /// The image is rendered using its original 
+    /// loaded size. 
     pub fn image_tined(
         &mut self,
         x: f32,
@@ -527,12 +527,12 @@ impl UIRenderer {
         }
     }
 
-    // Allocates a rectangle inside the UI image 
-    // atlas texture array.
-    //
-    // Uses a simple row-based allocator and creates 
-    // a new atlas layer when the current layer is 
-    // full.
+    /// Allocates a rectangle inside the UI image 
+    /// atlas texture array.
+    ///
+    /// Uses a simple row-based allocator and creates 
+    /// a new atlas layer when the current layer is 
+    /// full.
     pub fn allocate_image_rect(
         &mut self,
         width: u32,
@@ -599,9 +599,9 @@ impl UIRenderer {
         Ok(layer)
     }
 
-    // Uploads pixel data into the UI atlas 
-    // texture array at the given layer and 
-    // position.
+    /// Uploads pixel data into the UI atlas 
+    /// texture array at the given layer and 
+    /// position.
     pub fn upload_pixels_to_atlas<G: GraphicsDevice>(&self, 
         x: u32, 
         y: u32, 
@@ -621,13 +621,13 @@ impl UIRenderer {
     }
 
 
-    // Loads an image from disk and uploads it 
-    // to the GPU.
-    //
-    // Images that fit inside the UI atlas are 
-    // uploaded into the shared atlas texture 
-    // array. Larger images are stored in a 
-    // dedicated texture.
+    /// Loads an image from disk and uploads it 
+    /// to the GPU.
+    ///
+    /// Images that fit inside the UI atlas are 
+    /// uploaded into the shared atlas texture 
+    /// array. Larger images are stored in a 
+    /// dedicated texture.
     pub fn load_image<G: GraphicsDevice>(
         &mut self,
         gpu: &mut G,

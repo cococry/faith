@@ -28,11 +28,11 @@ use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use nix::unistd::read;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 
-// X11 window platform implementation.
-//
-// Owns the native Xlib display, XCB connection, 
-// X11 window and wake file descriptor used to 
-// drive the window event loop.
+/// X11 window platform implementation.
+///
+/// Owns the native Xlib display, XCB connection, 
+/// X11 window and wake file descriptor used to 
+/// drive the window event loop.
 pub struct X11Platform {
     width: u32,
     height: u32,
@@ -51,19 +51,19 @@ pub struct X11Platform {
 }
 
 
-// Waker handle for requesting redraws from 
-// outside the X11 event loop. (thread safe)
+/// Waker handle for requesting redraws from 
+/// outside the X11 event loop. (thread safe)
 #[derive(Clone)]
 pub struct X11Waker {
     wake_fd: Arc<EventFd>,
 }
 
 impl X11Waker {
-    // Unix implementation to request a redraw in the 
-    // X11 platform window.
-    //
-    // Uses nix::unistd::write to wake up the self.wake_fd 
-    // file descriptor.
+    /// Unix implementation to request a redraw in the 
+    /// X11 platform window.
+    ///
+    /// Uses nix::unistd::write to wake up the self.wake_fd 
+    /// file descriptor.
     pub fn request_redraw(&self) -> anyhow::Result<()> {
         let val: u64 = 1;
         let bytes = val.to_ne_bytes();
@@ -79,12 +79,12 @@ impl X11Waker {
 }
 
 impl X11Platform {
-    // Creates a new X11 platform window.
-    //
-    // Opens the X display, creates the XCB window,
-    // configures window manager protocols and title
-    // for the window maps the window and initializes 
-    // the wake file descriptor used by the event loop.
+    /// Creates a new X11 platform window.
+    ///
+    /// Opens the X display, creates the XCB window,
+    /// configures window manager protocols and title
+    /// for the window maps the window and initializes 
+    /// the wake file descriptor used by the event loop.
     pub fn new(window_config: &WindowConfig) -> anyhow::Result<Self> {
 
         let conn: XCBConnection; 
@@ -255,11 +255,11 @@ impl X11Platform {
         Ok(())
     }
 
-    // Polls and collects pending X11 window 
-    // events.
-    //
-    // Blocks until either an X11 event arrives 
-    // or the wake file descriptor is signaled.
+    /// Polls and collects pending X11 window 
+    /// events.
+    ///
+    /// Blocks until either an X11 event arrives 
+    /// or the wake file descriptor is signaled.
     pub fn poll_events(&mut self) -> anyhow::Result<Vec<WindowEvent>> {
         let mut close_requested = false;
         let mut redraw_requested = false;
@@ -371,13 +371,13 @@ impl X11Platform {
         Ok(events)
     }
 
-    // Returns the current X11 window size.
+    /// Returns the current X11 window size.
     pub fn size(&self) -> (u32, u32) {
         (self.width, self.height)
     }
 
-    // Returns the native X11 window handle 
-    // information used by graphics backends.
+    /// Returns the native X11 window handle 
+    /// information used by graphics backends.
     pub fn native_handle(&self) -> WindowHandleInfo {
         WindowHandleInfo::X11 {
             display: self.xdisplay.as_ptr() as *mut c_void,
@@ -385,8 +385,8 @@ impl X11Platform {
         }
     }
 
-    // Creates a waker handle that can request a 
-    // redraw from outside the X11 event loop.
+    /// Creates a waker handle that can request a 
+    /// redraw from outside the X11 event loop.
     pub fn waker(&self) -> X11Waker {
         X11Waker {
             wake_fd: self.wake_fd.clone(),

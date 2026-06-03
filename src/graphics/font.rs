@@ -1,31 +1,34 @@
 use freetype::{self as ft, bitmap};
+use unicode_bidi::Level;
+use unicode_script::Script;
 use std::{collections::HashMap, path::{Path, PathBuf}};
+use harfbuzz_rs::{Script as HbScript, Tag};
 
 use crate::graphics::FontHandle;
 
 use harfbuzz_rs::{shape, UnicodeBuffer};
 
-// Used as the key to get cached glyphs for 
-// a given font/glyph index combination.
+/// Used as the key to get cached glyphs for 
+/// a given font/glyph index combination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GlyphKey {
     pub font_handle: FontHandle,
     pub glyph_idx: u32,
 }
 
-// Font loading, shaping and glyph 
-// rasterization manager.
-//
-// Manages the FreeType library handle, 
-// loaded fonts and rasterized glyph cache.
+/// Font loading, shaping and glyph 
+/// rasterization manager.
+///
+/// Manages the FreeType library handle, 
+/// loaded fonts and rasterized glyph cache.
 pub struct FontManager {
     lib_handle: ft::Library,
     fonts: Vec<Font>,
     glyph_cache: HashMap<GlyphKey, Glyph>
 }
 
-// Represents one rasterized glyph bitmap 
-// and its layout metrics.
+/// Represents one rasterized glyph bitmap 
+/// and its layout metrics.
 #[derive(Debug, Clone)]
 pub struct Glyph {
     pub width: u32,
@@ -37,8 +40,8 @@ pub struct Glyph {
     pub pixels: Vec<u8>
 }
 
-// Represents one glyph produced by text 
-// shaping.
+/// Represents one glyph produced by text 
+/// shaping.
 #[derive(Debug, Clone)]
 pub struct ShapedGlyph {
     pub glyph_idx: u32,
@@ -49,11 +52,11 @@ pub struct ShapedGlyph {
     pub y_off: f32,
 }
 
-// Represents one loaded font face.
-//
-// Stores both the FreeType face used for 
-// rasterization and the HarfBuzz font used 
-// for shaping.
+/// Represents one loaded font face.
+///
+/// Stores both the FreeType face used for 
+/// rasterization and the HarfBuzz font used 
+/// for shaping.
 pub struct Font {
     pub size: u32,
 
@@ -76,8 +79,8 @@ pub struct Font {
 }
 
 impl FontManager {
-    // Creates a new font manager and initializes 
-    // the FreeType library.
+    /// Creates a new font manager and initializes 
+    /// the FreeType library.
     pub fn new() -> anyhow::Result<Self> {
         let lib_handle = ft::Library::init()?;
 
@@ -271,8 +274,8 @@ impl FontManager {
         })
     }
 
-    // Gets a cached glyph or rasterizes and 
-    // caches it if it has not been loaded yet.
+    /// Gets a cached glyph or rasterizes and 
+    /// caches it if it has not been loaded yet.
     pub fn get_or_load_glyph(
         &mut self,
         font_handle: FontHandle,
@@ -353,12 +356,12 @@ impl FontManager {
         Ok(Some(raster_size))
     }
 
-    // Loads a font from disk and stores it in 
-    // the font manager.
-    //
-    // Selects the best bitmap strike when the 
-    // font has fixed-size strikes, otherwise 
-    // configures the face for scalable rendering.
+    /// Loads a font from disk and stores it in 
+    /// the font manager.
+    ///
+    /// Selects the best bitmap strike when the 
+    /// font has fixed-size strikes, otherwise 
+    /// configures the face for scalable rendering.
     pub fn load_font(
         &mut self,
         path: impl AsRef<Path>,
@@ -418,31 +421,31 @@ impl FontManager {
             .ok_or_else(|| anyhow::anyhow!("invalid texture handle: {:?}", handle))
     }
 
-    // Returns the font ascender in pixels.
+    /// Returns the font ascender in pixels.
     pub fn ascender(&self, font_handle: FontHandle) -> anyhow::Result<i32> {
         let font = self.get_font(font_handle)?;
         Ok(font.face.size_metrics().unwrap().ascender as i32 >> 6)
     }
 
-    // Returns the font line height in pixels.
+    /// Returns the font line height in pixels.
     pub fn line_height(&self, font_handle: FontHandle) -> anyhow::Result<i32>  {
         let font = self.get_font(font_handle)?;
         Ok(font.face.size_metrics().unwrap().height as i32 >> 6)
     }
 
-    // Returns the font scale from selected raster 
-    // size to requested font size.
+    /// Returns the font scale from selected raster 
+    /// size to requested font size.
     pub fn scale(&self, font_handle: FontHandle) -> anyhow::Result<f32>  {
         let font = self.get_font(font_handle)?;
         Ok(font.scale)
     }
 
-    // Returns the scale that should be applied 
-    // during rendering.
-    //
-    // Bitmap-strike fonts are already rasterized 
-    // at their target size and use a render scale 
-    // of 1.0.
+    /// Returns the scale that should be applied 
+    /// during rendering.
+    ///
+    /// Bitmap-strike fonts are already rasterized 
+    /// at their target size and use a render scale 
+    /// of 1.0.
     pub fn render_scale(&self, font_handle: FontHandle) -> anyhow::Result<f32>  {
         let font = self.get_font(font_handle)?;
 
@@ -453,15 +456,15 @@ impl FontManager {
         }
     }
 
-    // Returns whether the font uses colored 
-    // bitmap-strike glyphs.
+    /// Returns whether the font uses colored 
+    /// bitmap-strike glyphs.
     pub fn is_colored(&self, font_handle: FontHandle) -> anyhow::Result<bool>  {
         let font = self.get_font(font_handle)?;
         Ok(font.bitmap_strike)
     }
 
-    // Shapes text into positioned glyphs using 
-    // HarfBuzz.
+    /// Shapes text into positioned glyphs using 
+    /// HarfBuzz.
     pub fn shape_text(&self, font_handle: FontHandle, text: &str) -> anyhow::Result<Vec<ShapedGlyph>> {
         let font = self.get_font(font_handle)?;
 
@@ -481,6 +484,113 @@ impl FontManager {
                 cluster: info.cluster,
 
                 // convert from fixed point vals
+                x_adv: pos.x_advance as f32 / 64.0,
+                y_adv: pos.y_advance as f32 / 64.0,
+                x_off: pos.x_offset as f32 / 64.0,
+                y_off: pos.y_offset as f32 / 64.0,
+            }).collect();
+
+        Ok(shaped)
+    }
+
+    fn hb_tag(&self, tag: &str) -> harfbuzz_rs::Tag {
+        let mut chars = tag.chars();
+
+        let a = chars.next().unwrap_or('Z');
+        let b = chars.next().unwrap_or('z');
+        let c = chars.next().unwrap_or('z');
+        let d = chars.next().unwrap_or('z');
+
+            harfbuzz_rs::Tag::new(a, b, c, d)
+    }
+
+    fn hb_script_tag_from_unicode_script(&self, script: Script) -> harfbuzz_rs::Tag {
+        let tag = match script {
+            Script::Arabic => "Arab",
+            Script::Armenian => "Armn",
+            Script::Bengali => "Beng",
+            Script::Bopomofo => "Bopo",
+            Script::Braille => "Brai",
+            Script::Canadian_Aboriginal => "Cans",
+            Script::Cherokee => "Cher",
+            Script::Common => "Zyyy",
+            Script::Coptic => "Copt",
+            Script::Cyrillic => "Cyrl",
+            Script::Devanagari => "Deva",
+            Script::Ethiopic => "Ethi",
+            Script::Georgian => "Geor",
+            Script::Greek => "Grek",
+            Script::Gujarati => "Gujr",
+            Script::Gurmukhi => "Guru",
+            Script::Han => "Hani",
+            Script::Hangul => "Hang",
+            Script::Hanunoo => "Hano",
+            Script::Hebrew => "Hebr",
+            Script::Hiragana => "Hira",
+            Script::Inherited => "Zinh",
+            Script::Kannada => "Knda",
+            Script::Katakana => "Kana",
+            Script::Khmer => "Khmr",
+            Script::Lao => "Laoo",
+            Script::Latin => "Latn",
+            Script::Malayalam => "Mlym",
+            Script::Mongolian => "Mong",
+            Script::Myanmar => "Mymr",
+            Script::Ogham => "Ogam",
+            Script::Oriya => "Orya",
+            Script::Runic => "Runr",
+            Script::Sinhala => "Sinh",
+            Script::Syriac => "Syrc",
+            Script::Tagalog => "Tglg",
+            Script::Tagbanwa => "Tagb",
+            Script::Tamil => "Taml",
+            Script::Telugu => "Telu",
+            Script::Thaana => "Thaa",
+            Script::Thai => "Thai",
+            Script::Tibetan => "Tibt",
+            Script::Yi => "Yiii",
+
+            _ => "Zzzz",
+        };
+
+
+        self.hb_tag(tag)
+    }
+
+    pub fn shape_text_with_props(
+        &self, 
+        text: &str,
+        bidi_lvl: Level,
+        script: Script,
+        font_handle: FontHandle) 
+        -> anyhow::Result<Vec<ShapedGlyph>>  {
+            let font = self.get_font(font_handle)?;
+
+
+            let buffer = UnicodeBuffer::new()
+                .add_str(text)
+                .set_direction(if bidi_lvl.is_rtl() {
+                    harfbuzz_rs::Direction::Rtl
+                } else {
+                    harfbuzz_rs::Direction::Ltr
+                })
+            .set_script(self.hb_script_tag_from_unicode_script(script));
+
+
+            // Use HarfBuzz to Shape the text
+            let output = shape(&font.hb_font, buffer, &[]);
+
+            let infos = output.get_glyph_infos();
+            let positions = output.get_glyph_positions();
+
+            // Iterate HarfBuzz positions and infos to 
+            // collect shaped glyph information
+            let shaped = infos.iter().zip(positions.iter())
+                .map(|(info, pos)| ShapedGlyph {
+                    glyph_idx: info.codepoint,
+                    cluster: info.cluster,
+
+                    // convert from fixed point vals
                 x_adv: pos.x_advance as f32 / 64.0,
                 y_adv: pos.y_advance as f32 / 64.0,
                 x_off: pos.x_offset as f32 / 64.0,

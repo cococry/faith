@@ -38,11 +38,21 @@ fn main() -> anyhow::Result<()> {
     let mut text        = TextRenderer::new()?; 
 
 
-    text.load_font("assets/NotoColorEmoji.ttf", 16)?;
-    let base_font = text.load_font("assets/NotoSans-Regular.ttf", 16)?;
+    text.load_font("assets/NotoColorEmoji.ttf", 48)?;
+    let base_font = text.load_font("assets/NotoSans-Regular.ttf", 48)?;
+    text.load_font("assets/NotoSansArabic-Regular.ttf", 48)?;
+    text.load_font("assets/NotoSansHebrew-Regular.ttf", 48)?;
 
-    let text_str = "Hello, World! This is a text which should display correctly.";
-    
+    let hard_text = "Latin: office affine fluff ffi fj AVATAR — Arabic: السَّلامُ عَلَيْكُمْ مرحبًا بِالعالَمِ\n\
+لا إلهَ إلّا اللهُ اللغةُ العربيّةُ جميلةٌ شكرًا جَزِيلًا لَا لَأ لِإ لآ ﷺ ؟،؛\n\
+Hebrew: שָׁלוֹם עֲלֵיכֶם עברית מְנֻקֶּדֶת אֱלֹהִים תּוֹרָה ״שלום״\n\
+Mixed RTL/LTR: abc مرحبًا 123 שָׁלוֹם DEF لا إلهَ إلّا اللهُ xyz\n\
+Emoji: 😀 😄 🚀 ❤️ ♥️ ☺️ ✨ 🔥 🌍 ✅ 🥹 🫠 🫶 🫰 🫨\n\
+ZWJ: 👨‍👩‍👧‍👦 👩‍❤️‍👨 👩‍❤️‍💋‍👨 🧑‍💻 👨🏿‍🚀 🧑🏽‍🦱 🧑🏽‍💻\n\
+Flags/keycaps: 🇩🇪 🇺🇸 🇯🇵 🇸🇦 🇮🇱 1️⃣ 2️⃣ 3️⃣ #️⃣ *️⃣\n\
+Skin tones: 👋🏻 👋🏼 👋🏽 👋🏾 👋🏿 🤌🏻 🫱🏾‍🫲🏼\n\
+Fallback mix: Hello مرحبًا 😀 עברית 🇩🇪 flags ♥️❤️ keycaps 1️⃣2️⃣3️⃣ done ✅";
+
     let mut running = true;
 
     while running {
@@ -75,16 +85,17 @@ fn main() -> anyhow::Result<()> {
             let (width, height) = platform.size();
 
             ui.begin(width, height);
-
+            
             text.render(
                 20.0,
                 20.0,
-                text_str,
+                hard_text,
 
                 base_font,
                 &mut renderer,
                 &mut ui,
             )?;
+
 
             ui.end(&mut renderer)?;
 

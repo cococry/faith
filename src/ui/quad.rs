@@ -4,10 +4,10 @@ use crate::graphics::{
     Color, TextureHandle,
 };
 
-// Represents one vertex of the shared UI quad.
-//
-// The local position and UV are expanded by 
-// per-instance data in the UI vertex shader.
+/// Represents one vertex of the shared UI quad.
+///
+/// The local position and UV are expanded by 
+/// per-instance data in the UI vertex shader.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct QuadVertex {
@@ -15,11 +15,11 @@ pub struct QuadVertex {
     pub local_uv: [f32; 2],
 }
 
-// Represents one renderable UI quad instance.
-//
-// Stores the screen-space rectangle, color, 
-// UV coordinates and shader parameters used 
-// to render one quad.
+/// Represents one renderable UI quad instance.
+///
+/// Stores the screen-space rectangle, color, 
+/// UV coordinates and shader parameters used 
+/// to render one quad.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct QuadInstance {
@@ -35,9 +35,9 @@ pub struct QuadInstance {
 }
 
 impl QuadInstance {
-    // Creates a textured quad instance using 
-    // the given rectangle, UV coordinates, 
-    // tint color and shader parameters.
+    /// Creates a textured quad instance using 
+    /// the given rectangle, UV coordinates, 
+    /// tint color and shader parameters.
     pub fn textured(
         rect: [f32; 4],
         uv: [f32; 4],
@@ -53,8 +53,8 @@ impl QuadInstance {
     }
 }
 
-// Shared unit quad vertices used by all UI 
-// quad instances.
+/// Shared unit quad vertices used by all UI 
+/// quad instances.
 pub const QUAD_VERTICES: [QuadVertex; 4] = [
     QuadVertex {
         local_pos: [0.0, 0.0],
@@ -74,8 +74,8 @@ pub const QUAD_VERTICES: [QuadVertex; 4] = [
     },
 ];
 
-// Indices for rendering the shared unit quad 
-// as two triangles.
+/// Indices for rendering the shared unit quad 
+/// as two triangles.
 pub const QUAD_INDICES: [u32; 6] = [
     0, 1, 2,
     0, 2, 3,

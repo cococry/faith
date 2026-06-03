@@ -15,11 +15,11 @@ use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_ba
 
 use nix::unistd::read;
 
-// Wayland window state.
-//
-// Stores the current Wayland objects & state,
-// as well as pending events to be collected by 
-// Wayland protocol handler callbacks.
+/// Wayland window state.
+///
+/// Stores the current Wayland objects & state,
+/// as well as pending events to be collected by 
+/// Wayland protocol handler callbacks.
 pub struct WaylandState {
     width: u32,
     height: u32,
@@ -39,11 +39,11 @@ pub struct WaylandState {
     pending_resize: Option<(u32, u32)>,
 }
 
-// Wayland window platform implementation.
-//
-// Owns the Wayland connection, event queue, 
-// window state and wake file descriptor used 
-// to drive the window event loop.
+/// Wayland window platform implementation.
+///
+/// Owns the Wayland connection, event queue, 
+/// window state and wake file descriptor used 
+/// to drive the window event loop.
 pub struct WaylandPlatform {
     conn: Connection,
     ev_queue: EventQueue<WaylandState>,
@@ -54,14 +54,14 @@ pub struct WaylandPlatform {
     wake_fd: Arc<EventFd>
 }
 
-// Marker type used as user data for Wayland 
-// protocol dispatch handlers. (thread safe)
+/// Marker type used as user data for Wayland 
+/// protocol dispatch handlers. (thread safe)
 #[derive(Clone, Copy, Debug)]
 struct WaylandHandler;
 
 
-// Waker handle for requesting redraws from 
-// outside the Wayland event loop.
+/// Waker handle for requesting redraws from 
+/// outside the Wayland event loop.
 #[derive(Clone)]
 pub struct WaylandWaker {
     wake_fd: Arc<EventFd>,
@@ -90,8 +90,8 @@ impl WaylandWaker {
 }
 
 impl WaylandState {
-    // Called when the XDG surface is initialized.
-    // At this point, we can set the tile of the toplevel.
+    /// Called when the XDG surface is initialized.
+    /// At this point, we can set the tile of the toplevel.
     fn init_xdg_surface(&mut self, qh: &QueueHandle<WaylandState>) {
         let wm_base = self.wm_base.as_ref().unwrap();
         let base_surface = self.surface.as_ref().unwrap();
@@ -175,7 +175,7 @@ impl Dispatch<wl_registry::WlRegistry, WaylandHandler> for WaylandState {
     }
 }
 
-// Not needed
+/// Not needed
 impl Dispatch<wl_compositor::WlCompositor, WaylandHandler> for WaylandState {
     fn event(
         _: &mut Self,
@@ -188,7 +188,7 @@ impl Dispatch<wl_compositor::WlCompositor, WaylandHandler> for WaylandState {
     }
 }
 
-// Not needed
+/// Not needed
 impl Dispatch<wl_surface::WlSurface, WaylandHandler> for WaylandState {
     fn event(
         _: &mut Self,
@@ -413,13 +413,13 @@ impl WaylandPlatform {
 
     }
 
-    // Returns the current Wayland window size.
+    /// Returns the current Wayland window size.
     pub fn size(&self) -> (u32, u32) {
         (self.state.width, self.state.height)
     }
 
-    // Returns the native Wayland window handle 
-    // information used by graphics backends.
+    /// Returns the native Wayland window handle 
+    /// information used by graphics backends.
     pub fn native_handle(&self) -> WindowHandleInfo {
         WindowHandleInfo::Wayland {
             display: self.conn.backend().display_ptr() as *mut c_void, 
@@ -430,8 +430,8 @@ impl WaylandPlatform {
         }
     }
 
-    // Creates a waker handle that can request a 
-    // redraw from outside the Wayland event loop.
+    /// Creates a waker handle that can request a 
+    /// redraw from outside the Wayland event loop.
     pub fn waker(&self) -> WaylandWaker {
         WaylandWaker {
             wake_fd: self.wake_fd.clone(),
