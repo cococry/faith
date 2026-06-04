@@ -1,6 +1,6 @@
 use std::{collections::HashMap, num::NonZeroUsize};
 
-use anyhow::{Ok}; 
+use anyhow::{Ok, anyhow};
 use lru::LruCache;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -8,11 +8,9 @@ use crate::{graphics::{FontHandle, FontManager, GraphicsDevice, font::{Glyph, Gl
 use unicode_bidi::{BidiInfo, Level};
 use unicode_script::{Script, UnicodeScript};
 
-use std::sync::Arc;
 
-/// Used as the key to get all cached 
-/// shaped glyphs (ShapedGlyph) generated 
-/// for a given font/string combination
+/// Used as the key to get cached shaped 
+/// glyphs for a given font/string combination
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ShapedTextKey {
     font_handle: FontHandle,
@@ -23,10 +21,10 @@ struct ShapedTextKey {
 
 
 /// A sub-region of a text string that 
-/// has been successfully shaped by the 
-/// font in `font_handle`.
+/// has been shaped by the font in 
+/// `font_handle`.
 /// Stores shaping & unicode/bidi information 
-/// for a sub-region of text.
+/// for a text run.
 /// `font_handle` is the (fallback) font that 
 /// supports all grapheme clusters within the 
 /// `text` string. 
@@ -35,16 +33,16 @@ struct ShapedTextRun {
     font_handle: FontHandle,
     text: String,
 
-    shaped_glyphs: Arc<[ShapedGlyph]>,
-    
-    cluster_groups: Arc<[ClusterGroup]>,
+    shaped_glyphs: Vec<ShapedGlyph>,
 
     byte_start: usize,
     bidi_lvl: Level,
+    script: Script,
 
     x_adv: f32,
     y_adv: f32,
 }
+
 
 /// A sub-region of a text string that 
 /// has been itemized by splitting into 
@@ -60,8 +58,7 @@ struct ItemizedRun {
 }
 
 /// Used as the key to get cached shaped 
-/// text runs (ShapedTextRun) for a given 
-/// font/string combination
+/// text runs for a given font/string combination
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ShapedRunKey {
     original_font: FontHandle, 
@@ -69,7 +66,7 @@ struct ShapedRunKey {
 }
 
 /// Used as the key to get cached font fallback 
-/// choices (FontHandle) for a given rendered string 
+/// choices for a given rendered string 
 /// with a given original font
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct FallbackChoiceKey {
@@ -90,91 +87,51 @@ struct AtlasGlyph {
     pub bearing:    [i32; 2],
 }
 
-/// Used as the key to get cached 
-/// layouting data (TextLayout) for a given 
-/// combination of font & string + 
-/// layouting properties.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct TextLayoutKey {
     font_handle: FontHandle,
     text: String,
 
     // Store quantized width so float hashing is not needed.
-    max_width_px: u32,
+    max_width_px: Option<u32>,
 }
 
-/// Represents a paragraphs's layout 
-/// information after layout computation.
-/// Used to render layouted text (render_wrapped)
 #[derive(Debug, Clone)]
 pub struct TextLayout {
     lines: Vec<TextLine>,
-    paragraph_runs: Arc<[ShapedTextRun]>,
     width: f32,
+    height: f32,
     line_height: f32,
     ascender: f32
 }
 
-/// A byte range within the original paragraph string 
-/// representing one word-wrap token.
-/// 
-/// Tokens are used only as candidate wrapping units, 
-/// not as independently shaped text. `width` stores the 
-/// pixel width of this byte range measured from the 
-/// already-shaped paragraph runs.
+struct TextRunSlice {
+    glyph_range: std::ops::Range<usize>,
+    byte_range: std::ops::Range<usize>,
+    x_offset: f32,
+    x_advance: f32,
+}
+
 #[derive(Debug, Clone)]
 struct TokenRange {
     byte_start: usize,
     byte_end: usize,
-    width: f32,
+    width: f32
 }
 
-/// A byte range within the original paragraph string 
-/// representing one laid-out visual line.
-/// 
-/// This range is produced by the wrapping algorithm 
-/// from TokenRange boundaries. It is later converted 
-/// into RunSlice values so the line can render slices 
-/// of the already-shaped paragraph runs.
 #[derive(Debug, Clone)]
 struct LineRange {
     byte_start: usize,
     byte_end: usize,
 }
 
-/// A group of one or more shaped glyphs that belong 
-/// to the same HarfBuzz cluster.
-/// 
-/// Cluster groups are used to safely map byte ranges 
-/// in the original paragraph to glyph ranges in a 
-/// shaped run. This avoids splitting inside a shaped 
-/// cluster when wrapping or rendering text.
-/// 
-/// `byte_start_abs` and `byte_end_abs` are absolute 
-/// byte offsets within the original paragraph string.
-/// `glyph_range` indexes into ShapedTextRun.shaped_glyphs.
-/// `x_advance` stores the scaled pixel advance of all 
-/// glyphs in this cluster group.
-#[derive(Debug, Clone)]
-struct ClusterGroup {
-    byte_start_abs: usize,
-    byte_end_abs: usize,
-    glyph_range: std::ops::Range<usize>,
-    x_advance: f32,
+impl ShapedTextRun {
+    fn byte_end(&self) -> usize {
+        self.byte_start + self.text.len()
+    }
 }
 
-/// A renderable slice of one ShapedTextRun.
-/// 
-/// TextLine does not own newly-shaped runs. Instead, 
-/// it stores RunSlice values that reference glyph ranges 
-/// within TextLayout.paragraph_runs. This allows wrapped 
-/// lines to reuse paragraph-shaped glyphs without 
-/// reshaping each line independently.
-/// 
-/// `run_index` indexes into TextLayout.paragraph_runs.
-/// `glyph_range` indexes into that run's shaped_glyphs.
-/// `x_advance` stores the scaled pixel advance of this 
-/// slice.
+
 #[derive(Debug, Clone)]
 struct RunSlice {
     run_index: usize,
@@ -182,12 +139,7 @@ struct RunSlice {
     x_advance: f32,
 }
 
-/// A single laid-out visual line of text.
-/// 
-/// `width` is the total pixel width of all slices.
-/// `is_rtl` is true if the line contains at least one 
-/// right-to-left shaped run and is used for horizontal 
-/// placement/alignment.
+
 #[derive(Debug, Clone)]
 struct TextLine {
     slices: Vec<RunSlice>,
@@ -195,10 +147,17 @@ struct TextLine {
     is_rtl: bool,
 }
 
-/// Options used when computing wrapped text layout.
 #[derive(Debug, Clone, Copy)]
 pub struct TextLayoutOptions {
-    pub max_width: f32,
+    pub max_width: Option<f32>,
+}
+
+impl Default for TextLayoutOptions {
+    fn default() -> Self {
+        Self {
+            max_width: None,
+        }
+    }
 }
 
 /// Text rendering engine. 
@@ -220,12 +179,11 @@ pub struct TextRenderer {
     /// Cached atlas locations (uv, atlas layer) of glyphs
     glyph_locations: HashMap<GlyphKey, AtlasGlyph>,
 
-    shaped_cache: LruCache<ShapedTextKey, Arc<[ShapedGlyph]>>,
-    font_run_cache: LruCache<ShapedRunKey, Arc<[ShapedTextRun]>>,
-    token_range_cache: LruCache<ShapedRunKey, Arc<[TokenRange]>>,
-    layout_cache: LruCache<TextLayoutKey, Arc<TextLayout>>,
-    
-    fallback_choice_cache: LruCache<FallbackChoiceKey, Option<FontHandle>> 
+    shaped_cache: LruCache<ShapedTextKey, Vec<ShapedGlyph>>,
+    font_run_cache: LruCache<ShapedRunKey, Vec<ShapedTextRun>>,
+    fallback_choice_cache: LruCache<FallbackChoiceKey, Option<FontHandle>>,
+
+    layout_cache: LruCache<TextLayoutKey, TextLayout>,
 }
 
 impl TextRenderer {
@@ -245,7 +203,6 @@ impl TextRenderer {
 
             shaped_cache: LruCache::new(NonZeroUsize::new(8192).unwrap()),
             font_run_cache: LruCache::new(NonZeroUsize::new(2048).unwrap()),
-            token_range_cache: LruCache::new(NonZeroUsize::new(2048).unwrap()),
             fallback_choice_cache: LruCache::new(NonZeroUsize::new(4096).unwrap()),
             layout_cache: LruCache::new(NonZeroUsize::new(1024).unwrap()),
         })
@@ -460,57 +417,10 @@ impl TextRenderer {
         Ok(None)
     }
 
-    fn reshape_text_run_with_font(
-        &mut self,
-        text: &str, 
-        run: &ItemizedRun,
-        font: FontHandle,
-        run_byte_start: usize 
-    ) -> anyhow::Result<ShapedTextRun> {
-        let reshaped_glyphs = self.shape_cached(
-            &text,
-            run.bidi_lvl,
-            run.script,
-            font,
-        )?;
-
-        // x and y advance of all glyphs in the 
-        // run summed up to get run advances.
-        let (x_adv, y_adv) = reshaped_glyphs
-            .iter()
-            .fold((0.0, 0.0), |(x, y), g| {
-                (x + g.x_adv, y + g.y_adv)
-            });
-
-        let font_scale = self.font_manager.scale(font)?;
-
-        let new_cluster_groups_vec = self.build_cluster_groups_from_glyphs(
-            run_byte_start,
-            text.len(),
-            &reshaped_glyphs,
-            font_scale,
-        );
-
-        let new_cluster_groups: Arc<[ClusterGroup]> =
-            Arc::from(new_cluster_groups_vec);
-
-        Ok(ShapedTextRun {
-            font_handle: font, 
-            text: text.to_owned(),
-            shaped_glyphs: reshaped_glyphs,
-            byte_start: run_byte_start, 
-            bidi_lvl: run.bidi_lvl,
-            x_adv,
-            y_adv,
-            cluster_groups: new_cluster_groups
-        })
-
-    }
-
     fn repair_missing_glyphs_in_run(
         &mut self,
         run: ItemizedRun,
-        glyphs: Arc<[ShapedGlyph]>,
+        glyphs: Vec<ShapedGlyph>
     ) -> anyhow::Result<Vec<ShapedTextRun>> {
         let mut repaired = Vec::new();
 
@@ -518,7 +428,7 @@ impl TextRenderer {
         // acquire missing grapheme ranges within the run
         let mut missing_ranges = Vec::new();
 
-        for glyph in glyphs.iter() {
+        for glyph in &glyphs {
             if glyph.glyph_idx == 0 {
                 // Get the grapheme range for this 
                 // cluster. This works because glyph.cluster 
@@ -548,18 +458,35 @@ impl TextRenderer {
             // Not in a missing range -> shape with 
             // run's font for that section. 
             if cursor < missing.start {
-                let non_missing_text = run.text[cursor..missing.start].to_owned();
+                let text = run.text[cursor..missing.start].to_owned();
 
-                // we reshape the non-missing text with 
-                // the run's font 
-                repaired.push(self.reshape_text_run_with_font(
-                        &non_missing_text, 
-                        &run, 
-                        run.font_handle,
-                        run.byte_start + cursor)?);
+                let shaped_glyphs = self.shape_cached(
+                    &text,
+                    run.bidi_lvl,
+                    run.script,
+                    run.font_handle,
+                )?;
+
+                let (x_adv, y_adv) = shaped_glyphs
+                    .iter()
+                    .fold((0.0, 0.0), |(x, y), g| {
+                        (x + g.x_adv, y + g.y_adv)
+                    });
+
+                repaired.push(ShapedTextRun {
+                    font_handle: run.font_handle,
+                    text,
+                    shaped_glyphs,
+                    byte_start: run.byte_start + cursor,
+                    bidi_lvl: run.bidi_lvl,
+                    script: run.script,
+                    x_adv,
+                    y_adv
+                });
             }
 
             let missing_text = run.text[missing.clone()].to_owned();
+
 
             // Check loaded fallback fonts 
             // wheter one of them supports the 
@@ -575,20 +502,57 @@ impl TextRenderer {
             // font for the missing range, push the new
             // fallen-back run.
             if let Some(fallback) = fallback {
-                repaired.push(self.reshape_text_run_with_font(
-                        &missing_text, 
-                        &run, 
-                        fallback,
-                        run.byte_start + missing.start)?);
+                let fallback_glyphs = self.shape_cached(
+                    &missing_text,
+                    run.bidi_lvl,
+                    run.script,
+                    fallback,
+                )?;
+                let (x_adv, y_adv) = fallback_glyphs
+                    .iter()
+                    .fold((0.0, 0.0), |(x, y), g| {
+                        (x + g.x_adv, y + g.y_adv)
+                    });
+
+
+                repaired.push(ShapedTextRun {
+                    font_handle: fallback,
+                    text: missing_text,
+                    shaped_glyphs: fallback_glyphs,
+                    byte_start: run.byte_start + missing.start,
+                    bidi_lvl: run.bidi_lvl,
+                    script: run.script,
+                    x_adv,
+                    y_adv,
+                });
             } else {
                 // If no fallback font supports this range, keep the 
                 // original shaped result so the missing glyphs still 
                 // contribute advance width.
-                repaired.push(self.reshape_text_run_with_font(
-                        &missing_text, 
-                        &run, 
-                        run.font_handle,
-                        run.byte_start + missing.start)?);
+                let shaped_glyphs = self.shape_cached(
+                    &missing_text,
+                    run.bidi_lvl,
+                    run.script,
+                    run.font_handle,
+                )?;
+
+                let (x_adv, y_adv) = shaped_glyphs
+                    .iter()
+                    .fold((0.0, 0.0), |(x, y), g| {
+                        (x + g.x_adv, y + g.y_adv)
+                    });
+
+                repaired.push(ShapedTextRun {
+                    font_handle: run.font_handle,
+                    text: missing_text,
+                    shaped_glyphs,
+                    byte_start: run.byte_start + missing.start,
+                    bidi_lvl: run.bidi_lvl,
+                    script: run.script,
+                    x_adv,
+                    y_adv
+                });
+
             }
 
 
@@ -599,12 +563,30 @@ impl TextRenderer {
         // Push the last range if there is still one
         if cursor < run.text.len() {
             let text = run.text[cursor..].to_owned();
-            repaired.push(self.reshape_text_run_with_font(
-                    &text, 
-                    &run, 
-                    run.font_handle,
-                    run.byte_start + cursor)?);
 
+            let shaped_glyphs = self.shape_cached(
+                &text,
+                run.bidi_lvl,
+                run.script,
+                run.font_handle,
+            )?;
+
+            let (x_adv, y_adv) = shaped_glyphs
+                .iter()
+                .fold((0.0, 0.0), |(x, y), g| {
+                    (x + g.x_adv, y + g.y_adv)
+                });
+
+            repaired.push(ShapedTextRun {
+                font_handle: run.font_handle,
+                text,
+                shaped_glyphs,
+                byte_start: run.byte_start + cursor,
+                bidi_lvl: run.bidi_lvl,
+                script: run.script,
+                x_adv,
+                y_adv
+            });
         }
 
         // Repaired glyphs need to be reversed 
@@ -622,7 +604,7 @@ impl TextRenderer {
         bidi_lvl: Level,
         script: Script,
         font_handle: FontHandle,
-    ) -> anyhow::Result<Arc<[ShapedGlyph]>> {
+    ) -> anyhow::Result<Vec<ShapedGlyph>> {
         let key = ShapedTextKey {
             font_handle,
             text: text.to_owned(),
@@ -631,21 +613,17 @@ impl TextRenderer {
         };
 
         if let Some(glyphs) = self.shaped_cache.get(&key) {
-            return Ok(Arc::clone(glyphs));
+            return Ok(glyphs.clone());
         }
 
-        let glyphs_vec = self.font_manager.shape_text_with_props(
+        let glyphs = self.font_manager.shape_text_with_props(
             text,
             bidi_lvl,
             script,
             font_handle,
         )?;
 
-
-        let glyphs: Arc<[ShapedGlyph]> = Arc::from(glyphs_vec);
-
-        self.shaped_cache.put(key, Arc::clone(&glyphs));
-
+        self.shaped_cache.put(key, glyphs.clone());
 
         Ok(glyphs)
     }
@@ -661,22 +639,12 @@ impl TextRenderer {
             run.font_handle,
         )?;
 
-        let font_scale = self.font_manager.scale(run.font_handle)?;
-
-        let cluster_groups_vec = self.build_cluster_groups_from_glyphs(
-            run.byte_start,
-            run.text.len(),
-            &glyphs,
-            font_scale,
-        );
-
-        let cluster_groups: Arc<[ClusterGroup]> = Arc::from(cluster_groups_vec);
 
         let mut all_glyphs_support = true; 
         let mut x_adv = 0.0;
         let mut y_adv = 0.0;
 
-        for glyph in glyphs.iter() {
+        for glyph in &glyphs {
             if all_glyphs_support && glyph.glyph_idx == 0 {
                 all_glyphs_support = false
             }
@@ -692,10 +660,10 @@ impl TextRenderer {
                 text: run.text,
                 byte_start: run.byte_start,
                 bidi_lvl: run.bidi_lvl,
+                script: run.script,
                 x_adv,
                 y_adv,
                 shaped_glyphs: glyphs,
-                cluster_groups
             }]);
         }
 
@@ -709,14 +677,14 @@ impl TextRenderer {
         &mut self,
         original_font: FontHandle,
         text: &str,
-    ) -> anyhow::Result<Arc<[ShapedTextRun]>> {
+    ) -> anyhow::Result<Vec<ShapedTextRun>> {
         let key = ShapedRunKey {
             original_font,
             text: text.to_owned(),
         };
 
         if let Some(runs) = self.font_run_cache.get(&key) {
-            return Ok(Arc::clone(runs));
+            return Ok(runs.clone());
         }
 
         let itemized = self.itemize_runs(original_font, text)?;
@@ -727,9 +695,7 @@ impl TextRenderer {
             shaped_runs.extend(self.shape_run(run)?);
         }
 
-        let shaped_runs: Arc<[ShapedTextRun]> = Arc::from(shaped_runs);
-
-        self.font_run_cache.put(key, Arc::clone(&shaped_runs));
+        self.font_run_cache.put(key, shaped_runs.clone());
 
         Ok(shaped_runs)
     } 
@@ -819,91 +785,7 @@ impl TextRenderer {
         Ok(font)
     }
 
-    fn render_run_slice<G: GraphicsDevice>(
-        &mut self,
-        run_x: f32,
-        baseline_y: f32,
-        run: &ShapedTextRun,
-        slice: &RunSlice,
-        gpu: &mut G,
-        ui: &mut UIRenderer,
-    ) -> anyhow::Result<()> {
-        let run_font = run.font_handle;
-
-        let is_colored = self.font_manager.is_colored(run_font)?;
-
-        let kind = if is_colored { 
-            QuadType::ColoredImage 
-        } else { 
-            QuadType::TextGlyph 
-        };
-
-        let font_scale = self.font_manager.scale(run_font)?;
-        let font_render_scale = self.font_manager.render_scale(run_font)?;
-
-        let color = if is_colored {
-            crate::graphics::Color::rgba(1.0, 1.0, 1.0, 1.0)
-        } else {
-            crate::graphics::Color::rgba(0.0, 0.0, 0.0, 1.0)
-        };
-
-        let mut pen_x = run_x;
-
-        for glyph_idx in slice.glyph_range.clone() {
-            let shaped = &run.shaped_glyphs[glyph_idx];
-            let key = GlyphKey {
-                font_handle: run_font,
-                glyph_idx: shaped.glyph_idx, 
-            };
-
-            if !self.glyph_locations.contains_key(&key) {
-                let glyph = {
-                    let glyph_ref = self.font_manager.get_or_load_glyph(
-                        run_font,
-                        shaped.glyph_idx as u32,
-                    )?;
-                    glyph_ref.clone()
-                };
-
-                self.upload_glyph(key, glyph, gpu, ui)?;
-            }
-
-            let atlas_glyph = &self.glyph_locations[&key];
-
-            if atlas_glyph.size[0] != 0 && atlas_glyph.size[1] != 0 {
-                let render_x =
-                    pen_x
-                    + shaped.x_off * font_scale
-                    + atlas_glyph.bearing[0] as f32 * font_render_scale;
-
-                let render_y =
-                    baseline_y
-                    - shaped.y_off * font_scale
-                    - atlas_glyph.bearing[1] as f32 * font_render_scale;
-
-                let w = atlas_glyph.size[0] as f32 * font_render_scale;
-                let h = atlas_glyph.size[1] as f32 * font_render_scale;
-
-                ui.raw_quad_atlas(
-                    [render_x, render_y, w, h],
-                    [
-                    atlas_glyph.uv_min[0],
-                    atlas_glyph.uv_min[1],
-                    atlas_glyph.uv_max[0],
-                    atlas_glyph.uv_max[1],
-                    ],
-                    color,
-                    [0.0, 0.0, atlas_glyph.atlas_layer as f32, kind.as_f32()],
-                )?;
-            }
-
-            pen_x += shaped.x_adv * font_scale;
-        }
-
-        Ok(())
-    }
-
-      fn render_shaped_run<G: GraphicsDevice>(
+    fn render_shaped_run<G: GraphicsDevice>(
         &mut self,
         run_x: f32,
         baseline_y: f32,
@@ -932,7 +814,7 @@ impl TextRenderer {
 
         let mut pen_x = run_x;
 
-        for shaped in run.shaped_glyphs.iter() {
+        for shaped in &run.shaped_glyphs {
             let key = GlyphKey {
                 font_handle: run_font,
                 glyph_idx: shaped.glyph_idx,
@@ -1017,7 +899,7 @@ impl TextRenderer {
 
             let mut cursor_x = x;
 
-            for run in runs.iter() {
+            for run in runs {
 
                 self.render_shaped_run(cursor_x, baseline_y, &run, gpu, ui)?;
 
@@ -1030,40 +912,8 @@ impl TextRenderer {
         Ok(())
     }
 
-    fn measure_byte_range_from_runs(
-        &mut self,
-        paragraph_runs: &[ShapedTextRun],
-        byte_range: std::ops::Range<usize>,
-    ) -> anyhow::Result<f32> {
-        let mut width = 0.0;
-
-        for (run_index, run) in paragraph_runs.iter().enumerate() {
-            let run_start = run.byte_start;
-            let run_end = run.byte_start + run.text.len();
-
-            let slice_start = byte_range.start.max(run_start);
-            let slice_end = byte_range.end.min(run_end);
-
-            if slice_start >= slice_end {
-                continue;
-            }
-
-            let slices = self.run_slices_for_byte_range(
-                run_index,
-                run,
-                slice_start..slice_end,
-            )?;
-
-            for slice in slices {
-                width += slice.x_advance;
-            }
-        }
-
-        Ok(width)
-    }
-
     fn word_wrap_token_ranges(&mut self, 
-        paragraph: &str) -> anyhow::Result<Vec<TokenRange>> {
+        paragraph: &str, font_handle: FontHandle) -> anyhow::Result<Vec<TokenRange>> {
         let mut tokens: Vec<TokenRange> = Vec::new();
 
         let mut cursor = 0;
@@ -1079,38 +929,17 @@ impl TextRenderer {
                     continue;
                 }
             }
-            tokens.push(TokenRange { byte_start, byte_end, width: 0.0});
+            let width = self.measure_text(token, font_handle)?;
+
+            tokens.push(TokenRange { byte_start, byte_end, width });
         }
 
         Ok(tokens)
     }
 
-    fn trim_line_start_whitespace(
-        &self,
-        text: &str,
-        mut byte_start: usize,
-        byte_end: usize,
-    ) -> usize {
-        while byte_start < byte_end {
-            let Some(ch) = text[byte_start..byte_end].chars().next() else {
-                break;
-            };
-
-            if !ch.is_whitespace() {
-                break;
-            }
-
-            byte_start += ch.len_utf8();
-        }
-
-        byte_start
-    }
-
     fn build_line_ranges(
         &mut self, 
-        paragraph: &str,
-        paragraph_runs: &[ShapedTextRun],
-        token_ranges: &[TokenRange],
+        token_ranges: Vec<TokenRange>,
         max_width: f32
     ) -> anyhow::Result<Vec<LineRange>> {
         let mut crnt_width = 0.0;
@@ -1121,28 +950,7 @@ impl TextRenderer {
 
         for range in token_ranges {
             if crnt_start.is_none() {
-                // Trim whitespace 
-                crnt_start = Some(self.trim_line_start_whitespace(
-                        paragraph,
-                        range.byte_start,
-                        range.byte_end,
-                ));
-
-                crnt_end = range.byte_end;
-                crnt_width = if let Some(start) = crnt_start {
-                    if start < crnt_end {
-                        self.measure_byte_range_from_runs(
-                            paragraph_runs,
-                            start..crnt_end,
-                        )?
-                    } else {
-                        0.0
-                    }
-                } else {
-                    0.0
-                };
-
-                continue;
+                crnt_start = Some(range.byte_start);
             }
 
             let would_wrap = crnt_width != 0.0 &&
@@ -1152,28 +960,11 @@ impl TextRenderer {
                 lines.push(
                     LineRange { 
                         byte_start: crnt_start.unwrap(), 
-                        byte_end: crnt_end,
+                        byte_end: crnt_end
                     });
 
-                crnt_start = Some(self.trim_line_start_whitespace(
-                        paragraph,
-                        range.byte_start,
-                        range.byte_end,
-                ));
-
+                crnt_start = Some(range.byte_start);
                 crnt_end = range.byte_end;
-                crnt_width = if let Some(start) = crnt_start {
-                    if start < crnt_end {
-                        self.measure_byte_range_from_runs(
-                            paragraph_runs,
-                            start..crnt_end,
-                        )?
-                    } else {
-                        0.0
-                    }
-                } else {
-                    0.0
-                };
             } else {
                 crnt_width += range.width;
                 crnt_end = range.byte_end;
@@ -1186,131 +977,12 @@ impl TextRenderer {
                 lines.push(
                     LineRange { 
                         byte_start,
-                        byte_end: crnt_end,
+                        byte_end: crnt_end
                     });
             }
         }
 
         Ok(lines)
-    }
-
-    fn build_cluster_groups_from_glyphs(
-        &self,
-        run_byte_start: usize,
-        run_text_len: usize,
-        glyphs: &[ShapedGlyph],
-        font_scale: f32,
-    ) -> Vec<ClusterGroup> {
-        let mut groups = Vec::new();
-
-        let mut i = 0;
-
-        while i < glyphs.len() {
-            let cluster = glyphs[i].cluster as usize;
-            let glyph_start = i;
-            let mut glyph_end = i + 1;
-
-            while glyph_end < glyphs.len()
-                && glyphs[glyph_end].cluster as usize == cluster
-                {
-                    glyph_end += 1;
-                }
-
-            let x_advance = glyphs[glyph_start..glyph_end]
-                .iter()
-                .map(|g| g.x_adv * font_scale)
-                .sum();
-
-            groups.push(ClusterGroup {
-                byte_start_abs: run_byte_start + cluster,
-                byte_end_abs: 0,
-                glyph_range: glyph_start..glyph_end,
-                x_advance,
-            });
-
-            i = glyph_end;
-        }
-
-        // HarfBuzz glyph order may not be byte-monotonic, 
-        // especially for RTL text. So compute byte ends 
-        // from sorted logical cluster starts.
-        let mut starts: Vec<usize> = groups
-            .iter()
-            .map(|g| g.byte_start_abs)
-            .collect();
-
-        starts.sort_unstable();
-        starts.dedup();
-
-        let run_byte_end = run_byte_start + run_text_len;
-
-        for group in &mut groups {
-            let pos = starts
-                .binary_search(&group.byte_start_abs)
-                .expect("cluster start should exist in starts");
-
-            // Get range ends from starts
-            group.byte_end_abs = starts
-                .get(pos + 1)
-                .copied()
-                .unwrap_or(run_byte_end);
-            }
-
-        groups
-    }
-
-    fn run_slices_for_byte_range(
-        &mut self,
-        run_index: usize,
-        run: &ShapedTextRun,
-        byte_range_abs: std::ops::Range<usize>,
-    ) -> anyhow::Result<Vec<RunSlice>> {
-        let groups = &run.cluster_groups; 
-
-        let mut slices = Vec::new();
-        let mut current: Option<RunSlice> = None;
-
-        for group in groups.iter() {
-            let intersects =
-                group.byte_end_abs > byte_range_abs.start &&
-                group.byte_start_abs < byte_range_abs.end;
-
-            if !intersects {
-                if let Some(slice) = current.take() {
-                    slices.push(slice);
-                }
-                continue;
-            }
-
-            match &mut current {
-                Some(slice) if slice.glyph_range.end == group.glyph_range.start => {
-                    slice.glyph_range.end = group.glyph_range.end;
-                    slice.x_advance += group.x_advance;
-                }
-                Some(_) => {
-                    slices.push(current.take().unwrap());
-
-                    current = Some(RunSlice {
-                        run_index,
-                        glyph_range: group.glyph_range.clone(),
-                        x_advance: group.x_advance,
-                    });
-                }
-                None => {
-                    current = Some(RunSlice {
-                        run_index,
-                        glyph_range: group.glyph_range.clone(),
-                        x_advance: group.x_advance,
-                    });
-                }
-            }
-        }
-
-        if let Some(slice) = current {
-            slices.push(slice);
-        }
-
-        Ok(slices)
     }
 
     fn build_run_slices_for_line(
@@ -1327,7 +999,7 @@ impl TextRenderer {
             let run_end = run.byte_start + run.text.len();
 
             let slice_start = line.byte_start.max(run_start);
-            let slice_end   = line.byte_end.min(run_end);
+            let slice_end   = line.byte_end.max(run_end);
 
             if slice_start >= slice_end {
                 continue;
@@ -1343,9 +1015,7 @@ impl TextRenderer {
                 is_rtl = true;
             }
 
-
             for slice in run_slices {
-                width += slice.x_advance;
                 slices.push(slice);
             }
         }
@@ -1357,48 +1027,17 @@ impl TextRenderer {
         })
     }
 
-    fn token_ranges_cached(
-        &mut self,
-        font_handle: FontHandle,
-        text: &str,
-        paragraph_runs: &[ShapedTextRun],
-    ) -> anyhow::Result<Arc<[TokenRange]>> {
-        let key = ShapedRunKey {
-            original_font: font_handle,
-            text: text.to_owned(),
-        };
-
-        if let Some(tokens) = self.token_range_cache.get(&key) {
-            return Ok(Arc::clone(tokens));
-        }
-
-        let mut tokens = self.word_wrap_token_ranges(text)?;
-
-        for token in &mut tokens {
-            token.width = self.measure_byte_range_from_runs(
-                paragraph_runs,
-                token.byte_start..token.byte_end,
-            )?;
-        }
-
-        let tokens: Arc<[TokenRange]> = Arc::from(tokens);
-
-        self.token_range_cache.put(key, Arc::clone(&tokens));
-
-        Ok(tokens)
-    }
-
     fn layout_cached(
         &mut self,
         text: &str,
         font_handle: FontHandle,
         options: TextLayoutOptions,
-    ) -> anyhow::Result<Arc<TextLayout>> {
+    ) -> anyhow::Result<TextLayout> {
 
         let key = TextLayoutKey {
             font_handle,
             text: text.to_owned(),
-            max_width_px: options.max_width.ceil() as u32, 
+            max_width_px: options.max_width.map(|w| w.ceil() as u32),
         };
 
         if let Some(layout) = self.layout_cache.get(&key) {
@@ -1409,52 +1048,53 @@ impl TextRenderer {
         let line_height = self.font_manager.line_height(font_handle)? as f32 * base_scale;
         let ascender = self.font_manager.ascender(font_handle)? as f32 * base_scale;
 
-        // First shape the entire paragraph once
-        // (cached per paragraph)
-        let paragraph_runs  = self.build_shaped_runs_cached(font_handle, text)?;
-        // Second, firgure out the byte ranges of the 
-        // tokens in the paragraph string and get their 
-        // displayed pixel size by mapping the 
-        // string byte ranges back to the shaped glyphs 
-        // of the entire paragraph. (cached per paragraph)
-        let token_ranges    = self.token_ranges_cached(font_handle, text, &paragraph_runs)?;
+        let mut lines = Vec::new();
 
-        // Build the string byte ranges of where line breaks 
-        // are happening (not cached)
-        let line_ranges = self.build_line_ranges(
-            text,
-            &paragraph_runs,
-            &token_ranges,
-            options.max_width,
-        )?;
+        // TODO: Wrap lines by '\n' before layout 
+        // based wrapping.
 
-        // Build run slices for the line byte ranges. 
-        // This is done to map string token byte ranges
-        // back to the slices of glyphs they are affecting 
-        // in their run of the line.
-        let lines = line_ranges
-            .into_iter()
-            .map(|line| self.build_run_slices_for_line(&paragraph_runs, line))
-            .collect::<anyhow::Result<Vec<TextLine>>>()?;
-       
-        // Maximum with of all lines is 
-        // width of the text layout
-        let width = lines.iter()
-            .map(|line| line.width)
-            .fold(0.0, f32::max);
+        let runs = self.build_shaped_runs_cached(font_handle, text)?;
 
-        let layout = Arc::new(TextLayout {
+
+        let width = 0.0; 
+
+        let height = lines.len() as f32 * line_height;
+
+        let layout = TextLayout {
             lines,
-            paragraph_runs,
             width,
-            line_height,
-            ascender,
-        });
+            height,
+            line_height, 
+            ascender
+        };
 
-        self.layout_cache.put(key, Arc::clone(&layout));
-
+        self.layout_cache.put(key, layout.clone());
 
         Ok(layout)
+    }
+
+    fn runs_width(&mut self, runs: &[ShapedTextRun]) -> anyhow::Result<f32> {
+        // Gets the combined width of all 
+        // text runs in a given slice of runs,
+        // adjusted for the run font's 
+        // scale factor.
+        let mut width = 0.0;
+
+        for run in runs {
+            let scale = self.font_manager.scale(run.font_handle)?;
+            width += run.x_adv * scale;
+        }
+
+        Ok(width)
+    }
+
+    fn measure_text(
+        &mut self,
+        text: &str,
+        font_handle: FontHandle,
+    ) -> anyhow::Result<f32> {
+        let runs = self.build_shaped_runs_cached(font_handle, text)?;
+        self.runs_width(&runs)
     }
 
     fn is_leading_forbidden_token(&self, token: &str) -> bool {
@@ -1467,6 +1107,105 @@ impl TextRenderer {
                 '،' | '؛' | '؟'
             )
         })
+    }
+
+    fn word_wrap_tokens(&self, paragraph: &str) -> Vec<String> {
+        let mut tokens: Vec<String> = Vec::new();
+
+        for token in paragraph.split_word_bounds() {
+            if self.is_leading_forbidden_token(token) {
+                if let Some(prev) = tokens.last_mut() {
+                    prev.push_str(token);
+                    continue;
+                }
+            }
+
+            tokens.push(token.to_owned());
+        }
+
+        tokens
+    }
+
+    fn shape_and_push_line(
+        &mut self,
+        paragraph: &str,
+        font_handle: FontHandle,
+        lines: &mut Vec<TextLine>,
+    ) -> anyhow::Result<()> {
+
+        let runs = self.build_shaped_runs_cached(font_handle, paragraph)?;
+        let width = self.runs_width(&runs)?;
+        let mut is_rtl = false;
+        for run in &runs {
+            is_rtl = run.bidi_lvl.is_rtl();
+            if is_rtl {
+                break;
+            }
+        }
+
+        lines.push(TextLine { runs, width, is_rtl });
+        Ok(())
+    }
+
+    fn layout_paragraph(
+        &mut self,
+        paragraph: &str,
+        font_handle: FontHandle,
+        max_width: Option<f32>,
+        lines: &mut Vec<TextLine>,
+    ) -> anyhow::Result<()> {
+        // If there is no maximum width, do not 
+        // care to wrap paragraph.
+        let Some(max_width) = max_width else {
+            return self.shape_and_push_line(paragraph, font_handle, lines);
+        };
+
+        let mut current_text = String::new();
+        let mut current_width = 0.0;
+
+        for token in self.word_wrap_tokens(paragraph) {
+            // Only build the word token's runs for 
+            // the current word.
+            let token_width = self.measure_text(&token, font_handle)?;
+
+            if !current_text.is_empty() && current_width + token_width > max_width {
+                // If there has been a line wrap, push a new 
+                // text line into the layout's lines and start 
+                // over from the next line.
+                let line_text = current_text.trim_end().to_owned();
+
+                // Build the entire line's runs once at the end 
+                self.shape_and_push_line(&line_text, font_handle, lines)?;
+
+                current_text.clear();
+                current_width = 0.0;
+
+                let token = token.trim_start();
+                if token.is_empty() {
+                    continue;
+                }
+
+                // Consume the first token if not empty  
+                let token_width = self.measure_text(token, font_handle)?;
+                current_text.push_str(token);
+                current_width += token_width;
+            } else {
+                // Advance by the measured token width if there 
+                // has not been a line break caused by wrapping.
+                current_text.push_str(&token);
+                current_width += token_width;
+            }
+        }
+
+        // Push the remaining text line 
+        if !current_text.is_empty() {
+            let line_text = current_text.trim_end().to_owned();
+
+            self.shape_and_push_line(&line_text, font_handle, lines)?;
+        }
+
+
+        Ok(())
     }
 
     /// Renders text with word wrapping.
@@ -1484,12 +1223,11 @@ impl TextRenderer {
         gpu: &mut G,
         ui: &mut UIRenderer,
     ) -> anyhow::Result<()> {
-        
         let layout = self.layout_cached(
             text,
             font_handle,
             TextLayoutOptions {
-                max_width 
+                max_width: Some(max_width),
             },
         )?;
 
@@ -1502,18 +1240,11 @@ impl TextRenderer {
                 x
             };
 
-            for slice in &line.slices {
-                let run = &layout.paragraph_runs[slice.run_index];
+            for run in &line.runs {
+                self.render_shaped_run(cursor_x, baseline_y, run, gpu, ui)?;
 
-                self.render_run_slice(
-                    cursor_x, 
-                    baseline_y, 
-                    run, 
-                    slice,
-                    gpu, 
-                    ui)?;
-
-                cursor_x += slice.x_advance; 
+                let scale = self.font_manager.scale(run.font_handle)?;
+                cursor_x += run.x_adv * scale;
             }
 
             baseline_y += layout.line_height; 

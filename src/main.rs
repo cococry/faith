@@ -3,6 +3,8 @@ mod graphics;
 mod cli;
 mod ui;
 
+use std::time::Instant;
+
 use crate::{graphics::{GraphicsDevice}, ui::TextRenderer};
 
 use clap::Parser;
@@ -42,10 +44,8 @@ fn main() -> anyhow::Result<()> {
     let base_font = text.load_font("assets/NotoSans-Regular.ttf", 24)?;
     text.load_font("assets/NotoSansArabic-Regular.ttf", 24)?;
     text.load_font("assets/NotoSansHebrew-Regular.ttf", 24)?;
-
- let hard_text =
-     "تَتَحَدَّث اَلْأَبْيَات عَنْ لَحْظَة وَدَاع يَسْتَغْرِب فِيهَا اَلشَّاعِر أَنْ لَا يَبْكِي مِنْ أَلَم اَلْفِرَاق، وَيَصِف حَالَة اَلْمُودِعِينَ وَبَعْضهمْ يَتَكَلَّم فِي حِين يَكْتَفِي اَلْمُحِبُّونَ بِالصَّمْتِ، لِأَنَّ حَالهمْ تَظْهَر عِشْقهمْ أَكْثَر مِمَّا يَسْتَطِيعُونَ اَلتَّعْبِير عَنْهُ بِالْكَلَامِ. وَيُقَسِّم فِي آخَر اَلْأَبْيَات عَلَى أَنَّ تَوَقُّف دَمْعه لَا يَعْنِي نِهَايَة حَيّه."; 
-    let mut running = true;
+    let mixed_hebrew_arabic = "Hello مرحبا 😀 world العربية ❤️ cafe العالم 👍🏽 naive السَّلامُ 👩🏽‍💻 render عَلَيْكُمْ 🇩🇪 layout صباح 🏳️‍🌈 glyph نور 😂 emoji ليلة 🥲 Latin جميلة 🚀 test قلب ✨ mixed كتاب 😀 text مدينة ❤️ fast صديق 👍🏽 correct طريق 👩🏽‍💻 engine كبير 🇩🇪 cache صغير 🏳️‍🌈 shape سريع 😂 line هادئ 🥲 wrap موسيقى 🚀 font قهوة ✨ Hello مرحبا 😀 world العربية ❤️ cafe العالم 👍🏽 naive السَّلامُ 👩🏽‍💻 render عَلَيْكُمْ 🇩🇪 layout صباح 🏳️‍🌈 glyph نور 😂 emoji ليلة 🥲 Latin جميلة 🚀 test قلب ✨ mixed كتاب 😀 text مدينة ❤️ fast صديق 👍🏽 correct طريق 👩🏽‍💻 engine كبير 🇩🇪 cache صغير 🏳️‍🌈 shape سريع 😂 line هادئ 🥲 wrap موسيقى 🚀 font قهوة ✨ Hello مرحبا 😀 world العربية ❤️ cafe العالم 👍🏽 naive السَّلامُ 👩🏽‍💻 render عَلَيْكُمْ 🇩🇪 layout صباح 🏳️‍🌈 glyph نور 😂 emoji ليلة 🥲 Latin جميلة 🚀 test قلب ✨ mixed كتاب 😀 text مدينة ❤️ fast صديق 👍🏽 correct طريق 👩🏽‍💻 engine كبير 🇩🇪 cache صغير 🏳️‍🌈 shape سريع 😂 line هادئ 🥲 wrap موسيقى 🚀 font قهوة ✨ Hello مرحبا 😀 world العربية ❤️ cafe العالم 👍🏽 naive السَّلامُ 👩🏽‍💻 render عَلَيْكُمْ 🇩🇪 layout صباح 🏳️‍🌈 glyph نور 😂 emoji ليلة 🥲 Latin جميلة 🚀 test قلب ✨ mixed كتاب 😀 text مدينة ❤️ fast صديق 👍🏽 correct طريق 👩🏽‍💻 engine كبير 🇩🇪 cache صغير 🏳️‍🌈 shape سريع 😂 line هادئ 🥲 wrap موسيقى 🚀 font قهوة ✨ Hello مرحبا 😀 world العربية ❤️ cafe العالم 👍🏽 naive السَّلامُ 👩🏽‍💻 render عَلَيْكُمْ 🇩🇪 layout صباح 🏳️‍🌈 glyph نور 😂 emoji ليلة 🥲 Latin جميلة 🚀 test قلب ✨ mixed كتاب 😀 text مدينة ❤️ fast صديق 👍🏽 correct طريق 👩🏽‍💻 engine كبير 🇩🇪 cache صغير 🏳️‍🌈 shape سريع 😂 line هادئ 🥲 wrap موسيقى 🚀 font قهوة ✨ Hello مرحبا 😀 world العربية ❤️ cafe العالم 👍🏽 naive السَّلامُ 👩🏽‍💻 render عَلَيْكُمْ 🇩🇪 layout صباح 🏳️‍🌈 glyph نور 😂 emoji ليلة 🥲 Latin جميلة 🚀 test قلب ✨ mixed كتاب 😀 text مدينة ❤️ fast صديق 👍🏽 correct طريق 👩🏽‍💻 engine كبير 🇩🇪 cache صغير 🏳️‍🌈 shape سريع 😂 line هادئ 🥲 wrap موسيقى 🚀 font قهوة ✨ Hello مرحبا 😀 world العربية ❤️ cafe العالم 👍🏽 naive السَّلامُ 👩🏽‍💻 render عَلَيْكُمْ 🇩🇪 layout صباح 🏳️‍🌈 glyph نور 😂 emoji ليلة 🥲 Latin جميلة 🚀 test قلب ✨ mixed كتاب 😀 text مدينة ❤️ fast صديق 👍🏽 correct طريق 👩🏽‍💻 engine كبير 🇩🇪 cache صغير 🏳️‍🌈 shape سريع 😂 line هادئ 🥲 wrap موسيقى 🚀 font قهوة ✨ Hello مرحبا 😀 world العربية ❤️ cafe العالم 👍🏽 naive السَّلامُ 👩🏽‍💻 render عَلَيْكُمْ 🇩🇪 layout صباح 🏳️‍🌈 glyph نور 😂 emoji ليلة 🥲 Latin جميلة 🚀 test قلب ✨ mixed كتاب 😀 text مدينة ❤️ fast صديق 👍🏽 correct طريق 👩🏽‍💻 engine كبير 🇩🇪 cache صغير 🏳️‍🌈 shape سريع 😂 line هادئ 🥲 wrap موسيقى 🚀 font قهوة ✨ Hello مرحبا 😀 world العربية ❤️ cafe العالم 👍🏽 naive السَّلامُ 👩🏽‍💻 render عَلَيْكُمْ 🇩🇪 layout صباح 🏳️‍🌈 glyph نور 😂 emoji ليلة 🥲 Latin جميلة 🚀 test قلب ✨ mixed كتاب 😀 text مدينة ❤️ fast صديق 👍🏽 correct طريق 👩🏽‍💻 engine كبير 🇩🇪 cache صغير 🏳️‍🌈 shape سريع 😂 line هادئ 🥲 wrap موسيقى 🚀 font قهوة ✨ Hello مرحبا 😀 world العربية ❤️ cafe العالم 👍🏽 naive السَّلامُ 👩🏽‍💻 render عَلَيْكُمْ 🇩🇪 layout صباح 🏳️‍🌈 glyph نور 😂 emoji ليلة 🥲 Latin جميلة 🚀 test قلب ✨ mixed كتاب 😀 text مدينة ❤️ fast صديق 👍🏽 correct طريق 👩🏽‍💻 engine كبير 🇩🇪 cache صغير 🏳️‍🌈 shape سريع 😂 line هادئ 🥲 wrap موسيقى 🚀 font قهوة ✨ Hello مرحبا 😀 world العربية ❤️ cafe العالم 👍🏽 naive السَّلامُ 👩🏽‍💻 render عَلَيْكُمْ 🇩🇪 layout صباح 🏳️‍🌈 glyph نور 😂 emoji ليلة 🥲 Latin جميلة 🚀 test قلب ✨ mixed كتاب 😀 text مدينة ❤️ fast صديق 👍🏽 correct طريق 👩🏽‍💻 engine كبير 🇩🇪 cache صغير 🏳️‍🌈 shape سريع 😂 line هادئ 🥲 wrap موسيقى 🚀 font قهوة ✨ Hello مرحبا 😀 world العربية ❤️ cafe العالم 👍🏽 naive السَّلامُ 👩🏽‍💻 render عَلَيْكُمْ 🇩🇪 layout صباح 🏳️‍🌈 glyph نور 😂 emoji ليلة 🥲 Latin جميلة 🚀 test قلب ✨ mixed كتاب 😀 text مدينة ❤️ fast صديق 👍🏽 correct طريق 👩🏽‍💻 engine كبير 🇩🇪 cache صغير 🏳️‍🌈 shape سريع 😂 line هادئ 🥲 wrap موسيقى 🚀 font قهوة ✨ Hello مرحبا 😀 world العربية ❤️ cafe العالم 👍🏽 naive السَّلامُ 👩🏽‍💻 render عَلَيْكُمْ 🇩🇪 layout صباح 🏳️‍🌈 glyph نور 😂 emoji ليلة 🥲 Latin جميلة 🚀 test قلب ✨ mixed كتاب 😀 text مدينة ❤️ fast صديق 👍🏽 correct طريق 👩🏽‍💻 engine كبير 🇩🇪 cache صغير 🏳️‍🌈 shape سريع 😂 line هادئ 🥲 wrap موسيقى 🚀 font قهوة ✨ Hello مرحبا 😀 world العربية ❤️ cafe العالم 👍🏽 naive السَّلامُ 👩🏽‍💻 render عَلَيْكُمْ 🇩🇪 layout صباح 🏳️‍🌈 glyph نور 😂 emoji ليلة 🥲 Latin جميلة 🚀 test قلب ✨ mixed كتاب 😀 text مدينة ❤️ fast صديق 👍🏽 correct طريق 👩🏽‍💻 engine كبير 🇩🇪 cache صغير 🏳️‍🌈 shape سريع 😂 line هادئ 🥲 wrap موسيقى 🚀 font قهوة ✨ Hello مرحبا 😀 world العربية ❤️ cafe العالم 👍🏽 naive السَّلامُ 👩🏽‍💻 render عَلَيْكُمْ 🇩🇪 layout صباح 🏳️‍🌈 glyph نور 😂 emoji ليلة 🥲 Latin جميلة 🚀 test قلب ✨ mixed كتاب 😀 text مدينة ❤️ fast صديق 👍🏽 correct طريق 👩🏽‍💻 engine كبير 🇩🇪 cache صغير 🏳️‍🌈 shape سريع 😂 line هادئ 🥲 wrap موسيقى 🚀 font قهوة ✨ Hello مرحبا 😀 world العربية ❤️ cafe العالم 👍🏽 naive السَّلامُ 👩🏽‍💻 render عَلَيْكُمْ 🇩🇪 layout صباح 🏳️‍🌈 glyph نور 😂 emoji ليلة 🥲 Latin جميلة 🚀 test قلب ✨ mixed كتاب 😀 text مدينة ❤️ fast صديق 👍🏽 correct"; 
+        let mut running = true;
 
     while running {
         let events = platform.poll_events()?;
@@ -71,23 +71,31 @@ fn main() -> anyhow::Result<()> {
         }
 
         if running && should_redraw {
+            let start = Instant::now();
             renderer.clear_color(Color::rgba(1.0, 1.0, 1.0, 1.0));
             renderer.begin_frame();
 
             let (width, height) = platform.size();
 
             ui.begin(width, height);
+      
             
+
+
             text.render_wrapped(
                 20.0,
                 20.0,
-                hard_text,
+                mixed_hebrew_arabic,
                 base_font,
                 width as f32 - 40.0,
                 &mut renderer,
                 &mut ui,
             )?;
 
+
+            let elapsed = start.elapsed();
+
+            println!("rendering took: {:.3} ms", elapsed.as_secs_f64() * 1000.0);
 
             ui.end(&mut renderer)?;
 
