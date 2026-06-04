@@ -1,6 +1,6 @@
 use std::{collections::HashMap, num::NonZeroUsize};
 
-use anyhow::Ok;
+use anyhow::{Ok, anyhow};
 use lru::LruCache;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -109,6 +109,7 @@ pub struct TextLayout {
 struct TextLine {
     runs: Vec<ShapedTextRun>,
     width: f32,
+    is_rtl: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -905,7 +906,6 @@ impl TextRenderer {
                 &text.replace('\n', ""),
                 font_handle,
                 options.max_width,
-                line_height,
                 &mut lines,
             )?;
 
@@ -981,20 +981,38 @@ impl TextRenderer {
         tokens
     }
 
+    fn shape_and_push_line(
+        &mut self,
+        paragraph: &str,
+        font_handle: FontHandle,
+        lines: &mut Vec<TextLine>,
+    ) -> anyhow::Result<()> {
+
+        let runs = self.build_shaped_runs_cached(font_handle, paragraph)?;
+        let width = self.runs_width(&runs)?;
+        let mut is_rtl = false;
+        for run in &runs {
+            is_rtl = run.bidi_lvl.is_rtl();
+            if is_rtl {
+                break;
+            }
+        }
+
+        lines.push(TextLine { runs, width, is_rtl });
+        Ok(())
+    }
+
     fn layout_paragraph(
         &mut self,
         paragraph: &str,
         font_handle: FontHandle,
         max_width: Option<f32>,
-        _line_height: f32,
         lines: &mut Vec<TextLine>,
     ) -> anyhow::Result<()> {
+        // If there is no maximum width, do not 
+        // care to wrap paragraph.
         let Some(max_width) = max_width else {
-            let runs = self.build_shaped_runs_cached(font_handle, paragraph)?;
-            let width = self.runs_width(&runs)?;
-
-            lines.push(TextLine { runs, width });
-            return Ok(());
+            return self.shape_and_push_line(paragraph, font_handle, lines);
         };
 
         let mut current_text = String::new();
@@ -1012,10 +1030,7 @@ impl TextRenderer {
                 let line_text = current_text.trim_end().to_owned();
 
                 // Build the entire line's runs once at the end 
-                let runs = self.build_shaped_runs_cached(font_handle, &line_text)?;
-                let width = self.runs_width(&runs)?;
-
-                lines.push(TextLine { runs, width });
+                self.shape_and_push_line(&line_text, font_handle, lines)?;
 
                 current_text.clear();
                 current_width = 0.0;
@@ -1037,12 +1052,11 @@ impl TextRenderer {
             }
         }
 
+        // Push the remaining text line 
         if !current_text.is_empty() {
             let line_text = current_text.trim_end().to_owned();
-            let runs = self.build_shaped_runs_cached(font_handle, &line_text)?;
-            let width = self.runs_width(&runs)?;
 
-            lines.push(TextLine { runs, width });
+            self.shape_and_push_line(&line_text, font_handle, lines)?;
         }
 
 
@@ -1075,7 +1089,11 @@ impl TextRenderer {
         let mut baseline_y = y + layout.ascender;
 
         for line in &layout.lines {
-            let mut cursor_x = x;
+            let mut cursor_x = if line.is_rtl {
+                x + (max_width - line.width)
+            } else {
+                x
+            };
 
             for run in &line.runs {
                 self.render_shaped_run(cursor_x, baseline_y, run, gpu, ui)?;
