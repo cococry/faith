@@ -19,9 +19,10 @@ rendered through a Vulkan & OpenGL layer, interfacing with the GPU directly.
 - X11/Wayland windowing backend
 - OpenGL rendering backend
 - Instanced, single drawcall glyph rendering
-- Colored glyph support
+- Colored glyph & emoji support
 - Unicode, grapheme & bidi support
 - Ligatures & text shaping with HarfBuzz
+- Left-to-right/right-to-left paragraphs
 
 ## Build & Run
 
