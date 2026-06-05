@@ -410,6 +410,7 @@ impl X11Platform {
 
             let xcb_surface_inst = ash::khr::xcb_surface::Instance::new(entry, instance); 
 
+            tracing::info!("Created Vulkan X11/XCB surface successfully."); 
             unsafe {
                 Ok(xcb_surface_inst.create_xcb_surface(&create_info, None)?)
             }
@@ -421,6 +422,8 @@ impl X11Platform {
             };
 
             let xlib_surface_inst = ash::khr::xlib_surface::Instance::new(entry, instance); 
+            
+            tracing::info!("Created Vulkan X11/Xlib surface successfully."); 
 
             unsafe {
                 Ok(xlib_surface_inst.create_xlib_surface(&create_info, None)?)

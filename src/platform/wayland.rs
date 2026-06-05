@@ -458,6 +458,8 @@ impl WaylandPlatform {
             };
 
             let wl_surface_inst = ash::khr::wayland_surface::Instance::new(entry, instance); 
+            
+            tracing::info!("Created Vulkan Wayland surface successfully."); 
 
             unsafe {
                 Ok(wl_surface_inst.create_wayland_surface(&create_info, None)?)
