@@ -11,6 +11,7 @@ use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
 
+use ash::vk::{XcbSurfaceCreateInfoKHR, XlibSurfaceCreateInfoKHR};
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{
@@ -393,4 +394,37 @@ impl X11Platform {
         }
     }
 
+    pub fn create_vulkan_surface(
+        &self,
+        entry: &ash::Entry,
+        instance: &ash::Instance, 
+        have_ext_vk_khr_xcb_surface: bool,
+        _have_ext_vk_khr_wayland_surface: bool,
+    ) -> anyhow::Result<ash::vk::SurfaceKHR> {
+        if have_ext_vk_khr_xcb_surface {
+            let create_info: XcbSurfaceCreateInfoKHR = XcbSurfaceCreateInfoKHR {
+                connection: self.xcb_conn.get_raw_xcb_connection(),
+                window: self.window,
+                ..Default::default()
+            };
+
+            let xcb_surface_inst = ash::khr::xcb_surface::Instance::new(entry, instance); 
+
+            unsafe {
+                Ok(xcb_surface_inst.create_xcb_surface(&create_info, None)?)
+            }
+        } else {
+            let create_info: XlibSurfaceCreateInfoKHR = XlibSurfaceCreateInfoKHR {
+                dpy: self.xdisplay.as_ptr() as *mut c_void,
+                window: self.window as u64,
+                ..Default::default()
+            };
+
+            let xlib_surface_inst = ash::khr::xlib_surface::Instance::new(entry, instance); 
+
+            unsafe {
+                Ok(xlib_surface_inst.create_xlib_surface(&create_info, None)?)
+            }
+        }
+    }
 }

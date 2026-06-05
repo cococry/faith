@@ -1,5 +1,6 @@
 use super::event::WindowEvent;
 use crate::{cli::Backend, platform::{wayland::WaylandWaker, x11::X11Waker}};
+use anyhow::anyhow;
 use tracing::{info, warn};
 
 /// Window creation configuration.
@@ -158,6 +159,26 @@ impl Platform {
         }
     }
 
-}
+    pub fn create_vulkan_surface(
+        &self,
+        entry: &ash::Entry,
+        instance: &ash::Instance, 
+        have_ext_vk_khr_xcb_surface: bool,
+        have_ext_vk_khr_wayland_surface: bool,
+    ) -> anyhow::Result<ash::vk::SurfaceKHR> {
+        match self {
+            Self::X11(platform) => platform.create_vulkan_surface(
+                entry,
+                instance, have_ext_vk_khr_xcb_surface,
+                have_ext_vk_khr_wayland_surface
+            ),
+            Self::Wayland(platform) => platform.create_vulkan_surface(
+                entry,
+                instance, have_ext_vk_khr_xcb_surface,
+                have_ext_vk_khr_wayland_surface
+            ),
+        }
+    }
+ }
 
 

@@ -37,6 +37,8 @@ pub struct OpenGLRenderer {
 
 impl OpenGLRenderer {
     pub fn new(platform: &Platform) -> anyhow::Result<Self> {
+        
+        tracing::info!("Using OpenGL rendering backend");
 
         let handle = platform.native_handle();
         let native_display = match handle {
@@ -75,9 +77,11 @@ impl OpenGLRenderer {
             .choose_first_config(egl_display, &attributes)?
             .expect("unable to find an appropriate ELG configuration");
 
+        let major = 4;
+        let minor = 0;
         let context_attributes = [
-            egl::CONTEXT_MAJOR_VERSION, 4,
-            egl::CONTEXT_MINOR_VERSION, 0,
+            egl::CONTEXT_MAJOR_VERSION, major,
+            egl::CONTEXT_MINOR_VERSION, minor,
             egl::CONTEXT_OPENGL_PROFILE_MASK,
             egl::CONTEXT_OPENGL_CORE_PROFILE_BIT,
             egl::NONE
@@ -85,6 +89,9 @@ impl OpenGLRenderer {
 
         let context = egl.create_context(egl_display, 
             config, None, &context_attributes)?;
+        
+        tracing::info!("Created OpenGL Core profile context (version {}.{})",
+            major, minor);
 
         let egl_surface = unsafe {
             egl.create_window_surface(

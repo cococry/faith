@@ -1,11 +1,12 @@
 // Implementation following: https://github.com/Smithay/wayland-rs/blob/master/wayland-client/examples/simple_window.rs
 //
-use std::{ffi::c_void, os::fd::AsFd, sync::Arc};
+use std::{ffi::c_void, os::fd::AsFd, ptr, sync::Arc};
 
 use crate::platform::window::WindowHandleInfo;
 use super::event::WindowEvent;
 use super::window::WindowConfig;
 
+use ash::vk::WaylandSurfaceCreateInfoKHR;
 use nix::{poll::{PollFd, PollFlags, PollTimeout, poll}, sys::eventfd::{EfdFlags, EventFd}};
 use wayland_client::{
     Connection, Dispatch, EventQueue, Proxy, QueueHandle, protocol::{wl_compositor, wl_registry, wl_surface}
@@ -435,6 +436,33 @@ impl WaylandPlatform {
     pub fn waker(&self) -> WaylandWaker {
         WaylandWaker {
             wake_fd: self.wake_fd.clone(),
+        }
+    }
+
+    pub fn create_vulkan_surface(
+        &self,
+        entry: &ash::Entry,
+        instance: &ash::Instance, 
+        _have_ext_vk_khr_xcb_surface: bool,
+        have_ext_vk_khr_wayland_surface: bool,
+    ) -> anyhow::Result<ash::vk::SurfaceKHR> {
+        if !have_ext_vk_khr_wayland_surface {
+            anyhow::bail!("Wayland: Vulkan instance missing VK_KHR_wayland_surface extension")
+        } else {
+            let raw_surf_ptr = self.state.surface.clone().unwrap().id().as_ptr() as *mut c_void;
+           
+            let create_info: WaylandSurfaceCreateInfoKHR = WaylandSurfaceCreateInfoKHR {
+                display: self.conn.backend().display_ptr() as *mut c_void,
+                surface: raw_surf_ptr, 
+                ..Default::default()
+            };
+
+            let wl_surface_inst = ash::khr::wayland_surface::Instance::new(entry, instance); 
+
+            unsafe {
+                Ok(wl_surface_inst.create_wayland_surface(&create_info, None)?)
+            }
+
         }
     }
 

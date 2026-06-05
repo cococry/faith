@@ -35,7 +35,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     let mut platform    = Platform::new(&conf)?;
-    let mut renderer    = Renderer::new(GraphicsBackend::OpenGL, &platform)?;
+    let mut renderer    = Renderer::new(GraphicsBackend::Vulkan, &platform)?;
     let mut ui          = UIRenderer::new(&mut renderer, conf.width, conf.height)?;
     let mut text        = TextRenderer::new()?; 
 
@@ -44,7 +44,7 @@ fn main() -> anyhow::Result<()> {
     let base_font = text.load_font("assets/NotoSans-Regular.ttf", 24)?;
     text.load_font("assets/NotoSansArabic-Regular.ttf", 24)?;
     text.load_font("assets/NotoSansHebrew-Regular.ttf", 24)?;
-    let mixed_hebrew_arabic = "Hello مرحبا 😀 world العربية ❤️ cafe العالم 👍🏽 naive السَّلامُ 👩🏽‍💻 render عَلَيْكُمْ 🇩🇪 layout صباح 🏳️‍🌈 glyph نور 😂 emoji ليلة 🥲 Latin جميلة 🚀 test قلب ✨ mixed كتاب 😀 text مدينة ❤️ fast صديق 👍🏽 correct طريق 👩🏽‍💻 engine كبير 🇩🇪 cache صغير 🏳️‍🌈 shape سريع 😂 line هادئ 🥲 wrap موسيقى 🚀 font قهوة ✨ Hello مرحبا 😀 world العربية ❤️ cafe العالم 👍🏽 naive السَّلامُ 👩🏽‍💻 render عَلَيْكُمْ 🇩🇪 layout صباح 🏳️‍🌈 glyph نور 😂 emoji ليلة 🥲 Latin جميلة 🚀 test قلب ✨ mixed كتاب 😀 text مدينة ❤️ fast صديق 👍🏽 correct طريق 👩🏽‍💻 engine كبير 🇩🇪 cache صغير 🏳️‍🌈 shape سريع 😂 line هادئ 🥲 wrap موسيقى 🚀 font قهوة ✨ Hello مرحبا 😀 world العربية ❤️ cafe العالم 👍🏽 naive السَّلامُ 👩🏽‍💻 render عَلَيْكُمْ 🇩🇪 layout صباح 🏳️‍🌈 glyph نور 😂 emoji ليلة 🥲 Latin جميلة 🚀 test قلب ✨ mixed كتاب 😀 text مدينة ❤️ fast صديق 👍🏽 correct طريق 👩🏽‍💻 engine كبير 🇩🇪 cache صغير 🏳️‍🌈 shape سريع 😂 line هادئ 🥲 wrap موسيقى 🚀 font قهوة ✨ Hello مرحبا 😀 world العربية ❤️ cafe العالم 👍🏽 naive السَّلامُ 👩🏽‍💻 render عَلَيْكُمْ 🇩🇪 layout صباح 🏳️‍🌈 glyph نور 😂 emoji ليلة 🥲 Latin جميلة 🚀 test قلب ✨ mixed كتاب 😀 text مدينة ❤️ fast صديق 👍🏽 correct طريق 👩🏽‍💻 engine كبير 🇩🇪 cache صغير 🏳️‍🌈 shape سريع 😂 line هادئ 🥲 wrap موسيقى 🚀 font قهوة ✨ Hello مرحبا 😀 world العربية ❤️ cafe العالم 👍🏽 naive السَّلامُ 👩🏽‍💻 render عَلَيْكُمْ 🇩🇪 layout صباح 🏳️‍🌈 glyph نور 😂 emoji ليلة 🥲 Latin جميلة 🚀 test قلب ✨ mixed كتاب 😀 text مدينة ❤️ fast صديق 👍🏽 correct طريق 👩🏽‍💻 engine كبير 🇩🇪 cache صغير 🏳️‍🌈 shape سريع 😂 line هادئ 🥲 wrap موسيقى 🚀 font قهوة ✨ Hello مرحبا 😀 world العربية ❤️ cafe العالم 👍🏽 naive السَّلامُ 👩🏽‍💻 render عَلَيْكُمْ 🇩🇪 layout صباح 🏳️‍🌈 glyph نور 😂 emoji ليلة 🥲 Latin جميلة 🚀 test قلب ✨ mixed كتاب 😀 text مدينة ❤️ fast صديق 👍🏽 correct طريق 👩🏽‍💻 engine كبير 🇩🇪 cache صغير 🏳️‍🌈 shape سريع 😂 line هادئ 🥲 wrap موسيقى 🚀 font قهوة ✨ Hello مرحبا 😀 world العربية ❤️ cafe العالم 👍🏽 naive السَّلامُ 👩🏽‍💻 render عَلَيْكُمْ 🇩🇪 layout صباح 🏳️‍🌈 glyph نور 😂 emoji ليلة 🥲 Latin جميلة 🚀 test قلب ✨ mixed كتاب 😀 text مدينة ❤️ fast صديق 👍🏽 correct طريق 👩🏽‍💻 engine كبير 🇩🇪 cache صغير 🏳️‍🌈 shape سريع 😂 line هادئ 🥲 wrap موسيقى 🚀 font قهوة ✨ Hello مرحبا 😀 world العربية ❤️ cafe العالم 👍🏽 naive السَّلامُ 👩🏽‍💻 render عَلَيْكُمْ 🇩🇪 layout صباح 🏳️‍🌈 glyph نور 😂 emoji ليلة 🥲 Latin جميلة 🚀 test قلب ✨ mixed كتاب 😀 text مدينة ❤️ fast صديق 👍🏽 correct طريق 👩🏽‍💻 engine كبير 🇩🇪 cache صغير 🏳️‍🌈 shape سريع 😂 line هادئ 🥲 wrap موسيقى 🚀 font قهوة ✨ Hello مرحبا 😀 world العربية ❤️ cafe العالم 👍🏽 naive السَّلامُ 👩🏽‍💻 render عَلَيْكُمْ 🇩🇪 layout صباح 🏳️‍🌈 glyph نور 😂 emoji ليلة 🥲 Latin جميلة 🚀 test قلب ✨ mixed كتاب 😀 text مدينة ❤️ fast صديق 👍🏽 correct طريق 👩🏽‍💻 engine كبير 🇩🇪 cache صغير 🏳️‍🌈 shape سريع 😂 line هادئ 🥲 wrap موسيقى 🚀 font قهوة ✨ Hello مرحبا 😀 world العربية ❤️ cafe العالم 👍🏽 naive السَّلامُ 👩🏽‍💻 render عَلَيْكُمْ 🇩🇪 layout صباح 🏳️‍🌈 glyph نور 😂 emoji ليلة 🥲 Latin جميلة 🚀 test قلب ✨ mixed كتاب 😀 text مدينة ❤️ fast صديق 👍🏽 correct طريق 👩🏽‍💻 engine كبير 🇩🇪 cache صغير 🏳️‍🌈 shape سريع 😂 line هادئ 🥲 wrap موسيقى 🚀 font قهوة ✨ Hello مرحبا 😀 world العربية ❤️ cafe العالم 👍🏽 naive السَّلامُ 👩🏽‍💻 render عَلَيْكُمْ 🇩🇪 layout صباح 🏳️‍🌈 glyph نور 😂 emoji ليلة 🥲 Latin جميلة 🚀 test قلب ✨ mixed كتاب 😀 text مدينة ❤️ fast صديق 👍🏽 correct طريق 👩🏽‍💻 engine كبير 🇩🇪 cache صغير 🏳️‍🌈 shape سريع 😂 line هادئ 🥲 wrap موسيقى 🚀 font قهوة ✨ Hello مرحبا 😀 world العربية ❤️ cafe العالم 👍🏽 naive السَّلامُ 👩🏽‍💻 render عَلَيْكُمْ 🇩🇪 layout صباح 🏳️‍🌈 glyph نور 😂 emoji ليلة 🥲 Latin جميلة 🚀 test قلب ✨ mixed كتاب 😀 text مدينة ❤️ fast صديق 👍🏽 correct طريق 👩🏽‍💻 engine كبير 🇩🇪 cache صغير 🏳️‍🌈 shape سريع 😂 line هادئ 🥲 wrap موسيقى 🚀 font قهوة ✨ Hello مرحبا 😀 world العربية ❤️ cafe العالم 👍🏽 naive السَّلامُ 👩🏽‍💻 render عَلَيْكُمْ 🇩🇪 layout صباح 🏳️‍🌈 glyph نور 😂 emoji ليلة 🥲 Latin جميلة 🚀 test قلب ✨ mixed كتاب 😀 text مدينة ❤️ fast صديق 👍🏽 correct طريق 👩🏽‍💻 engine كبير 🇩🇪 cache صغير 🏳️‍🌈 shape سريع 😂 line هادئ 🥲 wrap موسيقى 🚀 font قهوة ✨ Hello مرحبا 😀 world العربية ❤️ cafe العالم 👍🏽 naive السَّلامُ 👩🏽‍💻 render عَلَيْكُمْ 🇩🇪 layout صباح 🏳️‍🌈 glyph نور 😂 emoji ليلة 🥲 Latin جميلة 🚀 test قلب ✨ mixed كتاب 😀 text مدينة ❤️ fast صديق 👍🏽 correct طريق 👩🏽‍💻 engine كبير 🇩🇪 cache صغير 🏳️‍🌈 shape سريع 😂 line هادئ 🥲 wrap موسيقى 🚀 font قهوة ✨ Hello مرحبا 😀 world العربية ❤️ cafe العالم 👍🏽 naive السَّلامُ 👩🏽‍💻 render عَلَيْكُمْ 🇩🇪 layout صباح 🏳️‍🌈 glyph نور 😂 emoji ليلة 🥲 Latin جميلة 🚀 test قلب ✨ mixed كتاب 😀 text مدينة ❤️ fast صديق 👍🏽 correct طريق 👩🏽‍💻 engine كبير 🇩🇪 cache صغير 🏳️‍🌈 shape سريع 😂 line هادئ 🥲 wrap موسيقى 🚀 font قهوة ✨ Hello مرحبا 😀 world العربية ❤️ cafe العالم 👍🏽 naive السَّلامُ 👩🏽‍💻 render عَلَيْكُمْ 🇩🇪 layout صباح 🏳️‍🌈 glyph نور 😂 emoji ليلة 🥲 Latin جميلة 🚀 test قلب ✨ mixed كتاب 😀 text مدينة ❤️ fast صديق 👍🏽 correct"; 
+    let mixed_hebrew_arabic = "تَتَحَدَّث اَلْأَبْيَات عَنْ لَحْظَة وَدَاع يَسْتَغْرِب فِيهَا اَلشَّاعِر أَنْ لَا يَبْكِي مِنْ أَلَم اَلْفِرَاق، وَيَصِف حَالَة اَلْمُودِعِينَ وَبَعْضهمْ يَتَكَلَّم فِي حِين يَكْتَفِي اَلْمُحِبُّونَ بِالصَّمْتِ، لِأَنَّ حَالهمْ تَظْهَر عِشْقهمْ أَكْثَر مِمَّا يَسْتَطِيعُونَ اَلتَّعْبِير عَنْهُ بِالْكَلَامِ. وَيُقَسِّم فِي آخَر اَلْأَبْيَات عَلَى أَنَّ تَوَقُّف دَمْعه لَا يَعْنِي نِهَايَة حَيّه. تَتَحَدَّث اَلْأَبْيَات عَنْ لَحْظَة وَدَاع يَسْتَغْرِب فِيهَا اَلشَّاعِر أَنْ لَا يَبْكِي مِنْ أَلَم اَلْفِرَاق، وَيَصِف حَالَة اَلْمُودِعِينَ وَبَعْضهمْ يَتَكَلَّم فِي حِين يَكْتَفِي اَلْمُحِبُّونَ بِالصَّمْتِ، لِأَنَّ حَالهمْ تَظْهَر عِشْقهمْ أَكْثَر مِمَّا يَسْتَطِيعُونَ اَلتَّعْبِير عَنْهُ بِالْكَلَامِ. وَيُقَسِّم فِي آخَر اَلْأَبْيَات عَلَى أَنَّ تَوَقُّف دَمْعه لَا يَعْنِي نِهَايَة حَيّه. تَتَحَدَّث اَلْأَبْيَات عَنْ لَحْظَة وَدَاع يَسْتَغْرِب فِيهَا اَلشَّاعِر أَنْ لَا يَبْكِي مِنْ أَلَم اَلْفِرَاق، وَيَصِف حَالَة اَلْمُودِعِينَ وَبَعْضهمْ يَتَكَلَّم فِي حِين يَكْتَفِي اَلْمُحِبُّونَ بِالصَّمْتِ، لِأَنَّ حَالهمْ تَظْهَر عِشْقهمْ أَكْثَر مِمَّا يَسْتَطِيعُونَ اَلتَّعْبِير عَنْهُ بِالْكَلَامِ. وَيُقَسِّم فِي آخَر اَلْأَبْيَات عَلَى أَنَّ تَوَقُّف دَمْعه لَا يَعْنِي نِهَايَة حَيّه."; 
         let mut running = true;
 
     while running {
@@ -82,15 +82,17 @@ fn main() -> anyhow::Result<()> {
             
 
 
+            for i in  0..20 {
             text.render_wrapped(
                 20.0,
-                20.0,
+                20.0 + i as f32 * 500.0, 
                 mixed_hebrew_arabic,
                 base_font,
                 width as f32 - 40.0,
                 &mut renderer,
                 &mut ui,
             )?;
+            }
 
 
             let elapsed = start.elapsed();
