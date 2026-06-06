@@ -32,3 +32,5 @@ nix = { version = "0.31.3", features = ["event", "poll"] }
 unicode-bidi = "0.3.18"
 unicode-script = "0.5.8"
 ash = { version = "0.38.0", features = ["linked"] }
+vma = "0.3.1"
+vk-mem = "0.5.0"
