@@ -50,7 +50,7 @@ pub struct VulkanRenderer {
 
     width: u32,
     height: u32,
-    
+
     skip_render: bool,
     clear_color: [f32; 4],
 
@@ -292,7 +292,7 @@ impl VulkanRenderer {
         };
 
         tracing::info!("Initialized Vulkan logical device (graphics queue index: {}, present queue index: {})",
-            graphics_queue_family_idx, present_queue_family_idx);
+        graphics_queue_family_idx, present_queue_family_idx);
 
         Ok((logical_device, graphics_queue, present_queue))
     }
@@ -447,7 +447,7 @@ impl VulkanRenderer {
                 unsafe {
                     allocator.destroy_image(image, &mut alloc);
                 }
-        }
+            }
 
         swapchain.info = Self::get_swapchain_info(instance, phys_dev, surface_inst, surface)?;
 
@@ -644,7 +644,7 @@ impl VulkanRenderer {
                 self.logical_device.destroy_framebuffer(fb, None);
             }
         }
-        
+
         Self::create_swapchain(
             &self.instance, &mut self.swapchain, 
             &self.swapchain_dev, &self.allocator, 
@@ -734,7 +734,7 @@ impl VulkanRenderer {
         self.pending_resize.pending = false;
         self.frameloop.frame_idx    = 0;
         self.swapchain.image_idx    = 0;
-        
+
         tracing::info!("Resized render viewport of application window: {}x{}px.", self.width, self.height);
 
         Ok(())
@@ -1039,7 +1039,7 @@ impl VulkanRenderer {
 
         let mut swapchain  = Swapchain::default();
         let swapchain_dev = ash::khr::swapchain::Device::new(&instance, &logical_device);
-        
+
         let (width, height) = platform.size();
 
         Self::create_swapchain(&instance, 
@@ -1056,9 +1056,9 @@ impl VulkanRenderer {
             present_queue_family_idx)?;
 
         let mut frameloop = Frameloop::default();
-        
+
         Self::create_frameloop(&mut frameloop, &swapchain, &logical_device, graphics_queue_family_idx)?;
-        
+
 
         Ok(Self {
             instance,
@@ -1101,7 +1101,7 @@ impl VulkanRenderer {
         self.pending_resize.height  = height;
         self.pending_resize.pending = true;
     }
-    
+
     fn begin_frame(&mut self) -> anyhow::Result<()> {
         if self.pending_resize.pending {
             self.handle_resize()?;
@@ -1364,17 +1364,17 @@ impl VulkanRenderer {
         fmt: VertexFormat 
     ) -> vk::Format {
         match fmt {
-           VertexFormat::Float32 =>  vk::Format::R32_SFLOAT,  
-           VertexFormat::Float32x2 =>  vk::Format::R16G16_SFLOAT,  
-           VertexFormat::Float32x3 =>  vk::Format::R16G16B16_SFLOAT,  
-           VertexFormat::Float32x4 =>  vk::Format::R16G16B16A16_SFLOAT,  
-           
-           VertexFormat::Uint32 =>  vk::Format::R32_UINT,  
-           VertexFormat::Uint32x2 =>  vk::Format::R16G16_UINT,  
-           VertexFormat::Uint32x3 =>  vk::Format::R16G16B16_UINT,  
-           VertexFormat::Uint32x4 =>  vk::Format::R16G16B16A16_UINT,  
-           
-           VertexFormat::Unorm8x4 =>  vk::Format::R8_UINT,  
+            VertexFormat::Float32 =>  vk::Format::R32_SFLOAT,  
+            VertexFormat::Float32x2 => vk::Format::R32G32_SFLOAT,
+            VertexFormat::Float32x3 => vk::Format::R32G32B32_SFLOAT,
+            VertexFormat::Float32x4 => vk::Format::R32G32B32A32_SFLOAT,
+
+            VertexFormat::Uint32 =>  vk::Format::R32_UINT,  
+            VertexFormat::Uint32x2 =>  vk::Format::R16G16_UINT,  
+            VertexFormat::Uint32x3 =>  vk::Format::R16G16B16_UINT,  
+            VertexFormat::Uint32x4 =>  vk::Format::R16G16B16A16_UINT,  
+
+            VertexFormat::Unorm8x4 =>  vk::Format::R8_UINT,  
         }
     } 
 
@@ -1427,17 +1427,17 @@ impl VulkanRenderer {
 
         let shader_stages: [vk::PipelineShaderStageCreateInfo; 2] = [
             vk::PipelineShaderStageCreateInfo {
-                stage: vk::ShaderStageFlags::VERTEX, 
-                p_name:  b"main\0".as_ptr() as *const i8,
-                module: vert_module, 
-                ..Default::default() 
-            }, 
+                stage: vk::ShaderStageFlags::VERTEX,
+                p_name: b"main\0".as_ptr() as *const i8,
+                module: vert_module,
+                ..Default::default()
+            },
             vk::PipelineShaderStageCreateInfo {
-                stage: vk::ShaderStageFlags::FRAGMENT, 
-                p_name:  b"main\0".as_ptr() as *const i8,
-                module: frag_module, 
-                ..Default::default() 
-            }, 
+                stage: vk::ShaderStageFlags::FRAGMENT,
+                p_name: b"main\0".as_ptr() as *const i8,
+                module: frag_module,
+                ..Default::default()
+            },
         ];
 
         let assembly_state = vk::PipelineInputAssemblyStateCreateInfo {
@@ -1466,14 +1466,15 @@ impl VulkanRenderer {
             src_alpha_blend_factor: vk::BlendFactor::ONE,
             dst_alpha_blend_factor: vk::BlendFactor::ZERO,
             alpha_blend_op: vk::BlendOp::ADD,
-            color_write_mask: ColorComponentFlags::from_raw(0xF)
+            color_write_mask: ColorComponentFlags::from_raw(0xF),
         }];
 
         let blend_state = vk::PipelineColorBlendStateCreateInfo {
             p_attachments: blend_attachments.as_ptr(),
-            attachment_count: 1,
+            attachment_count: blend_attachments.len() as u32,
             ..Default::default()
         };
+
         let dynamic_states = [
             vk::DynamicState::VIEWPORT,
             vk::DynamicState::SCISSOR,
@@ -1481,12 +1482,13 @@ impl VulkanRenderer {
 
         let dynamic_state = vk::PipelineDynamicStateCreateInfo {
             p_dynamic_states: dynamic_states.as_ptr(),
-            dynamic_state_count: 2,
+            dynamic_state_count: dynamic_states.len() as u32,
             ..Default::default()
         };
+
         let viewport_state = vk::PipelineViewportStateCreateInfo {
             viewport_count: 1,
-            p_viewports: std::ptr::null(), 
+            p_viewports: std::ptr::null(),
             scissor_count: 1,
             p_scissors: std::ptr::null(),
             ..Default::default()
@@ -1500,16 +1502,17 @@ impl VulkanRenderer {
             ..Default::default()
         };
 
-        let bindings  = desc.vert_bindings.
-            iter().
-            map(|bind| self.get_vertex_input_binding_desc(bind)).
-            collect::<Vec<_>>();
+        let bindings = desc
+            .vert_bindings
+            .iter()
+            .map(|bind| self.get_vertex_input_binding_desc(bind))
+            .collect::<Vec<_>>();
 
         let mut attribs = Vec::new();
 
-        for binding in desc.vert_bindings{
+        for binding in desc.vert_bindings {
             for attr in binding.attrs {
-                attribs.push(self.get_vertex_input_attribute_desc(attr, binding.binding)?); 
+                attribs.push(self.get_vertex_input_attribute_desc(attr, binding.binding)?);
             }
         }
 
@@ -1522,16 +1525,10 @@ impl VulkanRenderer {
         };
 
         let range = [vk::PushConstantRange {
-            offset: 0, 
+            offset: 0,
             stage_flags: vk::ShaderStageFlags::VERTEX,
             size: size_of::<PushConstant>() as u32,
         }];
-
-        let layout_info = vk::PipelineLayoutCreateInfo {
-            push_constant_range_count: 1,
-            p_push_constant_ranges: range.as_ptr(), 
-            ..Default::default()
-        };
 
         let texture_binding = [vk::DescriptorSetLayoutBinding {
             binding: 0,
@@ -1542,52 +1539,64 @@ impl VulkanRenderer {
         }];
 
         let desc_layout_info = vk::DescriptorSetLayoutCreateInfo {
-            p_bindings: texture_binding.as_ptr(), 
-            binding_count: 1,
+            binding_count: texture_binding.len() as u32,
+            p_bindings: texture_binding.as_ptr(),
             ..Default::default()
         };
 
-        self.desc_layout = unsafe { self.logical_device.create_descriptor_set_layout(&desc_layout_info, None)? };
+        self.desc_layout = unsafe {
+            self.logical_device
+                .create_descriptor_set_layout(&desc_layout_info, None)?
+        };
 
-        let sizes = [
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                descriptor_count: 1 * self.swapchain.images.len() as u32,
-            }
-        ];
+        let pipeline_set_layouts = [self.desc_layout];
+
+        let layout_info = vk::PipelineLayoutCreateInfo {
+            set_layout_count: pipeline_set_layouts.len() as u32,
+            p_set_layouts: pipeline_set_layouts.as_ptr(),
+            push_constant_range_count: range.len() as u32,
+            p_push_constant_ranges: range.as_ptr(),
+            ..Default::default()
+        };
+
+        let pipeline_layout = unsafe {
+            self.logical_device
+                .create_pipeline_layout(&layout_info, None)?
+        };
+
+        let sizes = [vk::DescriptorPoolSize {
+            ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+            descriptor_count: self.swapchain.images.len() as u32,
+        }];
 
         let pool_info = vk::DescriptorPoolCreateInfo {
             flags: DescriptorPoolCreateFlags::empty(),
-            max_sets: 1 * self.swapchain.images.len() as u32, 
+            max_sets: self.swapchain.images.len() as u32,
             pool_size_count: sizes.len() as u32,
             p_pool_sizes: sizes.as_ptr(),
             ..Default::default()
         };
 
-        let desc_pool = unsafe { self.logical_device.
-            create_descriptor_pool(&pool_info, 
-                None)? }; // #borrowchecker LOL
-
-        let mut set_layouts = Vec::with_capacity(self.swapchain.images.len());
-
-        for _ in &self.swapchain.images {
-            set_layouts.push(self.desc_layout);
+        let desc_pool = unsafe {
+            self.logical_device
+                .create_descriptor_pool(&pool_info, None)?
         };
+
+        let set_layouts = vec![self.desc_layout; self.swapchain.images.len()];
 
         let alloc_info = vk::DescriptorSetAllocateInfo {
             descriptor_pool: desc_pool,
-            descriptor_set_count: self.swapchain.images.len() as u32,
+            descriptor_set_count: set_layouts.len() as u32,
             p_set_layouts: set_layouts.as_ptr(),
             ..Default::default()
         };
 
-        self.global_sets = unsafe { self.logical_device.allocate_descriptor_sets(&alloc_info)? };
-
-        let pipeline_layout = unsafe { self.logical_device.create_pipeline_layout(
-            &layout_info, None)? };
+        self.global_sets = unsafe {
+            self.logical_device.allocate_descriptor_sets(&alloc_info)?
+        };
 
         let pipeline_info = [vk::GraphicsPipelineCreateInfo {
-            stage_count: shader_stages.len() as u32, 
+            stage_count: shader_stages.len() as u32,
             p_stages: shader_stages.as_ptr(),
             p_vertex_input_state: &vertex_input_state,
             p_input_assembly_state: &assembly_state,
@@ -1602,11 +1611,11 @@ impl VulkanRenderer {
             ..Default::default()
         }];
 
-
-        let pipelines = unsafe { self.logical_device.create_graphics_pipelines(
-            PipelineCache::null(), pipeline_info.as_slice(), None).map_err(|(_, result)|result)? };
-
-        println!("Hey");
+        let pipelines = unsafe {
+            self.logical_device
+                .create_graphics_pipelines(PipelineCache::null(), pipeline_info.as_slice(), None)
+                .map_err(|(_, result)| result)?
+        };
 
         if pipelines.is_empty() {
             anyhow::bail!("Failed to create graphics pipeline.")
@@ -1615,12 +1624,13 @@ impl VulkanRenderer {
         let raw = pipelines[0];
         let handle = PipelineHandle(self.pipelines.len() as u32);
 
-        self.pipelines.push(Some(VulkanPipeline { 
-            raw 
-        }));
+        self.pipelines.push(Some(VulkanPipeline { raw }));
 
-        tracing::info!("Created Vulkan graphics pipeline (vertex bindings: {}, vertex attributes: {})",
-            bindings.len(), attribs.len());
+        tracing::info!(
+            "Created Vulkan graphics pipeline (vertex bindings: {}, vertex attributes: {})",
+            bindings.len(),
+            attribs.len()
+        );
 
         Ok(handle)
     }
