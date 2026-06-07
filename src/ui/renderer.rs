@@ -5,7 +5,7 @@ use crate::graphics::{
 };
 
 use crate::graphics::device::{
-    DrawIndexedInstanced, TextureArrayDesc, VertexAttribute, VertexBufferLayout, VertexFormat
+    DrawIndexedInstanced, TextureArrayDesc, VertexAttribute, VertexBufferBindingLayout, VertexFormat
 };
 
 use crate::ui::quad::{UI_QUAD_FRAGMENT_SHADER, UI_QUAD_FRAGMENT_SHADER_DEDICATED, UI_QUAD_VERTEX_SHADER};
@@ -163,34 +163,9 @@ impl UIRenderer {
         screen_height: u32
     ) -> anyhow::Result<Self> {
 
-        // Create the static vertex buffer for one 
-        // quad instance
-        let quad_vbo = gpu.create_buffer(BufferDesc{
-            target: BufferTarget::Vertex,
-            usage: BufferUsage::Static,
-            size: std::mem::size_of_val(&QUAD_VERTICES)
-        })?;
-        gpu.write_buffer(quad_vbo, 0, 0, bytemuck::cast_slice(&QUAD_VERTICES))?;
-
-        // Create the static index buffer for one 
-        // quad instance
-        let quad_ibo = gpu.create_buffer(BufferDesc{
-            target: BufferTarget::Index,
-            usage: BufferUsage::Static,
-            size: std::mem::size_of_val(&QUAD_INDICES)
-        })?;
-        gpu.write_buffer(quad_ibo, 0, 0, bytemuck::cast_slice(&QUAD_INDICES))?;
-
-        // Create the dynamic instance buffer holding all 
-        // instanes to be rendered in one frame.
-        let instance_vbo = gpu.create_buffer(BufferDesc{
-            target: BufferTarget::Vertex,
-            usage: BufferUsage::Dynamic,
-            size: MAX_INSTANCES_PER_FRAME * std::mem::size_of::<QuadInstance>()
-        })?;
 
         let quad_layouts =  vec![
-            VertexBufferLayout {
+            VertexBufferBindingLayout {
                 binding: 0,
                 stride: std::mem::size_of::<QuadVertex>() as u32,
                 step_mode: VertexStepMode::Vertex,
@@ -209,7 +184,7 @@ impl UIRenderer {
                     }
                 ]
             },
-            VertexBufferLayout {
+            VertexBufferBindingLayout {
                 binding: 1,
                 stride: std::mem::size_of::<QuadInstance>() as u32,
                 step_mode: VertexStepMode::Instance,
@@ -252,9 +227,36 @@ impl UIRenderer {
         let pipeline = gpu.create_pipeline(PipelineDesc{
             vertex_source: UI_QUAD_VERTEX_SHADER,
             fragment_source: UI_QUAD_FRAGMENT_SHADER,
-            vert_layouts: quad_layouts.clone()
+            vert_bindings: quad_layouts.clone()
         })?;
+
         gpu.set_uniform_1i(pipeline, "u_texture_array", 0)?;
+
+        // Create the static vertex buffer for one 
+        // quad instance
+        let quad_vbo = gpu.create_buffer(BufferDesc{
+            target: BufferTarget::Vertex,
+            usage: BufferUsage::Static,
+            size: std::mem::size_of_val(&QUAD_VERTICES)
+        })?;
+        gpu.write_buffer(quad_vbo, 0, 0, bytemuck::cast_slice(&QUAD_VERTICES))?;
+
+        // Create the static index buffer for one 
+        // quad instance
+        let quad_ibo = gpu.create_buffer(BufferDesc{
+            target: BufferTarget::Index,
+            usage: BufferUsage::Static,
+            size: std::mem::size_of_val(&QUAD_INDICES)
+        })?;
+        gpu.write_buffer(quad_ibo, 0, 0, bytemuck::cast_slice(&QUAD_INDICES))?;
+
+        // Create the dynamic instance buffer holding all 
+        // instanes to be rendered in one frame.
+        let instance_vbo = gpu.create_buffer(BufferDesc{
+            target: BufferTarget::Vertex,
+            usage: BufferUsage::Dynamic,
+            size: MAX_INSTANCES_PER_FRAME * std::mem::size_of::<QuadInstance>()
+        })?;
 
         // Create dedicated pipeline which is using 
         // individual textures in batched draw calls 
@@ -262,7 +264,7 @@ impl UIRenderer {
         let pipeline_dedicated = gpu.create_pipeline(PipelineDesc{
             vertex_source: UI_QUAD_VERTEX_SHADER,
             fragment_source: UI_QUAD_FRAGMENT_SHADER_DEDICATED,
-            vert_layouts: quad_layouts,
+            vert_bindings: quad_layouts,
         })?;
         gpu.set_uniform_1i(pipeline_dedicated, "u_texture", 0)?;
 

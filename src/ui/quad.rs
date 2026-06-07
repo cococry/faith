@@ -161,6 +161,8 @@ void main() {
 }
 "#;
 
+
+
 pub const UI_QUAD_FRAGMENT_SHADER_DEDICATED: &str = r#"
 #version 330 core
 

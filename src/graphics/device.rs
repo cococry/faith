@@ -76,7 +76,7 @@ pub struct VertexAttribute {
 /// Describes how vertex or instance data is 
 /// read from a buffer binding.
 #[derive(Debug, Clone)]
-pub struct VertexBufferLayout {
+pub struct VertexBufferBindingLayout {
     pub stride : u32,
     pub binding: u32,
     pub step_mode: VertexStepMode,
@@ -89,7 +89,7 @@ pub struct PipelineDesc<'a> {
     pub vertex_source: &'a str,
     pub fragment_source: &'a str,
 
-    pub vert_layouts: Vec<VertexBufferLayout>
+    pub vert_bindings: Vec<VertexBufferBindingLayout>
 }
 
 /// Description used to create a 2D texture 

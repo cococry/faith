@@ -1,10 +1,14 @@
 use std::ffi::{CString, c_char};
+use std::fs::File;
+use std::io::Read;
+use std::str::FromStr;
 
-use crate::graphics::device::{DrawIndexedInstanced, TextureArrayDesc, TextureKind};
+use crate::graphics::device::{DrawIndexedInstanced, TextureArrayDesc, TextureKind, VertexAttribute, VertexBufferBindingLayout, VertexFormat};
+use crate::graphics::vulkan::{VulkanBuffer, VulkanPipeline};
 use crate::platform::{Platform};
-use crate::graphics::{BufferDesc, BufferHandle, Color, DrawIndexed, GraphicsDevice, PipelineDesc, PipelineHandle, TextureDesc, TextureHandle};
+use crate::graphics::{BufferDesc, BufferHandle, BufferTarget, Color, DrawIndexed, GraphicsDevice, PipelineDesc, PipelineHandle, TextureDesc, TextureHandle, VertexStepMode};
 
-use ash::vk::{Extent2D, ImageViewCreateInfo, QueueFlags };
+use ash::vk::{ColorComponentFlags, DescriptorPoolCreateFlags, DescriptorPoolCreateInfo, Extent2D, ImageViewCreateInfo, PipelineCache, QueueFlags };
 use ash::{Entry, vk};
 use vk_mem::{Alloc, AllocationCreateInfo};
 
@@ -15,6 +19,11 @@ struct PendingResize {
     width: u32,
     height: u32,
     pending: bool,
+}
+
+struct PushConstant {
+    scale: [f32; 2],
+    offset: [f32; 2],
 }
 
 pub struct VulkanRenderer {
@@ -44,6 +53,13 @@ pub struct VulkanRenderer {
     
     skip_render: bool,
     clear_color: [f32; 4],
+
+    buffers: Vec<Option<VulkanBuffer>>,
+    pipelines: Vec<Option<VulkanPipeline>>,
+
+    desc_layout: vk::DescriptorSetLayout,
+
+    global_sets: Vec<vk::DescriptorSet>
 }
 
 #[derive(Default)]
@@ -275,7 +291,8 @@ impl VulkanRenderer {
             logical_device.get_device_queue(present_queue_family_idx as u32, 0)
         };
 
-        tracing::info!("Initialized Vulkan logical device (graphics queue index: %i, present queue index; %i)");
+        tracing::info!("Initialized Vulkan logical device (graphics queue index: {}, present queue index: {})",
+            graphics_queue_family_idx, present_queue_family_idx);
 
         Ok((logical_device, graphics_queue, present_queue))
     }
@@ -982,9 +999,19 @@ impl VulkanRenderer {
             .map(|c_str| c_str.as_ptr() as *const i8)
             .collect();
 
+        let layer_names: Vec<std::ffi::CString> =
+            vec![std::ffi::CString::new("VK_LAYER_KHRONOS_validation").unwrap()];
+
+        let layer_name_pointers: Vec<*const i8> = layer_names
+            .iter()
+            .map(|layer_name| layer_name.as_ptr())
+            .collect();
+
         let create_info = vk::InstanceCreateInfo {
             enabled_extension_count: required_exts.len() as u32,
             pp_enabled_extension_names: pp_enabled_extension_names.as_ptr(),
+            pp_enabled_layer_names: layer_name_pointers.as_ptr(),
+            enabled_layer_count: layer_name_pointers.len() as u32,
             p_application_info: &app_info,
             ..Default::default()
         };
@@ -1059,7 +1086,13 @@ impl VulkanRenderer {
 
             skip_render: false,
 
-            clear_color: [0.0, 0.0, 0.0, 1.0]
+            clear_color: [0.0, 0.0, 0.0, 1.0],
+
+            buffers: Vec::new(),
+            pipelines: Vec::new(),
+
+            desc_layout: vk::DescriptorSetLayout::null(),
+            global_sets: Vec::new(),
         })
     }
 
@@ -1286,13 +1319,311 @@ impl VulkanRenderer {
         Ok(())
     }
     fn clear_color(&mut self, color: Color) {
-    self.clear_color = [
-        color.r,
-        color.g,
-        color.b,
-        color.a,
-    ];
-}
+        self.clear_color = [
+            color.r,
+            color.g,
+            color.b,
+            color.a,
+        ];
+    }
+
+    fn vk_buffer_usage_from_desc(desc: &BufferDesc) -> vk::BufferUsageFlags {
+        let mut usage = vk::BufferUsageFlags::TRANSFER_DST;
+
+        match desc.target {
+            BufferTarget::Vertex    => usage |= vk::BufferUsageFlags::VERTEX_BUFFER,
+            BufferTarget::Index     => usage |= vk::BufferUsageFlags::INDEX_BUFFER,
+            BufferTarget::Uniform   => usage |= vk::BufferUsageFlags::UNIFORM_BUFFER,
+        }
+
+        usage
+    }
+
+    fn create_shader_module(
+        &self,
+        filepath: &str,
+    ) -> anyhow::Result<vk::ShaderModule> {
+
+        let mut file = File::open(filepath)?; 
+        let mut buffer = Vec::new(); 
+        file.read_to_end(&mut buffer)?;
+
+        let create_info = vk::ShaderModuleCreateInfo {
+            p_code: buffer.as_ptr() as *const u32,
+            code_size: buffer.len(),
+            ..Default::default()
+        };
+
+        let module = unsafe { self.logical_device.create_shader_module(&create_info, None)? };
+
+        Ok(module)
+    }
+
+    fn vertex_fmt_to_vk_vertex_fmt(
+        &self, 
+        fmt: VertexFormat 
+    ) -> vk::Format {
+        match fmt {
+           VertexFormat::Float32 =>  vk::Format::R32_SFLOAT,  
+           VertexFormat::Float32x2 =>  vk::Format::R16G16_SFLOAT,  
+           VertexFormat::Float32x3 =>  vk::Format::R16G16B16_SFLOAT,  
+           VertexFormat::Float32x4 =>  vk::Format::R16G16B16A16_SFLOAT,  
+           
+           VertexFormat::Uint32 =>  vk::Format::R32_UINT,  
+           VertexFormat::Uint32x2 =>  vk::Format::R16G16_UINT,  
+           VertexFormat::Uint32x3 =>  vk::Format::R16G16B16_UINT,  
+           VertexFormat::Uint32x4 =>  vk::Format::R16G16B16A16_UINT,  
+           
+           VertexFormat::Unorm8x4 =>  vk::Format::R8_UINT,  
+        }
+    } 
+
+    fn get_vertex_input_attribute_desc(
+        &self, 
+        attrib: VertexAttribute,
+        binding: u32,
+    ) -> anyhow::Result<vk::VertexInputAttributeDescription> {
+        let location    = attrib.location;
+        let binding     = binding;
+        let format      = self.vertex_fmt_to_vk_vertex_fmt(attrib.format);
+        let offset      = attrib.offset;
+
+        let desc = vk::VertexInputAttributeDescription {
+            location,
+            binding,
+            format,
+            offset,
+            ..Default::default()
+        };
+
+        Ok(desc)
+    }
+
+    fn get_vertex_input_rate_from_step_mode(
+        &self, 
+        step_mode: VertexStepMode
+    ) -> vk::VertexInputRate {
+        match step_mode {
+            VertexStepMode::Vertex => vk::VertexInputRate::VERTEX, 
+            VertexStepMode::Instance => vk::VertexInputRate::INSTANCE, 
+        }
+    }
+
+    fn get_vertex_input_binding_desc(
+        &self, 
+        binding: &VertexBufferBindingLayout,
+    ) -> vk::VertexInputBindingDescription {
+        vk::VertexInputBindingDescription  {
+            binding: binding.binding,
+            stride: binding.stride,
+            input_rate: self.get_vertex_input_rate_from_step_mode(binding.step_mode),
+            ..Default::default()
+        }
+    }
+
+    fn create_pipeline(&mut self, desc: PipelineDesc<'_>) -> anyhow::Result<PipelineHandle> {
+        let vert_module = self.create_shader_module("compiled_shaders/vert.spv")?;
+        let frag_module = self.create_shader_module("compiled_shaders/frag.spv")?;
+
+        let shader_stages: [vk::PipelineShaderStageCreateInfo; 2] = [
+            vk::PipelineShaderStageCreateInfo {
+                stage: vk::ShaderStageFlags::VERTEX, 
+                p_name:  b"main\0".as_ptr() as *const i8,
+                module: vert_module, 
+                ..Default::default() 
+            }, 
+            vk::PipelineShaderStageCreateInfo {
+                stage: vk::ShaderStageFlags::FRAGMENT, 
+                p_name:  b"main\0".as_ptr() as *const i8,
+                module: frag_module, 
+                ..Default::default() 
+            }, 
+        ];
+
+        let assembly_state = vk::PipelineInputAssemblyStateCreateInfo {
+            topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+            ..Default::default()
+        };
+
+        let raster_state = vk::PipelineRasterizationStateCreateInfo {
+            polygon_mode: vk::PolygonMode::FILL,
+            cull_mode: vk::CullModeFlags::NONE,
+            front_face: vk::FrontFace::CLOCKWISE,
+            line_width: 1.0,
+            ..Default::default()
+        };
+
+        let msaa_state = vk::PipelineMultisampleStateCreateInfo {
+            rasterization_samples: vk::SampleCountFlags::TYPE_1,
+            ..Default::default()
+        };
+
+        let blend_attachments = [vk::PipelineColorBlendAttachmentState {
+            blend_enable: vk::TRUE,
+            src_color_blend_factor: vk::BlendFactor::SRC_ALPHA,
+            dst_color_blend_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
+            color_blend_op: vk::BlendOp::ADD,
+            src_alpha_blend_factor: vk::BlendFactor::ONE,
+            dst_alpha_blend_factor: vk::BlendFactor::ZERO,
+            alpha_blend_op: vk::BlendOp::ADD,
+            color_write_mask: ColorComponentFlags::from_raw(0xF)
+        }];
+
+        let blend_state = vk::PipelineColorBlendStateCreateInfo {
+            p_attachments: blend_attachments.as_ptr(),
+            attachment_count: 1,
+            ..Default::default()
+        };
+        let dynamic_states = [
+            vk::DynamicState::VIEWPORT,
+            vk::DynamicState::SCISSOR,
+        ];
+
+        let dynamic_state = vk::PipelineDynamicStateCreateInfo {
+            p_dynamic_states: dynamic_states.as_ptr(),
+            dynamic_state_count: 2,
+            ..Default::default()
+        };
+        let viewport_state = vk::PipelineViewportStateCreateInfo {
+            viewport_count: 1,
+            p_viewports: std::ptr::null(), 
+            scissor_count: 1,
+            p_scissors: std::ptr::null(),
+            ..Default::default()
+        };
+
+        let depth_state = vk::PipelineDepthStencilStateCreateInfo {
+            depth_test_enable: vk::FALSE,
+            depth_write_enable: vk::FALSE,
+            depth_bounds_test_enable: vk::FALSE,
+            stencil_test_enable: vk::FALSE,
+            ..Default::default()
+        };
+
+        let bindings  = desc.vert_bindings.
+            iter().
+            map(|bind| self.get_vertex_input_binding_desc(bind)).
+            collect::<Vec<_>>();
+
+        let mut attribs = Vec::new();
+
+        for binding in desc.vert_bindings{
+            for attr in binding.attrs {
+                attribs.push(self.get_vertex_input_attribute_desc(attr, binding.binding)?); 
+            }
+        }
+
+        let vertex_input_state = vk::PipelineVertexInputStateCreateInfo {
+            vertex_binding_description_count: bindings.len() as u32,
+            vertex_attribute_description_count: attribs.len() as u32,
+            p_vertex_attribute_descriptions: attribs.as_ptr(),
+            p_vertex_binding_descriptions: bindings.as_ptr(),
+            ..Default::default()
+        };
+
+        let range = [vk::PushConstantRange {
+            offset: 0, 
+            stage_flags: vk::ShaderStageFlags::VERTEX,
+            size: size_of::<PushConstant>() as u32,
+        }];
+
+        let layout_info = vk::PipelineLayoutCreateInfo {
+            push_constant_range_count: 1,
+            p_push_constant_ranges: range.as_ptr(), 
+            ..Default::default()
+        };
+
+        let texture_binding = [vk::DescriptorSetLayoutBinding {
+            binding: 0,
+            descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+            descriptor_count: 1,
+            stage_flags: vk::ShaderStageFlags::FRAGMENT,
+            ..Default::default()
+        }];
+
+        let desc_layout_info = vk::DescriptorSetLayoutCreateInfo {
+            p_bindings: texture_binding.as_ptr(), 
+            binding_count: 1,
+            ..Default::default()
+        };
+
+        self.desc_layout = unsafe { self.logical_device.create_descriptor_set_layout(&desc_layout_info, None)? };
+
+        let sizes = [
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                descriptor_count: 1 * self.swapchain.images.len() as u32,
+            }
+        ];
+
+        let pool_info = vk::DescriptorPoolCreateInfo {
+            flags: DescriptorPoolCreateFlags::empty(),
+            max_sets: 1 * self.swapchain.images.len() as u32, 
+            pool_size_count: sizes.len() as u32,
+            p_pool_sizes: sizes.as_ptr(),
+            ..Default::default()
+        };
+
+        let desc_pool = unsafe { self.logical_device.
+            create_descriptor_pool(&pool_info, 
+                None)? }; // #borrowchecker LOL
+
+        let mut set_layouts = Vec::with_capacity(self.swapchain.images.len());
+
+        for _ in &self.swapchain.images {
+            set_layouts.push(self.desc_layout);
+        };
+
+        let alloc_info = vk::DescriptorSetAllocateInfo {
+            descriptor_pool: desc_pool,
+            descriptor_set_count: self.swapchain.images.len() as u32,
+            p_set_layouts: set_layouts.as_ptr(),
+            ..Default::default()
+        };
+
+        self.global_sets = unsafe { self.logical_device.allocate_descriptor_sets(&alloc_info)? };
+
+        let pipeline_layout = unsafe { self.logical_device.create_pipeline_layout(
+            &layout_info, None)? };
+
+        let pipeline_info = [vk::GraphicsPipelineCreateInfo {
+            stage_count: shader_stages.len() as u32, 
+            p_stages: shader_stages.as_ptr(),
+            p_vertex_input_state: &vertex_input_state,
+            p_input_assembly_state: &assembly_state,
+            p_color_blend_state: &blend_state,
+            p_multisample_state: &msaa_state,
+            p_rasterization_state: &raster_state,
+            p_dynamic_state: &dynamic_state,
+            p_viewport_state: &viewport_state,
+            p_depth_stencil_state: &depth_state,
+            layout: pipeline_layout,
+            render_pass: self.frameloop.crnt_pass,
+            ..Default::default()
+        }];
+
+
+        let pipelines = unsafe { self.logical_device.create_graphics_pipelines(
+            PipelineCache::null(), pipeline_info.as_slice(), None).map_err(|(_, result)|result)? };
+
+        println!("Hey");
+
+        if pipelines.is_empty() {
+            anyhow::bail!("Failed to create graphics pipeline.")
+        }
+
+        let raw = pipelines[0];
+        let handle = PipelineHandle(self.pipelines.len() as u32);
+
+        self.pipelines.push(Some(VulkanPipeline { 
+            raw 
+        }));
+
+        tracing::info!("Created Vulkan graphics pipeline (vertex bindings: {}, vertex attributes: {})",
+            bindings.len(), attribs.len());
+
+        Ok(handle)
+    }
 }
 
 impl GraphicsDevice for VulkanRenderer {
@@ -1326,8 +1657,8 @@ impl GraphicsDevice for VulkanRenderer {
         anyhow::bail!("Vulkan write_buffer not implemented yet")
     }
 
-    fn create_pipeline(&mut self, _desc: PipelineDesc<'_>) -> anyhow::Result<PipelineHandle> {
-        anyhow::bail!("Vulkan create_pipeline not implemented yet")
+    fn create_pipeline(&mut self, desc: PipelineDesc<'_>) -> anyhow::Result<PipelineHandle> {
+        VulkanRenderer::create_pipeline(self, desc)
     }
 
     fn set_pipeline(&mut self, _handle: PipelineHandle) -> anyhow::Result<()> {
@@ -1365,7 +1696,6 @@ impl GraphicsDevice for VulkanRenderer {
         _desc: TextureDesc,
         _data: Option<&[u8]>,
     ) -> anyhow::Result<TextureHandle> {
-
         anyhow::bail!("Vulkan create_texture not implemented yet")
     }
 

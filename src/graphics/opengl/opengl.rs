@@ -568,7 +568,7 @@ impl OpenGLRenderer {
         let program = self.link_program(&[vertex_shader, fragment_shader])?;
 
 
-        self.pipelines.push(Some(GlPipeline { program, vert_layouts: desc.vert_layouts }));
+        self.pipelines.push(Some(GlPipeline { program, vert_layouts: desc.vert_bindings }));
 
         Ok(PipelineHandle((self.pipelines.len() - 1) as u32))
     }

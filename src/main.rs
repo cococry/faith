@@ -36,8 +36,6 @@ fn main() -> anyhow::Result<()> {
 
     let mut platform    = Platform::new(&conf)?;
     let mut renderer    = Renderer::new(GraphicsBackend::Vulkan, &platform)?;
-
-    /*
     let mut ui          = UIRenderer::new(&mut renderer, conf.width, conf.height)?;
     let mut text        = TextRenderer::new()?; 
 
@@ -47,8 +45,7 @@ fn main() -> anyhow::Result<()> {
     text.load_font("assets/NotoSansArabic-Regular.ttf", 24)?;
     text.load_font("assets/NotoSansHebrew-Regular.ttf", 24)?;
     let mixed_hebrew_arabic = "تَتَحَدَّث اَلْأَبْيَات عَنْ لَحْظَة وَدَاع يَسْتَغْرِب فِيهَا اَلشَّاعِر أَنْ لَا يَبْكِي مِنْ أَلَم اَلْفِرَاق، وَيَصِف حَالَة اَلْمُودِعِينَ وَبَعْضهمْ يَتَكَلَّم فِي حِين يَكْتَفِي اَلْمُحِبُّونَ بِالصَّمْتِ، لِأَنَّ حَالهمْ تَظْهَر عِشْقهمْ أَكْثَر مِمَّا يَسْتَطِيعُونَ اَلتَّعْبِير عَنْهُ بِالْكَلَامِ. وَيُقَسِّم فِي آخَر اَلْأَبْيَات عَلَى أَنَّ تَوَقُّف دَمْعه لَا يَعْنِي نِهَايَة حَيّه. تَتَحَدَّث اَلْأَبْيَات عَنْ لَحْظَة وَدَاع يَسْتَغْرِب فِيهَا اَلشَّاعِر أَنْ لَا يَبْكِي مِنْ أَلَم اَلْفِرَاق، وَيَصِف حَالَة اَلْمُودِعِينَ وَبَعْضهمْ يَتَكَلَّم فِي حِين يَكْتَفِي اَلْمُحِبُّونَ بِالصَّمْتِ، لِأَنَّ حَالهمْ تَظْهَر عِشْقهمْ أَكْثَر مِمَّا يَسْتَطِيعُونَ اَلتَّعْبِير عَنْهُ بِالْكَلَامِ. وَيُقَسِّم فِي آخَر اَلْأَبْيَات عَلَى أَنَّ تَوَقُّف دَمْعه لَا يَعْنِي نِهَايَة حَيّه. تَتَحَدَّث اَلْأَبْيَات عَنْ لَحْظَة وَدَاع يَسْتَغْرِب فِيهَا اَلشَّاعِر أَنْ لَا يَبْكِي مِنْ أَلَم اَلْفِرَاق، وَيَصِف حَالَة اَلْمُودِعِينَ وَبَعْضهمْ يَتَكَلَّم فِي حِين يَكْتَفِي اَلْمُحِبُّونَ بِالصَّمْتِ، لِأَنَّ حَالهمْ تَظْهَر عِشْقهمْ أَكْثَر مِمَّا يَسْتَطِيعُونَ اَلتَّعْبِير عَنْهُ بِالْكَلَامِ. وَيُقَسِّم فِي آخَر اَلْأَبْيَات عَلَى أَنَّ تَوَقُّف دَمْعه لَا يَعْنِي نِهَايَة حَيّه."; 
-    */
-        let mut running = true;
+    let mut running = true;
 
     while running {
         let events = platform.poll_events()?;
@@ -74,8 +71,32 @@ fn main() -> anyhow::Result<()> {
         }
 
         if running && should_redraw {
+            let start = Instant::now();
+            renderer.clear_color(Color::rgba(1.0, 1.0, 1.0, 1.0));
             renderer.begin_frame()?;
-            renderer.clear_color(Color::rgba(0.2, 1.0, 1.0, 1.0));
+
+            let (width, height) = platform.size();
+
+            ui.begin(width, height);
+
+
+
+
+            text.render_wrapped(
+                20.0,
+                20.0, 
+                mixed_hebrew_arabic,
+                base_font,
+                width as f32 - 40.0,
+                &mut renderer,
+                &mut ui,
+            )?;
+            let elapsed = start.elapsed();
+
+            println!("rendering took: {:.3} ms", elapsed.as_secs_f64() * 1000.0);
+
+            ui.end(&mut renderer)?;
+
             renderer.end_frame()?;
         }
     }

@@ -2,7 +2,7 @@ mod opengl;
 
 pub use opengl::OpenGLRenderer;
 
-use crate::graphics::{BufferTarget, TextureFormat, device::VertexBufferLayout};
+use crate::graphics::{BufferTarget, TextureFormat, device::VertexBufferBindingLayout};
 /// OpenGL buffer resource.
 struct GlBuffer {
     raw: glow::NativeBuffer,
@@ -36,5 +36,5 @@ struct GlTexture {
 /// the OpenGL backend. 
 struct GlPipeline {
     program: glow::NativeProgram,
-    vert_layouts: Vec<VertexBufferLayout> 
+    vert_layouts: Vec<VertexBufferBindingLayout> 
 }
