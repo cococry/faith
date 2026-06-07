@@ -170,11 +170,12 @@ impl OpenGLRenderer {
         }
     }
 
-    pub fn begin_frame(&mut self) {
+    pub fn begin_frame(&mut self) -> anyhow::Result<()> {
         unsafe {
             self.gl.viewport(0, 0, self.width as i32, self.height as i32); 
             self.gl.clear(glow::COLOR_BUFFER_BIT);
         }
+        Ok(())
     }
 
     pub fn end_frame(&mut self) -> anyhow::Result<()> {
@@ -893,8 +894,8 @@ impl GraphicsDevice for OpenGLRenderer {
         OpenGLRenderer::clear_color(self, color);
     }
 
-    fn begin_frame(&mut self) {
-        OpenGLRenderer::begin_frame(self);
+    fn begin_frame(&mut self) -> anyhow::Result<()> {
+        OpenGLRenderer::begin_frame(self)
     }
 
     fn end_frame(&mut self) -> anyhow::Result<()> {

@@ -71,8 +71,8 @@ impl GraphicsDevice for Renderer {
         self.device_mut().clear_color(color);
     }
 
-    fn begin_frame(&mut self) {
-        self.device_mut().begin_frame();
+    fn begin_frame(&mut self) -> anyhow::Result<()> {
+        self.device_mut().begin_frame()
     }
 
     fn end_frame(&mut self) -> anyhow::Result<()> {

@@ -145,7 +145,7 @@ pub trait GraphicsDevice {
     fn clear_color(&mut self, color: Color);
 
     /// Begins a new graphics frame.
-    fn begin_frame(&mut self);
+    fn begin_frame(&mut self) -> anyhow::Result<()>;
 
     /// Ends the current graphics frame and 
     /// presents it to the window surface.
