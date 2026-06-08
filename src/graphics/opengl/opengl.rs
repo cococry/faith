@@ -559,7 +559,6 @@ impl OpenGLRenderer {
         }
 
         Ok(())
-
     }
 
     pub fn create_pipeline(&mut self, desc: PipelineDesc<'_>) -> anyhow::Result<PipelineHandle> {
@@ -567,10 +566,28 @@ impl OpenGLRenderer {
         let fragment_shader = self.compile_shader(glow::FRAGMENT_SHADER, desc.fragment_source)?;
         let program = self.link_program(&[vertex_shader, fragment_shader])?;
 
+        unsafe { self.gl.use_program(Some(program)) };
 
-        self.pipelines.push(Some(GlPipeline { program, vert_layouts: desc.vert_bindings }));
 
-        Ok(PipelineHandle((self.pipelines.len() - 1) as u32))
+        let pipeline = Some(GlPipeline { program, vert_layouts: desc.vert_bindings });
+        self.pipelines.push(pipeline);
+
+
+        let pipeline = PipelineHandle((self.pipelines.len() - 1) as u32);
+
+        for uniform in desc.uniform_bindings {
+            match uniform.ty {
+                crate::graphics::device::UniformBindingType::Vec2 => {
+                    self.set_uniform_2f(pipeline.clone(), &uniform.name, 
+                        uniform.f_data[0], uniform.f_data[1])?;
+                }
+                crate::graphics::device::UniformBindingType::Sampler2dArray => {
+                    self.set_uniform_1i(pipeline.clone(), &uniform.name, 
+                        uniform.binding)?;
+                }   
+            }
+        }
+        Ok(pipeline)
     }
     pub fn draw_indexed(&mut self, draw: DrawIndexed) -> anyhow::Result<()> {
         unsafe {

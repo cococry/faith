@@ -3,10 +3,10 @@ use std::fs::File;
 use std::io::Read;
 use std::str::FromStr;
 
-use crate::graphics::device::{DrawIndexedInstanced, TextureArrayDesc, TextureKind, VertexAttribute, VertexBufferBindingLayout, VertexFormat};
+use crate::graphics::device::{DrawIndexedInstanced, TextureArrayDesc, TextureKind, UniformBindingShaderStage, VertexAttribute, VertexBufferBindingLayout, VertexFormat};
 use crate::graphics::vulkan::{VulkanBuffer, VulkanPipeline};
 use crate::platform::{Platform};
-use crate::graphics::{BufferDesc, BufferHandle, BufferTarget, Color, DrawIndexed, GraphicsDevice, PipelineDesc, PipelineHandle, TextureDesc, TextureHandle, VertexStepMode};
+use crate::graphics::{BufferDesc, BufferHandle, BufferTarget, Color, DrawIndexed, GraphicsDevice, PipelineDesc, PipelineHandle, TextureDesc, TextureHandle, UniformBindingType, VertexStepMode};
 
 use ash::vk::{ColorComponentFlags, DescriptorPoolCreateFlags, DescriptorPoolCreateInfo, Extent2D, ImageViewCreateInfo, PipelineCache, QueueFlags };
 use ash::{Entry, vk};
@@ -1515,7 +1515,6 @@ impl VulkanRenderer {
                 attribs.push(self.get_vertex_input_attribute_desc(attr, binding.binding)?);
             }
         }
-
         let vertex_input_state = vk::PipelineVertexInputStateCreateInfo {
             vertex_binding_description_count: bindings.len() as u32,
             vertex_attribute_description_count: attribs.len() as u32,
@@ -1524,23 +1523,60 @@ impl VulkanRenderer {
             ..Default::default()
         };
 
+        let mut pc_size: u32 = 0; 
+        for pc in &desc.uniform_bindings {
+            match pc.ty {
+                UniformBindingType::Vec2 => pc_size += 
+                    size_of::<f32>() as u32 * 2,
+                _ => pc_size += 
+                    size_of::<i32>() as u32 * 1,
+            }
+        }
+
         let range = [vk::PushConstantRange {
             offset: 0,
             stage_flags: vk::ShaderStageFlags::VERTEX,
-            size: size_of::<PushConstant>() as u32,
+            size: pc_size, 
         }];
 
-        let texture_binding = [vk::DescriptorSetLayoutBinding {
-            binding: 0,
-            descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            descriptor_count: 1,
-            stage_flags: vk::ShaderStageFlags::FRAGMENT,
-            ..Default::default()
-        }];
+        let mut desc_layout_bindings    = Vec::new();
+        let mut desc_pool_sizes         = Vec::new();
+
+        for binding in &desc.uniform_bindings {
+            if binding.ty != UniformBindingType::Sampler2dArray {
+                continue;
+            }
+            let vk_type = match binding.ty {
+                UniformBindingType::Sampler2dArray => 
+                    vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                _ => anyhow::bail!("This should not exist.")
+            };
+
+            desc_layout_bindings.push(vk::DescriptorSetLayoutBinding {
+                binding: binding.binding as u32,
+                descriptor_type: vk_type,
+                descriptor_count: 1,
+                stage_flags: match binding.stage {
+                    UniformBindingShaderStage::Vertex => 
+                        vk::ShaderStageFlags::VERTEX,
+                    UniformBindingShaderStage::Fragment => 
+                        vk::ShaderStageFlags::FRAGMENT,
+                },
+                ..Default::default()
+            });
+
+            desc_pool_sizes.push(
+                vk::DescriptorPoolSize {
+                    ty: vk_type, 
+                    descriptor_count: self.swapchain.images.len() as u32,
+            }
+
+            );
+        }
 
         let desc_layout_info = vk::DescriptorSetLayoutCreateInfo {
-            binding_count: texture_binding.len() as u32,
-            p_bindings: texture_binding.as_ptr(),
+            binding_count: desc_layout_bindings.len() as u32,
+            p_bindings: desc_layout_bindings.as_ptr(),
             ..Default::default()
         };
 
@@ -1554,6 +1590,7 @@ impl VulkanRenderer {
         let layout_info = vk::PipelineLayoutCreateInfo {
             set_layout_count: pipeline_set_layouts.len() as u32,
             p_set_layouts: pipeline_set_layouts.as_ptr(),
+
             push_constant_range_count: range.len() as u32,
             p_push_constant_ranges: range.as_ptr(),
             ..Default::default()
@@ -1564,16 +1601,11 @@ impl VulkanRenderer {
                 .create_pipeline_layout(&layout_info, None)?
         };
 
-        let sizes = [vk::DescriptorPoolSize {
-            ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            descriptor_count: self.swapchain.images.len() as u32,
-        }];
-
         let pool_info = vk::DescriptorPoolCreateInfo {
             flags: DescriptorPoolCreateFlags::empty(),
             max_sets: self.swapchain.images.len() as u32,
-            pool_size_count: sizes.len() as u32,
-            p_pool_sizes: sizes.as_ptr(),
+            pool_size_count: desc_pool_sizes.len() as u32,
+            p_pool_sizes: desc_pool_sizes.as_ptr(),
             ..Default::default()
         };
 

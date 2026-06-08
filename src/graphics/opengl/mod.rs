@@ -34,6 +34,7 @@ struct GlTexture {
 /// Vertex array is not stored per pipeline, 
 /// the vertex array is pipeline-global in 
 /// the OpenGL backend. 
+#[derive(Clone)]
 struct GlPipeline {
     program: glow::NativeProgram,
     vert_layouts: Vec<VertexBufferBindingLayout> 

@@ -79,9 +79,6 @@ fn main() -> anyhow::Result<()> {
 
             ui.begin(width, height);
 
-
-
-
             text.render_wrapped(
                 20.0,
                 20.0, 

@@ -5,7 +5,7 @@ use crate::graphics::{
 };
 
 use crate::graphics::device::{
-    DrawIndexedInstanced, TextureArrayDesc, VertexAttribute, VertexBufferBindingLayout, VertexFormat
+    DrawIndexedInstanced, TextureArrayDesc, UniformBinding, UniformBindingShaderStage, UniformBindingType, VertexAttribute, VertexBufferBindingLayout, VertexFormat
 };
 
 use crate::ui::quad::{UI_QUAD_FRAGMENT_SHADER, UI_QUAD_FRAGMENT_SHADER_DEDICATED, UI_QUAD_VERTEX_SHADER};
@@ -163,6 +163,25 @@ impl UIRenderer {
         screen_height: u32
     ) -> anyhow::Result<Self> {
 
+        let uniform_bindings = vec![
+            UniformBinding {
+                name: "u_texture_array".to_string(),
+                ty: UniformBindingType::Sampler2dArray,
+                binding: 0,
+                stage: UniformBindingShaderStage::Fragment,
+                ..Default::default()
+            },
+            UniformBinding {
+                name: "u_screen_size".to_string(),
+                ty: UniformBindingType::Vec2,
+                f_data: [
+                    screen_width as f32, 
+                    screen_height as f32, 
+                    0.0, 0.0
+                ],
+                ..Default::default()
+            },
+        ];
 
         let quad_layouts =  vec![
             VertexBufferBindingLayout {
@@ -221,16 +240,14 @@ impl UIRenderer {
 
         ];
 
-
         // Create base pipeline which is using the 
         // texture array to sample.
         let pipeline = gpu.create_pipeline(PipelineDesc{
             vertex_source: UI_QUAD_VERTEX_SHADER,
             fragment_source: UI_QUAD_FRAGMENT_SHADER,
-            vert_bindings: quad_layouts.clone()
+            vert_bindings: quad_layouts.clone(),
+            uniform_bindings: uniform_bindings.clone(),
         })?;
-
-        gpu.set_uniform_1i(pipeline, "u_texture_array", 0)?;
 
         // Create the static vertex buffer for one 
         // quad instance
@@ -265,8 +282,8 @@ impl UIRenderer {
             vertex_source: UI_QUAD_VERTEX_SHADER,
             fragment_source: UI_QUAD_FRAGMENT_SHADER_DEDICATED,
             vert_bindings: quad_layouts,
+            uniform_bindings,
         })?;
-        gpu.set_uniform_1i(pipeline_dedicated, "u_texture", 0)?;
 
         // Create the texture array for the base pipeline
         let ui_texture_array = gpu.create_texture_array(TextureArrayDesc {
@@ -275,7 +292,6 @@ impl UIRenderer {
             layers: UI_ATLAS_LAYERS,
             format: TextureFormat::Rgba8,
         })?;
-
 
         Ok(Self { 
             screen_width: screen_width, 

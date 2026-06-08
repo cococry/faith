@@ -83,13 +83,38 @@ pub struct VertexBufferBindingLayout {
     pub attrs: Vec<VertexAttribute>,
 }
 
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub enum UniformBindingType {
+    #[default]
+    Sampler2dArray,
+    Vec2,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub enum UniformBindingShaderStage {
+    #[default]
+    Vertex,
+    Fragment,
+}
+
+#[derive(Default, Clone)]
+pub struct UniformBinding {
+    pub binding: i32,
+    pub name: String,
+    pub ty: UniformBindingType,
+    pub stage: UniformBindingShaderStage,
+    pub f_data: [f32; 4],
+
+} 
+
 /// Description used to create a graphics 
 /// pipeline.
 pub struct PipelineDesc<'a> {
     pub vertex_source: &'a str,
     pub fragment_source: &'a str,
 
-    pub vert_bindings: Vec<VertexBufferBindingLayout>
+    pub vert_bindings: Vec<VertexBufferBindingLayout>,
+    pub uniform_bindings: Vec<UniformBinding>,
 }
 
 /// Description used to create a 2D texture 
