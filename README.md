@@ -19,8 +19,8 @@ over Vulkan and OpenGL, with native X11 and Wayland windowing support.
 ## Features as of now
 
 - X11/Wayland windowing backend
-- OpenGL rendering backend
 - Vulkan rendering backend
+- Modern OpenGL rendering backend
 - Instanced, single-drawcall glyph rendering
 - Full emoji support
 - Unicode, grapheme and bidi support
