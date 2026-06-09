@@ -1,35 +1,41 @@
 # faith
 
-<img align="left" style="width:260px" src="https://github.com/cococry/faith/blob/main/assets/logo.png" width="240px">
+<img align="left" style="width:200px" src="https://github.com/cococry/faith/blob/main/assets/logo.png" width="200px">
 
 **faith is an instant messenger optimized for security, 
 native performance & customization.**
 
-The faith client is highly optimized for native, GPU accelerated rendering
+The *faith* client is designed and optimized for native, GPU accelerated rendering
 of arbitrarily large text message scrolls.
 
-*faith* implements a custom text-rendering and -layouting engine, supporting
-everything from Unicode to international scripts. The user interface is 
-rendered through a Vulkan & OpenGL layer, interfacing with the GPU directly.
+It implements a custom text layout and rendering engine, supporting
+Unicode, international scripts, emoji, bidirectional text, ligatures 
+and shaped glyphs.
 
----
+The user interface is rendered through an optimized backend abstraction 
+over Vulkan and OpenGL, with native X11 and Wayland windowing support.
+
 
 ## Features as of now
 
 - X11/Wayland windowing backend
 - OpenGL rendering backend
-- Instanced, single drawcall glyph rendering
-- Colored glyph & emoji support
-- Unicode, grapheme & bidi support
-- Ligatures & text shaping with HarfBuzz
-- Left-to-right/right-to-left paragraphs
+- Vulkan rendering backend
+- Instanced, single-drawcall glyph rendering
+- Full emoji support
+- Unicode, grapheme and bidi support
+- Ligatures and text shaping with HarfBuzz
+- Multidirectional text paragraphs
+- Paragraph layouting engine
 
 ## Build & Run
 
-As faith is written in Rust, use cargo to build and run:
+As faith is written in Rust, use cargo to build:
+
 ```console
 git clone https://github.com/cococry/faith
 cd faith
-cargo build
-cargo run
+cargo build --release
+install -Dm755 target/release/faith ~/.cargo/bin/faith
+faith
 ```
