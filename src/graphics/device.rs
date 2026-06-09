@@ -1,6 +1,7 @@
 /// Type of GPU buffer to create.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BufferTarget {
+    Unspecified,
     Vertex,
     Index,
     Uniform,
@@ -12,14 +13,16 @@ pub enum BufferUsage {
     Static,
     Dynamic,
     Stream,
+    Staging,
 }
 
 /// Description used to create a GPU buffer.
 #[derive(Debug, Clone, Copy)]
-pub struct BufferDesc {
+pub struct BufferDesc<'a> {
     pub target: BufferTarget,
     pub usage: BufferUsage,
     pub size: usize,
+    pub data: Option<&'a [u8]>,
 }
 
 /// Parameters for an indexed draw call.

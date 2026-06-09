@@ -254,25 +254,26 @@ impl UIRenderer {
         let quad_vbo = gpu.create_buffer(BufferDesc{
             target: BufferTarget::Vertex,
             usage: BufferUsage::Static,
-            size: std::mem::size_of_val(&QUAD_VERTICES)
+            size: std::mem::size_of_val(&QUAD_VERTICES),
+            data: Some(bytemuck::cast_slice(&QUAD_VERTICES)), 
         })?;
-        gpu.write_buffer(quad_vbo, 0, 0, bytemuck::cast_slice(&QUAD_VERTICES))?;
 
         // Create the static index buffer for one 
         // quad instance
         let quad_ibo = gpu.create_buffer(BufferDesc{
             target: BufferTarget::Index,
             usage: BufferUsage::Static,
-            size: std::mem::size_of_val(&QUAD_INDICES)
+            size: std::mem::size_of_val(&QUAD_INDICES),
+            data: Some(bytemuck::cast_slice(&QUAD_INDICES)), 
         })?;
-        gpu.write_buffer(quad_ibo, 0, 0, bytemuck::cast_slice(&QUAD_INDICES))?;
 
         // Create the dynamic instance buffer holding all 
         // instanes to be rendered in one frame.
         let instance_vbo = gpu.create_buffer(BufferDesc{
             target: BufferTarget::Vertex,
             usage: BufferUsage::Dynamic,
-            size: MAX_INSTANCES_PER_FRAME * std::mem::size_of::<QuadInstance>()
+            size: MAX_INSTANCES_PER_FRAME * std::mem::size_of::<QuadInstance>(),
+            data: None
         })?;
 
         // Create dedicated pipeline which is using 

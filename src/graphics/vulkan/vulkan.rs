@@ -1,17 +1,18 @@
-use std::ffi::{CString, c_char};
+use std::ffi::{CString, c_char, c_void};
 use std::fs::File;
 use std::io::Read;
-use std::str::FromStr;
 
 use crate::graphics::device::{DrawIndexedInstanced, TextureArrayDesc, TextureKind, UniformBindingShaderStage, VertexAttribute, VertexBufferBindingLayout, VertexFormat};
 use crate::graphics::vulkan::{VulkanBuffer, VulkanPipeline};
 use crate::platform::{Platform};
-use crate::graphics::{BufferDesc, BufferHandle, BufferTarget, Color, DrawIndexed, GraphicsDevice, PipelineDesc, PipelineHandle, TextureDesc, TextureHandle, UniformBindingType, VertexStepMode};
+use crate::graphics::{BufferDesc, BufferHandle, BufferTarget, BufferUsage, Color, DrawIndexed, GraphicsDevice, PipelineDesc, PipelineHandle, TextureDesc, TextureHandle, UniformBindingType, VertexStepMode};
 
-use ash::vk::{ColorComponentFlags, DescriptorPoolCreateFlags, DescriptorPoolCreateInfo, Extent2D, ImageViewCreateInfo, PipelineCache, QueueFlags };
+use anyhow::Context;
+use ash::vk::{ColorComponentFlags, DescriptorPoolCreateFlags, Extent2D, ImageViewCreateInfo, PipelineCache, QueueFlags };
 use ash::{Entry, vk};
 use vk_mem::{Alloc, AllocationCreateInfo};
 
+const MAX_STAGING_RING_MEM: vk::DeviceSize = 1024 * 1024 * 256;
 const FRAME_COUNT: usize = 2;
 
 #[derive(Default)]
@@ -21,9 +22,16 @@ struct PendingResize {
     pending: bool,
 }
 
-struct PushConstant {
-    scale: [f32; 2],
-    offset: [f32; 2],
+pub struct StagingRing {
+    buf: BufferHandle,
+    head: vk::DeviceSize,
+    cap: vk::DeviceSize
+}
+
+pub struct UploadContext {
+    cmd_pool: vk::CommandPool,
+    cmd_buf: vk::CommandBuffer,
+    fence: vk::Fence
 }
 
 pub struct VulkanRenderer {
@@ -34,6 +42,8 @@ pub struct VulkanRenderer {
     surface_inst: ash::khr::surface::Instance,
 
     phys_dev: vk::PhysicalDevice,
+    phys_dev_limits: vk::PhysicalDeviceLimits,
+
     graphics_queue: vk::Queue,
     present_queue: vk::Queue,
 
@@ -44,7 +54,7 @@ pub struct VulkanRenderer {
     swapchain_dev:  ash::khr::swapchain::Device,
 
     frameloop: Frameloop,
-    allocator: vk_mem::Allocator,
+    allocator: Option<vk_mem::Allocator>,
 
     pending_resize: PendingResize,
 
@@ -57,9 +67,8 @@ pub struct VulkanRenderer {
     buffers: Vec<Option<VulkanBuffer>>,
     pipelines: Vec<Option<VulkanPipeline>>,
 
-    desc_layout: vk::DescriptorSetLayout,
-
-    global_sets: Vec<vk::DescriptorSet>
+    staging_ring: StagingRing,
+    upload_ctx: UploadContext,
 }
 
 #[derive(Default)]
@@ -109,16 +118,7 @@ pub struct Frame {
     pub image_available: vk::Semaphore,
     pub render_finished_per_image: Vec<vk::Semaphore>,
     pub in_flight_fence: vk::Fence,
-    pub timestamp_pool: vk::QueryPool,
-
-    /// Value of ring.head at frame begin.
-    pub staging_begin: usize,
-
-    /// Max head reached in this frame.
-    pub staging_end: usize,
 }
-
-
 
 impl VulkanRenderer {
     fn check_exts(
@@ -158,7 +158,7 @@ impl VulkanRenderer {
         phys_dev: vk::PhysicalDevice,
         present_queue_family_idx: u32, 
         graphics_queue_family_idx: u32, 
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<vk::PhysicalDeviceLimits> {
         let props = unsafe { instance.get_physical_device_properties(phys_dev) };
 
         tracing::info!(
@@ -175,14 +175,14 @@ impl VulkanRenderer {
             graphics_queue_family_idx
         );
 
-        Ok(())
+        Ok(props.limits)
     }
 
     fn pick_phys_device_and_device_queues(
         instance: &ash::Instance,
         surface_inst: &ash::khr::surface::Instance,
         surface: &vk::SurfaceKHR,
-    ) -> anyhow::Result<(u32, u32, vk::PhysicalDevice)> {
+    ) -> anyhow::Result<(u32, u32, vk::PhysicalDevice, vk::PhysicalDeviceLimits)> {
         let phys_devs = unsafe { instance.enumerate_physical_devices()? };
 
         let mut graphics_queue_family_idx: isize = -1;
@@ -211,14 +211,15 @@ impl VulkanRenderer {
             }
 
             if graphics_queue_family_idx >= 0 && present_queue_family_idx >= 0 {
-                Self::pick_phys_device(instance, 
+                let limits = Self::pick_phys_device(instance, 
                     phys_dev, 
                     present_queue_family_idx as u32, 
                     graphics_queue_family_idx as u32)?;
                 return Ok((
                         graphics_queue_family_idx as u32, 
                         present_queue_family_idx as u32, 
-                        phys_dev
+                        phys_dev,
+                        limits
                 ));
             }
         } 
@@ -338,7 +339,7 @@ impl VulkanRenderer {
 
         extent.width    = std::cmp::min(width, 
             swap_info.capabilities.max_image_extent.width); 
-        extent.height   = std::cmp::min(width, 
+        extent.height   = std::cmp::min(height, 
             swap_info.capabilities.max_image_extent.height); 
 
         extent.width    = std::cmp::max(width, 
@@ -628,6 +629,12 @@ impl VulkanRenderer {
 
     }
 
+    fn allocator(&self) -> anyhow::Result<&vk_mem::Allocator> {
+        self.allocator
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vulkan allocator already destroyed"))
+    }
+
     fn handle_resize(
         &mut self
     ) -> anyhow::Result<()> {
@@ -645,14 +652,40 @@ impl VulkanRenderer {
             }
         }
 
+        /* Absolute rust psychosis */
+        let VulkanRenderer {
+            instance,
+            swapchain,
+            swapchain_dev,
+            allocator,
+            surface,
+            surface_inst,
+            logical_device,
+            phys_dev,
+            pending_resize,
+            graphics_queue_family_idx,
+            present_queue_family_idx,
+            ..
+        } = self;
+
+        let allocator = allocator
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vulkan allocator already destroyed"))?;
+
         Self::create_swapchain(
-            &self.instance, &mut self.swapchain, 
-            &self.swapchain_dev, &self.allocator, 
-            &self.surface, &self.surface_inst, 
-            &self.logical_device, &self.phys_dev,
-            self.pending_resize.width, self.pending_resize.height, 
-            self.graphics_queue_family_idx, 
-            self.present_queue_family_idx)?;
+            instance,
+            swapchain,
+            swapchain_dev,
+            allocator,
+            surface,
+            surface_inst,
+            logical_device,
+            phys_dev,
+            pending_resize.width,
+            pending_resize.height,
+            *graphics_queue_family_idx,
+            *present_queue_family_idx,
+        )?;
 
         self.frameloop.fbs.reserve(self.swapchain.images.len());
 
@@ -946,6 +979,182 @@ impl VulkanRenderer {
         Ok(())
     }
 
+    fn create_upload_context(
+        logical_dev: &ash::Device,
+        graphics_queue_family_idx: u32,
+    ) -> anyhow::Result<UploadContext> {
+        let pool_info = vk::CommandPoolCreateInfo {
+            queue_family_index: graphics_queue_family_idx,
+            flags: vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+            ..Default::default()
+        };
+
+        let cmd_pool = unsafe {
+            logical_dev.create_command_pool(&pool_info, None)?
+        };
+
+        let buf_info = vk::CommandBufferAllocateInfo {
+            command_pool: cmd_pool,
+            level: vk::CommandBufferLevel::PRIMARY,
+            command_buffer_count: 1,
+            ..Default::default()
+        };
+
+        let cmd_buf = unsafe {
+            let bufs = logical_dev.allocate_command_buffers(&buf_info)?;
+
+            *bufs
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("failed to allocate upload command buffer"))?
+        };
+
+        let fence_info = vk::FenceCreateInfo {
+            flags: vk::FenceCreateFlags::SIGNALED,
+            ..Default::default()
+        };
+
+        let fence = unsafe {
+            logical_dev.create_fence(&fence_info, None)?
+        };
+
+        Ok(UploadContext {
+            cmd_pool,
+            cmd_buf,
+            fence,
+        })
+    }
+
+    fn destroy_upload_context(
+        logical_dev: &ash::Device,
+        upload: &mut UploadContext,
+    ) {
+        if upload.fence != vk::Fence::null() {
+            unsafe { logical_dev.destroy_fence(upload.fence, None); } 
+            upload.fence = vk::Fence::null();
+        }
+
+        if upload.cmd_pool != vk::CommandPool::null() {
+            // No need to free upload.cmd_buf manually.
+            // Destroying the command pool frees command buffers from it.
+            unsafe { logical_dev.destroy_command_pool(upload.cmd_pool, None); }
+            upload.cmd_pool = vk::CommandPool::null();
+            upload.cmd_buf = vk::CommandBuffer::null();
+        }
+    }
+
+    fn destroy_all_buffers(&mut self) {
+        let Some(allocator) = self.allocator.as_ref() else {
+            return;
+        };
+
+        for slot in &mut self.buffers {
+            let Some(mut buffer) = slot.take() else {
+                continue;
+            };
+
+            unsafe {
+                allocator.destroy_buffer(buffer.raw, &mut buffer.alloc);
+            }
+        }
+    } 
+
+    fn destroy_swapchain_resources(&mut self) {
+        unsafe {
+            for fb in self.frameloop.fbs.drain(..) {
+                self.logical_device.destroy_framebuffer(fb, None);
+            }
+
+            for view in self.swapchain.img_views.drain(..) {
+                self.logical_device.destroy_image_view(view, None);
+            }
+
+            for view in self.swapchain.img_views_depth.drain(..) {
+                self.logical_device.destroy_image_view(view, None);
+            }
+
+            for (image, mut alloc) in self
+                .swapchain
+                    .depth_images
+                    .drain(..)
+                    .zip(self.swapchain.depth_image_allocs.drain(..))
+                    {
+                        let Some(allocator) = self.allocator.as_ref() else {
+                            return;
+                        };
+                        allocator.destroy_image(image, &mut alloc);
+                    }
+
+            if self.swapchain.handle != vk::SwapchainKHR::null() {
+                self.swapchain_dev.destroy_swapchain(self.swapchain.handle, None);
+                self.swapchain.handle = vk::SwapchainKHR::null();
+            }
+        }
+    }
+
+    fn destroy_frameloop(&mut self) {
+        unsafe {
+            if self.frameloop.crnt_pass != vk::RenderPass::null() {
+                self.logical_device
+                    .destroy_render_pass(self.frameloop.crnt_pass, None);
+                self.frameloop.crnt_pass = vk::RenderPass::null();
+            }
+
+            for frame in &mut self.frameloop.frames {
+                if frame.image_available != vk::Semaphore::null() {
+                    self.logical_device
+                        .destroy_semaphore(frame.image_available, None);
+                    frame.image_available = vk::Semaphore::null();
+                }
+
+                for sem in frame.render_finished_per_image.drain(..) {
+                    self.logical_device.destroy_semaphore(sem, None);
+                }
+
+                if frame.in_flight_fence != vk::Fence::null() {
+                    self.logical_device
+                        .destroy_fence(frame.in_flight_fence, None);
+                    frame.in_flight_fence = vk::Fence::null();
+                }
+
+                if frame.cmd_pool != vk::CommandPool::null() {
+                    self.logical_device
+                        .destroy_command_pool(frame.cmd_pool, None);
+                    frame.cmd_pool = vk::CommandPool::null();
+                    frame.cmd_buf = vk::CommandBuffer::null();
+                }
+            }
+        }
+    }
+
+    fn destroy_all_pipelines(&mut self) {
+        unsafe {
+            for slot in &mut self.pipelines {
+                let Some(pipeline) = slot.take() else {
+                    continue;
+                };
+
+                if pipeline.raw != vk::Pipeline::null() {
+                    self.logical_device.destroy_pipeline(pipeline.raw, None);
+                }
+
+                if pipeline.layout != vk::PipelineLayout::null() {
+                    self.logical_device
+                        .destroy_pipeline_layout(pipeline.layout, None);
+                }
+
+                if pipeline.desc_pool != vk::DescriptorPool::null() {
+                    self.logical_device
+                        .destroy_descriptor_pool(pipeline.desc_pool, None);
+                }
+
+                if pipeline.desc_layout != vk::DescriptorSetLayout::null() {
+                    self.logical_device
+                        .destroy_descriptor_set_layout(pipeline.desc_layout, None);
+                }
+            }
+        }
+    }
+
     pub fn new(platform: &Platform) -> anyhow::Result<Self> { 
         tracing::info!("Using Vulkan rendering backend");
 
@@ -1009,11 +1218,12 @@ impl VulkanRenderer {
 
         let create_info = vk::InstanceCreateInfo {
             enabled_extension_count: required_exts.len() as u32,
-            pp_enabled_extension_names: pp_enabled_extension_names.as_ptr(),
-            pp_enabled_layer_names: layer_name_pointers.as_ptr(),
-            enabled_layer_count: layer_name_pointers.len() as u32,
-            p_application_info: &app_info,
-            ..Default::default()
+            pp_enabled_extension_names: 
+                pp_enabled_extension_names.as_ptr(),
+                pp_enabled_layer_names: layer_name_pointers.as_ptr(),
+                enabled_layer_count: layer_name_pointers.len() as u32,
+                p_application_info: &app_info,
+                ..Default::default()
         };
 
         let instance = unsafe { entry.create_instance(&create_info, None)? };
@@ -1029,16 +1239,43 @@ impl VulkanRenderer {
 
         let surface_inst = ash::khr::surface::Instance::new(&entry, &instance);
 
-        let (graphics_queue_family_idx, present_queue_family_idx, phys_dev) =
+        let (graphics_queue_family_idx, present_queue_family_idx, phys_dev, phys_dev_limits) =
             Self::pick_phys_device_and_device_queues(&instance, &surface_inst, &surface)?;
 
         let (logical_device, graphics_queue, present_queue) = 
-            Self::create_logical_device(&instance, &phys_dev, present_queue_family_idx, graphics_queue_family_idx)?;
+            Self::create_logical_device(
+                &instance, &phys_dev, 
+                present_queue_family_idx, 
+                graphics_queue_family_idx)?;
 
-        let allocator = unsafe { vk_mem::Allocator::new(vk_mem::AllocatorCreateInfo::new(&instance, &logical_device, phys_dev))? };
+        let allocator   = unsafe { vk_mem::Allocator::new(
+            vk_mem::AllocatorCreateInfo::new(
+                &instance, 
+                &logical_device, phys_dev))? 
+        };
+        let upload_ctx  = Self::create_upload_context(&logical_device, 
+            graphics_queue_family_idx)?;
+        let staging_buf = Self::create_vk_buffer_raw(&allocator, 
+            BufferDesc { 
+                target: BufferTarget::Unspecified, 
+                usage: BufferUsage::Staging,
+                size: MAX_STAGING_RING_MEM as usize,
+                data: None,
+            })?;
+
+        let mut initial_buffers = Vec::new();
+        let staging_handle = BufferHandle(initial_buffers.len() as u32);
+        initial_buffers.push(Some(staging_buf));
+
+        let staging_ring = StagingRing {
+            cap: MAX_STAGING_RING_MEM,
+            head: 0,
+            buf: staging_handle 
+        };
 
         let mut swapchain  = Swapchain::default();
-        let swapchain_dev = ash::khr::swapchain::Device::new(&instance, &logical_device);
+        let swapchain_dev = ash::khr::swapchain::Device::new(&instance, 
+            &logical_device);
 
         let (width, height) = platform.size();
 
@@ -1057,8 +1294,8 @@ impl VulkanRenderer {
 
         let mut frameloop = Frameloop::default();
 
-        Self::create_frameloop(&mut frameloop, &swapchain, &logical_device, graphics_queue_family_idx)?;
-
+        Self::create_frameloop(&mut frameloop, &swapchain, 
+            &logical_device, graphics_queue_family_idx)?;
 
         Ok(Self {
             instance,
@@ -1068,6 +1305,8 @@ impl VulkanRenderer {
             surface_inst,
 
             phys_dev,
+            phys_dev_limits,
+
             graphics_queue,
             present_queue,
 
@@ -1078,7 +1317,7 @@ impl VulkanRenderer {
             swapchain_dev,
 
             frameloop,
-            allocator,
+            allocator: Some(allocator),
 
             pending_resize: PendingResize::default(),
             width,
@@ -1088,12 +1327,410 @@ impl VulkanRenderer {
 
             clear_color: [0.0, 0.0, 0.0, 1.0],
 
-            buffers: Vec::new(),
+            buffers: initial_buffers, 
             pipelines: Vec::new(),
 
-            desc_layout: vk::DescriptorSetLayout::null(),
-            global_sets: Vec::new(),
+            staging_ring,
+
+            upload_ctx
         })
+    }
+
+    fn vk_buffer_usage_from_desc(desc: &BufferDesc) -> vk::BufferUsageFlags {
+
+        let mut usage = vk::BufferUsageFlags::empty();
+
+        match desc.target {
+            BufferTarget::Unspecified => {}
+
+            BufferTarget::Vertex => {
+                usage |= vk::BufferUsageFlags::VERTEX_BUFFER;
+            }
+
+            BufferTarget::Index => {
+                usage |= vk::BufferUsageFlags::INDEX_BUFFER;
+            }
+
+            BufferTarget::Uniform => {
+                usage |= vk::BufferUsageFlags::UNIFORM_BUFFER;
+            }
+        }
+
+        match desc.usage {
+            BufferUsage::Static => {
+                usage |= vk::BufferUsageFlags::TRANSFER_DST;
+            }
+
+            BufferUsage::Dynamic | BufferUsage::Stream => {
+                // Mapped CPU-visible buffer.
+            }
+
+            BufferUsage::Staging => {
+                usage |= vk::BufferUsageFlags::TRANSFER_SRC;
+            }
+        }
+
+        usage
+    }
+
+    fn create_vk_buffer_raw(
+        allocator: &vk_mem::Allocator, desc: BufferDesc) -> anyhow::Result<VulkanBuffer> {
+        let mut vk_usage = Self::vk_buffer_usage_from_desc(&desc);
+        let mut mem_props = vk::MemoryPropertyFlags::empty();
+
+        let mut want_mapping = false;
+
+        let mut alloc_flags = vk_mem::AllocationCreateFlags::empty();
+
+        match desc.usage {
+            BufferUsage::Static => {
+                // GPU-local buffer. Fast for rendering, not directly CPU writable.
+                vk_usage |= vk::BufferUsageFlags::TRANSFER_DST;
+                mem_props |= vk::MemoryPropertyFlags::DEVICE_LOCAL;
+            }
+
+            BufferUsage::Dynamic | BufferUsage::Stream => {
+                // CPU-visible buffer. 
+                mem_props |= vk::MemoryPropertyFlags::HOST_VISIBLE
+                    | vk::MemoryPropertyFlags::HOST_COHERENT;
+
+                want_mapping = true;
+
+                alloc_flags |= vk_mem::AllocationCreateFlags::MAPPED;
+                alloc_flags |= vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE;
+            }
+
+            BufferUsage::Staging => {
+                // CPU-written upload buffer.
+                vk_usage |= vk::BufferUsageFlags::TRANSFER_SRC;
+
+                mem_props |= vk::MemoryPropertyFlags::HOST_VISIBLE
+                    | vk::MemoryPropertyFlags::HOST_COHERENT;
+
+                want_mapping = true;
+
+                alloc_flags |= vk_mem::AllocationCreateFlags::MAPPED;
+                alloc_flags |= vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE;
+            }
+        }
+
+        let buffer_info = vk::BufferCreateInfo {
+            size: desc.size as vk::DeviceSize,
+            usage: vk_usage,
+            sharing_mode: vk::SharingMode::EXCLUSIVE,
+            ..Default::default()
+        };
+
+        let alloc_info = vk_mem::AllocationCreateInfo {
+            usage: vk_mem::MemoryUsage::Auto,
+            required_flags: mem_props,
+            flags: alloc_flags,
+            ..Default::default()
+        };
+
+        let (raw, alloc) = unsafe {
+            allocator
+                .create_buffer(&buffer_info, &alloc_info)
+                .context("failed to create Vulkan buffer")?
+        };
+
+        let mapped = if want_mapping {
+            let info = allocator.get_allocation_info(&alloc);
+            Some(info.mapped_data as *mut c_void)
+        } else {
+            None
+        };
+
+        tracing::info!(
+            "Created Vulkan buffer {:?} with size {} bytes, target {:?}, usage {:?}",
+            raw,
+            desc.size,
+            desc.target,
+            desc.usage,
+        );
+
+        Ok(VulkanBuffer {
+            raw,
+            alloc,
+            size: desc.size,
+            target: desc.target,
+            usage: desc.usage,
+            vk_usage,
+            mem_props,
+            mapped,
+        })
+    }
+
+    fn create_vk_buffer_handle(&mut self, desc: BufferDesc) -> anyhow::Result<BufferHandle> {
+        let buffer = Self::create_vk_buffer_raw(self.allocator()?, desc)?;
+
+        let handle = BufferHandle(self.buffers.len() as u32);
+        self.buffers.push(Some(buffer));
+
+        Ok(handle)
+    }
+
+    fn upload_device_local_buffer(
+        &mut self,
+        data: &[u8],
+        target: BufferTarget,
+    ) -> anyhow::Result<BufferHandle> {
+        if data.is_empty() {
+            anyhow::bail!("Cannot upload empty buffer");
+        }
+
+        if target == BufferTarget::Unspecified {
+            anyhow::bail!("Static device-local upload needs a real buffer target");
+        }
+
+        let allocator = self.allocator()?;
+        let dst_buffer = Self::create_vk_buffer_raw(
+            allocator,
+            BufferDesc {
+                target,
+                usage: BufferUsage::Static,
+                size: data.len(),
+                data: Some(data)
+            },
+        )?;
+
+        let dst_handle = BufferHandle(self.buffers.len() as u32);
+        self.buffers.push(Some(dst_buffer));
+
+        let result = self.upload_into_device_local_buffer(dst_handle, data, target);
+
+        if let Err(err) = result {
+            self.destroy_buffer(dst_handle)?;
+            return Err(err);
+        }
+
+        Ok(dst_handle)
+    }
+
+    fn destroy_buffer(&mut self, handle: BufferHandle) -> anyhow::Result<()> {
+        let mut buffer = self
+            .buffers
+            .get_mut(handle.0 as usize)
+            .and_then(|slot| slot.take())
+            .ok_or_else(|| anyhow::anyhow!("invalid buffer handle {:?}", handle))?;
+
+        let allocator = self
+            .allocator
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vulkan allocator already destroyed"))?;
+
+        unsafe {
+            allocator.destroy_buffer(buffer.raw, &mut buffer.alloc);
+        }
+
+        Ok(())
+    } 
+
+    fn upload_into_device_local_buffer(
+        &mut self,
+        dst_handle: BufferHandle,
+        data: &[u8],
+        target: BufferTarget,
+    ) -> anyhow::Result<()> {
+        let size = data.len() as vk::DeviceSize;
+
+        let alignment = self
+            .phys_dev_limits
+            .optimal_buffer_copy_offset_alignment
+            .max(1);
+
+        let staging_offset = self.staging_ring_alloc(size, alignment)?;
+
+        let device = &self.logical_device;
+
+        // Wait until the upload context is free.
+        unsafe { device.wait_for_fences(
+            &[self.upload_ctx.fence],
+            true,
+            u64::MAX,
+        )?;
+        }
+
+        unsafe {
+            device.reset_fences(&[self.upload_ctx.fence])?;
+            device.reset_command_pool(
+                self.upload_ctx.cmd_pool,
+                vk::CommandPoolResetFlags::empty(),
+            )?;
+        }
+
+        let begin_info = vk::CommandBufferBeginInfo {
+            flags: vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
+            ..Default::default()
+        };
+
+        unsafe {
+            device.begin_command_buffer(self.upload_ctx.cmd_buf, &begin_info)?;
+        }
+
+        let staging_handle = self.staging_ring.buf;
+
+        let (staging_raw, staging_mapped) = {
+            let staging = self
+                .buffers
+                .get(staging_handle.0 as usize)
+                .and_then(|b| b.as_ref())
+                .ok_or_else(|| anyhow::anyhow!("invalid staging buffer handle"))?;
+
+            let mapped = staging
+                .mapped
+                .ok_or_else(|| anyhow::anyhow!("staging buffer is not mapped"))?;
+
+            (staging.raw, mapped)
+        };
+
+        let dst_raw = {
+            let dst = self
+                .buffers
+                .get(dst_handle.0 as usize)
+                .and_then(|b| b.as_ref())
+                .ok_or_else(|| anyhow::anyhow!("invalid destination buffer handle"))?;
+
+            dst.raw
+        };
+
+        unsafe { std::ptr::copy_nonoverlapping(
+            data.as_ptr(),
+            (staging_mapped as *mut u8).add(staging_offset as usize),
+            data.len(),
+        );
+        }
+
+        let copy = vk::BufferCopy {
+            src_offset: staging_offset,
+            dst_offset: 0,
+            size,
+        };
+
+        unsafe { device.cmd_copy_buffer(
+            self.upload_ctx.cmd_buf,
+            staging_raw,
+            dst_raw,
+            &[copy],
+        );
+        }
+
+        let (dst_stage_mask, dst_access_mask) = 
+            Self::buffer_target_barrier_dst(target)?;
+
+        let barrier = vk::BufferMemoryBarrier {
+            src_access_mask: vk::AccessFlags::TRANSFER_WRITE,
+            dst_access_mask,
+            src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+            dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+            buffer: dst_raw,
+            offset: 0,
+            size,
+            ..Default::default()
+        };
+
+        unsafe { device.cmd_pipeline_barrier(
+            self.upload_ctx.cmd_buf,
+            vk::PipelineStageFlags::TRANSFER,
+            dst_stage_mask,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[barrier],
+            &[],
+        );
+        }
+
+        unsafe { device.end_command_buffer(self.upload_ctx.cmd_buf)?; }
+
+        let cmd_bufs = [self.upload_ctx.cmd_buf];
+
+        let submit_info = vk::SubmitInfo {
+            command_buffer_count: cmd_bufs.len() as u32,
+            p_command_buffers: cmd_bufs.as_ptr(),
+            ..Default::default()
+        };
+
+        unsafe { device.queue_submit(
+            self.graphics_queue,
+            &[submit_info],
+            self.upload_ctx.fence,
+        )?;
+        }
+
+        unsafe { device.wait_for_fences(
+            &[self.upload_ctx.fence],
+            true,
+            u64::MAX,
+        )?;
+        }
+
+        Ok(())
+    }
+    fn buffer_target_barrier_dst(
+        target: BufferTarget,
+    ) -> anyhow::Result<(vk::PipelineStageFlags, vk::AccessFlags)> {
+        match target {
+            BufferTarget::Vertex => Ok((
+                    vk::PipelineStageFlags::VERTEX_INPUT,
+                    vk::AccessFlags::VERTEX_ATTRIBUTE_READ,
+            )),
+
+            BufferTarget::Index => Ok((
+                    vk::PipelineStageFlags::VERTEX_INPUT,
+                    vk::AccessFlags::INDEX_READ,
+            )),
+
+            BufferTarget::Uniform => Ok((
+                    vk::PipelineStageFlags::VERTEX_SHADER | vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::AccessFlags::UNIFORM_READ,
+            )),
+
+            BufferTarget::Unspecified => {
+                anyhow::bail!("Cannot infer barrier for unspecified buffer target")
+            }
+        }
+    }
+
+    fn staging_ring_alloc(
+        &mut self,
+        size: vk::DeviceSize,
+        alignment: vk::DeviceSize,
+    ) -> anyhow::Result<vk::DeviceSize> {
+        if size == 0 {
+            anyhow::bail!("Cannot allocate zero bytes from staging ring");
+        }
+
+        if size > self.staging_ring.cap {
+            anyhow::bail!(
+                "Staging allocation too large: requested {} bytes, capacity {} bytes",
+                size,
+                self.staging_ring.cap,
+            );
+        }
+
+        let aligned_head = Self::align_up(self.staging_ring.head, alignment);
+
+        if aligned_head + size <= self.staging_ring.cap {
+            self.staging_ring.head = aligned_head + size;
+            return Ok(aligned_head);
+        }
+
+        let wrapped_head = 0;
+
+        if wrapped_head + size <= self.staging_ring.cap {
+            self.staging_ring.head = wrapped_head + size;
+            return Ok(wrapped_head);
+        }
+
+        anyhow::bail!("Staging ring out of memory")
+    }
+
+    fn align_up(value: vk::DeviceSize, alignment: vk::DeviceSize) -> vk::DeviceSize {
+        if alignment <= 1 {
+            value
+        } else {
+            (value + alignment - 1) & !(alignment - 1)
+        }
     }
 
     fn resize(&mut self, width: u32, height: u32) {
@@ -1102,7 +1739,7 @@ impl VulkanRenderer {
         self.pending_resize.pending = true;
     }
 
-    fn begin_frame(&mut self) -> anyhow::Result<()> {
+    pub fn begin_frame(&mut self) -> anyhow::Result<()> {
         if self.pending_resize.pending {
             self.handle_resize()?;
         }
@@ -1111,7 +1748,6 @@ impl VulkanRenderer {
         self.swapchain.image_idx = 0;
 
         let frame = &mut self.frameloop.frames[self.frameloop.frame_idx];
-
 
         unsafe {
             self.logical_device.wait_for_fences(
@@ -1168,18 +1804,6 @@ impl VulkanRenderer {
             )?;
         }
 
-        Ok(())
-    }
-
-    fn end_frame(&mut self) -> anyhow::Result<()> {
-        if self.skip_render {
-            return Ok(());
-        }
-
-        let frame_idx = self.frameloop.frame_idx;
-        let image_idx = self.swapchain.image_idx;
-
-        let frame = &mut self.frameloop.frames[frame_idx];
 
         let begin_info = vk::CommandBufferBeginInfo {
             flags: vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
@@ -1189,6 +1813,19 @@ impl VulkanRenderer {
         unsafe {
             self.logical_device.begin_command_buffer(frame.cmd_buf, &begin_info)?;
         }
+
+        Ok(())
+    }
+
+    pub fn end_frame(&mut self) -> anyhow::Result<()> {
+        if self.skip_render {
+            return Ok(());
+        }
+
+        let frame_idx = self.frameloop.frame_idx;
+        let image_idx = self.swapchain.image_idx;
+
+        let frame = &mut self.frameloop.frames[frame_idx];
 
         let clear_values = [
             vk::ClearValue {
@@ -1318,7 +1955,7 @@ impl VulkanRenderer {
 
         Ok(())
     }
-    fn clear_color(&mut self, color: Color) {
+    pub fn clear_color(&mut self, color: Color) {
         self.clear_color = [
             color.r,
             color.g,
@@ -1327,34 +1964,24 @@ impl VulkanRenderer {
         ];
     }
 
-    fn vk_buffer_usage_from_desc(desc: &BufferDesc) -> vk::BufferUsageFlags {
-        let mut usage = vk::BufferUsageFlags::TRANSFER_DST;
-
-        match desc.target {
-            BufferTarget::Vertex    => usage |= vk::BufferUsageFlags::VERTEX_BUFFER,
-            BufferTarget::Index     => usage |= vk::BufferUsageFlags::INDEX_BUFFER,
-            BufferTarget::Uniform   => usage |= vk::BufferUsageFlags::UNIFORM_BUFFER,
-        }
-
-        usage
-    }
 
     fn create_shader_module(
         &self,
         filepath: &str,
     ) -> anyhow::Result<vk::ShaderModule> {
-
-        let mut file = File::open(filepath)?; 
-        let mut buffer = Vec::new(); 
-        file.read_to_end(&mut buffer)?;
+        let mut file = File::open(filepath)?;
+        let code = ash::util::read_spv(&mut file)
+            .context("failed to read SPIR-V shader")?;
 
         let create_info = vk::ShaderModuleCreateInfo {
-            p_code: buffer.as_ptr() as *const u32,
-            code_size: buffer.len(),
+            code_size: code.len() * std::mem::size_of::<u32>(),
+            p_code: code.as_ptr(),
             ..Default::default()
         };
 
-        let module = unsafe { self.logical_device.create_shader_module(&create_info, None)? };
+        let module = unsafe {
+            self.logical_device.create_shader_module(&create_info, None)?
+        };
 
         Ok(module)
     }
@@ -1369,12 +1996,12 @@ impl VulkanRenderer {
             VertexFormat::Float32x3 => vk::Format::R32G32B32_SFLOAT,
             VertexFormat::Float32x4 => vk::Format::R32G32B32A32_SFLOAT,
 
-            VertexFormat::Uint32 =>  vk::Format::R32_UINT,  
-            VertexFormat::Uint32x2 =>  vk::Format::R16G16_UINT,  
-            VertexFormat::Uint32x3 =>  vk::Format::R16G16B16_UINT,  
-            VertexFormat::Uint32x4 =>  vk::Format::R16G16B16A16_UINT,  
+            VertexFormat::Uint32 => vk::Format::R32_UINT,
+            VertexFormat::Uint32x2 => vk::Format::R32G32_UINT,
+            VertexFormat::Uint32x3 => vk::Format::R32G32B32_UINT,
+            VertexFormat::Uint32x4 => vk::Format::R32G32B32A32_UINT,
 
-            VertexFormat::Unorm8x4 =>  vk::Format::R8_UINT,  
+            VertexFormat::Unorm8x4 => vk::Format::R8G8B8A8_UNORM,
         }
     } 
 
@@ -1421,7 +2048,7 @@ impl VulkanRenderer {
         }
     }
 
-    fn create_pipeline(&mut self, desc: PipelineDesc<'_>) -> anyhow::Result<PipelineHandle> {
+    pub fn create_pipeline(&mut self, desc: PipelineDesc<'_>) -> anyhow::Result<PipelineHandle> {
         let vert_module = self.create_shader_module("compiled_shaders/vert.spv")?;
         let frag_module = self.create_shader_module("compiled_shaders/frag.spv")?;
 
@@ -1524,20 +2151,31 @@ impl VulkanRenderer {
         };
 
         let mut pc_size: u32 = 0; 
+        let mut stage_flags = vk::ShaderStageFlags::empty();
         for pc in &desc.uniform_bindings {
             match pc.ty {
-                UniformBindingType::Vec2 => pc_size += 
-                    size_of::<f32>() as u32 * 2,
-                _ => pc_size += 
-                    size_of::<i32>() as u32 * 1,
+                UniformBindingType::Vec2 => {
+                    pc_size += 
+                        size_of::<f32>() as u32 * 2;
+                    let vk_stage = match pc.stage {
+                        UniformBindingShaderStage::Vertex => vk::ShaderStageFlags::VERTEX,
+                        UniformBindingShaderStage::Fragment => vk::ShaderStageFlags::FRAGMENT
+                    };
+                    stage_flags |= vk_stage; 
+                }
+                _ => {},
             }
         }
 
-        let range = [vk::PushConstantRange {
-            offset: 0,
-            stage_flags: vk::ShaderStageFlags::VERTEX,
-            size: pc_size, 
-        }];
+        let push_ranges = if pc_size > 0 {
+            vec![vk::PushConstantRange {
+                offset: 0,
+                stage_flags,
+                size: pc_size,
+            }]
+        } else {
+            Vec::new()
+        };
 
         let mut desc_layout_bindings    = Vec::new();
         let mut desc_pool_sizes         = Vec::new();
@@ -1580,19 +2218,19 @@ impl VulkanRenderer {
             ..Default::default()
         };
 
-        self.desc_layout = unsafe {
+        let desc_layout = unsafe {
             self.logical_device
                 .create_descriptor_set_layout(&desc_layout_info, None)?
         };
 
-        let pipeline_set_layouts = [self.desc_layout];
+        let pipeline_set_layouts = [desc_layout];
 
         let layout_info = vk::PipelineLayoutCreateInfo {
             set_layout_count: pipeline_set_layouts.len() as u32,
             p_set_layouts: pipeline_set_layouts.as_ptr(),
 
-            push_constant_range_count: range.len() as u32,
-            p_push_constant_ranges: range.as_ptr(),
+            push_constant_range_count: push_ranges.len() as u32,
+            p_push_constant_ranges: push_ranges.as_ptr(),
             ..Default::default()
         };
 
@@ -1614,7 +2252,7 @@ impl VulkanRenderer {
                 .create_descriptor_pool(&pool_info, None)?
         };
 
-        let set_layouts = vec![self.desc_layout; self.swapchain.images.len()];
+        let set_layouts = vec![desc_layout; self.swapchain.images.len()];
 
         let alloc_info = vk::DescriptorSetAllocateInfo {
             descriptor_pool: desc_pool,
@@ -1623,7 +2261,7 @@ impl VulkanRenderer {
             ..Default::default()
         };
 
-        self.global_sets = unsafe {
+        let desc_sets = unsafe {
             self.logical_device.allocate_descriptor_sets(&alloc_info)?
         };
 
@@ -1644,9 +2282,17 @@ impl VulkanRenderer {
         }];
 
         let pipelines = unsafe {
-            self.logical_device
-                .create_graphics_pipelines(PipelineCache::null(), pipeline_info.as_slice(), None)
-                .map_err(|(_, result)| result)?
+            let result = self.logical_device
+                .create_graphics_pipelines(
+                    PipelineCache::null(),
+                    pipeline_info.as_slice(),
+                    None,
+                );
+
+            self.logical_device.destroy_shader_module(vert_module, None);
+            self.logical_device.destroy_shader_module(frag_module, None);
+
+            result.map_err(|(_, result)| result)?
         };
 
         if pipelines.is_empty() {
@@ -1656,7 +2302,8 @@ impl VulkanRenderer {
         let raw = pipelines[0];
         let handle = PipelineHandle(self.pipelines.len() as u32);
 
-        self.pipelines.push(Some(VulkanPipeline { raw }));
+        self.pipelines.push(Some(VulkanPipeline { raw, layout: pipeline_layout, desc_layout,
+            desc_pool, descriptor_sets: desc_sets}));
 
         tracing::info!(
             "Created Vulkan graphics pipeline (vertex bindings: {}, vertex attributes: {})",
@@ -1665,6 +2312,240 @@ impl VulkanRenderer {
         );
 
         Ok(handle)
+    }
+
+    pub fn create_buffer(&mut self, desc: BufferDesc<'_>) -> anyhow::Result<BufferHandle> {
+        match desc.data {
+            Some(data) => {
+                if data.len() > desc.size {
+                    anyhow::bail!(
+                        "buffer initial data is larger than buffer size: data={} size={}",
+                        data.len(),
+                        desc.size
+                    );
+                }
+
+                match desc.usage {
+                    BufferUsage::Static => {
+                        self.upload_device_local_buffer(data, desc.target)
+                    }
+
+                    BufferUsage::Dynamic | BufferUsage::Stream | BufferUsage::Staging => {
+                        let handle = self.create_vk_buffer_handle(BufferDesc {
+                            data: None,
+                            ..desc
+                        })?;
+
+                        self.write_buffer(handle, 0, 0, data)?;
+
+                        Ok(handle)
+                    }
+                }
+            }
+
+            None => {
+                self.create_vk_buffer_handle(desc)
+            }
+        }
+    }
+
+
+    pub fn write_buffer(
+        &mut self,
+        handle: BufferHandle,
+        _binding: u32,
+        offset: usize,
+        data: &[u8],
+    ) -> anyhow::Result<()> {
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        let end = offset
+            .checked_add(data.len())
+            .ok_or_else(|| anyhow::anyhow!("buffer write offset overflow"))?;
+
+        let buffer = self
+            .buffers
+            .get(handle.0 as usize)
+            .and_then(|slot| slot.as_ref())
+            .ok_or_else(|| anyhow::anyhow!("invalid buffer handle {:?}", handle))?;
+
+        if end > buffer.size {
+            anyhow::bail!(
+                "buffer write out of bounds: offset={} size={} buffer_size={}",
+                offset,
+                data.len(),
+                buffer.size,
+            );
+        }
+
+        let is_mapped = buffer.mapped.is_some();
+
+        if is_mapped {
+            self.write_mapped_buffer(handle, offset, data)
+        } else {
+            self.transfer_to_device_local_buffer(handle, offset, data)
+        }
+    }
+
+    fn write_mapped_buffer(
+        &mut self,
+        handle: BufferHandle,
+        offset: usize,
+        data: &[u8],
+    ) -> anyhow::Result<()> {
+        let buffer = self
+            .buffers
+            .get(handle.0 as usize)
+            .and_then(|slot| slot.as_ref())
+            .ok_or_else(|| anyhow::anyhow!("invalid buffer handle {:?}", handle))?;
+
+        let mapped = buffer
+            .mapped
+            .ok_or_else(|| anyhow::anyhow!("buffer {:?} is not mapped", handle))?;
+
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                data.as_ptr(),
+                (mapped as *mut u8).add(offset),
+                data.len(),
+            );
+        }
+
+        Ok(())
+    }
+
+    fn transfer_to_device_local_buffer(
+        &mut self,
+        handle: BufferHandle,
+        dst_offset: usize,
+        data: &[u8],
+    ) -> anyhow::Result<()> {
+        let size = data.len() as vk::DeviceSize;
+
+        let alignment = self
+            .phys_dev_limits
+            .optimal_buffer_copy_offset_alignment
+            .max(1);
+
+        let staging_offset = self.staging_ring_alloc(size, alignment)?;
+
+        let staging_handle = self.staging_ring.buf;
+
+        let (staging_raw, staging_mapped) = {
+            let staging = self
+                .buffers
+                .get(staging_handle.0 as usize)
+                .and_then(|slot| slot.as_ref())
+                .ok_or_else(|| anyhow::anyhow!("invalid staging buffer handle"))?;
+
+            let mapped = staging
+                .mapped
+                .ok_or_else(|| anyhow::anyhow!("staging buffer is not mapped"))?;
+
+            (staging.raw, mapped)
+        };
+
+        let (dst_raw, dst_target) = {
+            let dst = self
+                .buffers
+                .get(handle.0 as usize)
+                .and_then(|slot| slot.as_ref())
+                .ok_or_else(|| anyhow::anyhow!("invalid destination buffer handle {:?}", handle))?;
+
+            (dst.raw, dst.target)
+        };
+
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                data.as_ptr(),
+                (staging_mapped as *mut u8).add(staging_offset as usize),
+                data.len(),
+            );
+        }
+
+        let copy = vk::BufferCopy {
+            src_offset: staging_offset,
+            dst_offset: dst_offset as vk::DeviceSize,
+            size,
+        };
+
+        let cmd_buf = self.frameloop.frames[self.frameloop.frame_idx].cmd_buf;
+
+        unsafe {
+            self.logical_device.cmd_copy_buffer(
+                cmd_buf,
+                staging_raw,
+                dst_raw,
+                &[copy],
+            );
+        }
+
+        let (dst_stage, dst_access) = Self::buffer_target_barrier_dst(dst_target)?;
+
+        let barrier = vk::BufferMemoryBarrier {
+            src_access_mask: vk::AccessFlags::TRANSFER_WRITE,
+            dst_access_mask: dst_access,
+
+            src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+            dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+
+            buffer: dst_raw,
+            offset: dst_offset as vk::DeviceSize,
+            size,
+
+            ..Default::default()
+        };
+
+        unsafe {
+            self.logical_device.cmd_pipeline_barrier(
+                cmd_buf,
+                vk::PipelineStageFlags::TRANSFER,
+                dst_stage,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[barrier],
+                &[],
+            );
+        }
+
+        Ok(())
+    }
+
+
+}
+
+impl Drop for VulkanRenderer {
+    fn drop(&mut self) {
+        unsafe {
+            if let Err(err) = self.logical_device.device_wait_idle() {
+                tracing::error!("vkDeviceWaitIdle failed during drop: {:?}", err);
+            }
+        }
+
+        self.destroy_all_pipelines();
+
+        self.destroy_all_buffers();
+
+        self.destroy_swapchain_resources();
+
+        self.destroy_frameloop();
+
+        Self::destroy_upload_context(&self.logical_device, &mut self.upload_ctx);
+
+        self.allocator.take();
+
+        unsafe {
+            self.logical_device.destroy_device(None);
+
+            if self.surface != vk::SurfaceKHR::null() {
+                self.surface_inst.destroy_surface(self.surface, None);
+                self.surface = vk::SurfaceKHR::null();
+            }
+
+            self.instance.destroy_instance(None);
+        }
     }
 }
 
@@ -1685,18 +2566,18 @@ impl GraphicsDevice for VulkanRenderer {
         VulkanRenderer::end_frame(self)
     }
 
-    fn create_buffer(&mut self, _desc: BufferDesc) -> anyhow::Result<BufferHandle> {
-        anyhow::bail!("Vulkan create_buffer not implemented yet")
+    fn create_buffer(&mut self, desc: BufferDesc) -> anyhow::Result<BufferHandle> {
+        VulkanRenderer::create_buffer(self, desc)
     }
 
     fn write_buffer(
         &mut self,
-        _handle: BufferHandle,
-        _binding: u32,
-        _offset: usize,
-        _data: &[u8],
+        handle: BufferHandle,
+        binding: u32,
+        offset: usize,
+        data: &[u8],
     ) -> anyhow::Result<()> {
-        anyhow::bail!("Vulkan write_buffer not implemented yet")
+        VulkanRenderer::write_buffer(self, handle, binding, offset, data)
     }
 
     fn create_pipeline(&mut self, desc: PipelineDesc<'_>) -> anyhow::Result<PipelineHandle> {

@@ -188,6 +188,7 @@ impl OpenGLRenderer {
             BufferTarget::Vertex => glow::ARRAY_BUFFER,
             BufferTarget::Index => glow::ELEMENT_ARRAY_BUFFER,
             BufferTarget::Uniform => glow::UNIFORM_BUFFER,
+            BufferTarget::Unspecified => 0, 
         }
     }
 
@@ -196,24 +197,36 @@ impl OpenGLRenderer {
             BufferUsage::Static => glow::STATIC_DRAW,
             BufferUsage::Dynamic => glow::DYNAMIC_DRAW,
             BufferUsage::Stream => glow::STREAM_DRAW,
+            BufferUsage::Staging => glow::DYNAMIC_DRAW 
         }
     }
-    
-    pub fn create_buffer(&mut self, desc: BufferDesc) -> anyhow::Result<BufferHandle> {
+
+    pub fn create_buffer(&mut self, desc: BufferDesc<'_>) -> anyhow::Result<BufferHandle> {
         unsafe {
-            let raw_buf = self.gl.create_buffer().map_err(|e| anyhow::anyhow!("failed to create OpenGL buffer: {e}"))?;
+            let raw = self
+                .gl
+                .create_buffer()
+                .map_err(|e| anyhow::anyhow!("failed to create OpenGL buffer: {e}"))?;
 
             let target = self.gl_buffer_target(desc.target);
             let usage = self.gl_buffer_usage(desc.usage);
 
-            self.gl.bind_buffer(target, Some(raw_buf));
-            self.gl.buffer_data_size(target, desc.size as i32, usage); 
+            self.gl.bind_buffer(target, Some(raw));
+
+            if let Some(data) = desc.data {
+                self.gl.buffer_data_u8_slice(target, data, usage);
+            } else {
+                self.gl.buffer_data_size(target, desc.size as i32, usage);
+            }
+
             self.gl.bind_buffer(target, None);
 
             let handle = BufferHandle(self.buffers.len() as u32);
 
-            self.buffers.push(Some( GlBuffer { 
-                raw: raw_buf, target: desc.target, size: desc.size
+            self.buffers.push(Some(GlBuffer {
+                raw,
+                target: desc.target,
+                size: desc.size,
             }));
 
             Ok(handle)
@@ -790,7 +803,7 @@ impl OpenGLRenderer {
             BufferTarget::Index => {
                 self.current_ibo = None;
             }
-            BufferTarget::Uniform => {}
+            _ => {}
         }
 
         Ok(())
@@ -919,7 +932,7 @@ impl GraphicsDevice for OpenGLRenderer {
         OpenGLRenderer::end_frame(self)
     }
 
-    fn create_buffer(&mut self, desc: BufferDesc) -> anyhow::Result<BufferHandle> {
+    fn create_buffer(&mut self, desc: BufferDesc<'_>) -> anyhow::Result<BufferHandle> {
         OpenGLRenderer::create_buffer(self, desc)
     }
 
