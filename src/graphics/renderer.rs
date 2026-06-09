@@ -1,19 +1,11 @@
-
-use anyhow::{Context, anyhow};
+use anyhow::Context;
 
 use crate::graphics::{
-    BufferDesc,
-    BufferHandle,
-    Color,
-    DrawIndexed,
-    GraphicsDevice,
-    PipelineDesc,
-    PipelineHandle,
-    TextureDesc,
+    BufferDesc, BufferHandle, Color, GraphicsDevice, PipelineDesc, PipelineHandle, TextureDesc,
     TextureHandle,
 };
 
-use crate::graphics::device::{DrawIndexedInstanced, TextureArrayDesc, TextureKind};
+use crate::graphics::device::{DrawIndexedInstanced, TextureArrayDesc, TextureArrayWrite};
 use crate::graphics::opengl::OpenGLRenderer;
 use crate::graphics::vulkan::VulkanRenderer;
 use crate::platform::Platform;
@@ -28,77 +20,61 @@ pub enum GraphicsBackend {
 
 /// Graphics-backend renderer implementation.
 pub enum Renderer {
-    OpenGL(OpenGLRenderer),
-    Vulkan(VulkanRenderer),
+    OpenGL(Box<OpenGLRenderer>),
+    Vulkan(Box<VulkanRenderer>),
 }
 
 impl Renderer {
-    pub fn new(
-        backend: GraphicsBackend,
-        platform: &Platform,
-    ) -> anyhow::Result<Self> {
+    pub fn new(backend: GraphicsBackend, platform: &Platform) -> anyhow::Result<Self> {
         match backend {
-            GraphicsBackend::Auto => {
-                match Self::try_new_vulkan(platform) {
-                    Ok(renderer) => {
-                        tracing::info!("Selected Vulkan rendering backend");
-                        Ok(renderer)
-                    }
+            GraphicsBackend::Auto => match Self::try_new_vulkan(platform) {
+                Ok(renderer) => {
+                    tracing::info!("Selected Vulkan rendering backend");
+                    Ok(renderer)
+                }
 
-                    Err(vk_err) => {
-                        tracing::warn!(
-                            "Vulkan backend unavailable, falling back to OpenGL: {vk_err:?}"
-                        );
+                Err(vk_err) => {
+                    tracing::warn!(
+                        "Vulkan backend unavailable, falling back to OpenGL: {vk_err:?}"
+                    );
 
-                        match Self::try_new_opengl(platform) {
-                            Ok(renderer) => {
-                                tracing::info!("Selected OpenGL rendering backend");
-                                Ok(renderer)
-                            }
+                    match Self::try_new_opengl(platform) {
+                        Ok(renderer) => {
+                            tracing::info!("Selected OpenGL rendering backend");
+                            Ok(renderer)
+                        }
 
-                            Err(gl_err) => {
-                                Err(anyhow::anyhow!(
-                                        "No graphics backend could be initialized.\n\
+                        Err(gl_err) => Err(anyhow::anyhow!(
+                            "No graphics backend could be initialized.\n\
                                      Vulkan error: {vk_err:?}\n\
                                      OpenGL error: {gl_err:?}"
-                                ))
-                            }
-                        }
+                        )),
                     }
                 }
-            }
+            },
 
             GraphicsBackend::Vulkan => {
-                Self::try_new_vulkan(platform)
-                    .context("failed to initialize Vulkan backend")
+                Self::try_new_vulkan(platform).context("failed to initialize Vulkan backend")
             }
 
             GraphicsBackend::OpenGL => {
-                Self::try_new_opengl(platform)
-                    .context("failed to initialize OpenGL backend")
+                Self::try_new_opengl(platform).context("failed to initialize OpenGL backend")
             }
         }
     }
 
     fn try_new_vulkan(platform: &Platform) -> anyhow::Result<Self> {
-        Ok(Self::Vulkan(VulkanRenderer::new(platform)?))
+        Ok(Self::Vulkan(Box::new(VulkanRenderer::new(platform)?)))
     }
 
     fn try_new_opengl(platform: &Platform) -> anyhow::Result<Self> {
-        Ok(Self::OpenGL(OpenGLRenderer::new(platform)?))
-    } 
+        Ok(Self::OpenGL(Box::new(OpenGLRenderer::new(platform)?)))
+    }
 
     fn device_mut(&mut self) -> &mut dyn GraphicsDevice {
         match self {
-            Self::OpenGL(renderer) => renderer,
-            Self::Vulkan(renderer) => renderer,
-        }
-    }
-
-    fn device(&self) -> &dyn GraphicsDevice {
-        match self {
-            Self::OpenGL(renderer) => renderer,
-            Self::Vulkan(renderer) => renderer,
+            Self::OpenGL(renderer) => renderer.as_mut(),
+            Self::Vulkan(renderer) => renderer.as_mut(),
         }
     }
 }
@@ -120,10 +96,7 @@ impl GraphicsDevice for Renderer {
         self.device_mut().end_frame()
     }
 
-    fn create_buffer(
-        &mut self,
-        desc: BufferDesc,
-    ) -> anyhow::Result<BufferHandle> {
+    fn create_buffer(&mut self, desc: BufferDesc) -> anyhow::Result<BufferHandle> {
         self.device_mut().create_buffer(desc)
     }
 
@@ -134,7 +107,8 @@ impl GraphicsDevice for Renderer {
         offset: usize,
         data: &[u8],
     ) -> anyhow::Result<()> {
-        self.device_mut().write_buffer(handle, binding, offset, data)
+        self.device_mut()
+            .write_buffer(handle, binding, offset, data)
     }
 
     fn create_texture(
@@ -145,53 +119,23 @@ impl GraphicsDevice for Renderer {
         self.device_mut().create_texture(desc, data)
     }
 
-    fn write_texture(
-        &mut self,
-        texture: TextureHandle,
-        x: u32,
-        y: u32,
-        width: u32,
-        height: u32,
-        data: &[u8],
-    ) -> anyhow::Result<()> {
-        self.device_mut()
-            .write_texture(texture, x, y, width, height, data)
-    }
-
-    fn set_texture(
-        &mut self,
-        slot: u32,
-        texture: TextureHandle,
-    ) -> anyhow::Result<()> {
+    fn set_texture(&mut self, slot: u32, texture: TextureHandle) -> anyhow::Result<()> {
         self.device_mut().set_texture(slot, texture)
     }
 
-    fn create_pipeline(
-        &mut self,
-        desc: PipelineDesc,
-    ) -> anyhow::Result<PipelineHandle> {
+    fn create_pipeline(&mut self, desc: PipelineDesc) -> anyhow::Result<PipelineHandle> {
         self.device_mut().create_pipeline(desc)
     }
 
-    fn set_pipeline(
-        &mut self,
-        handle: PipelineHandle,
-    ) -> anyhow::Result<()> {
+    fn set_pipeline(&mut self, handle: PipelineHandle) -> anyhow::Result<()> {
         self.device_mut().set_pipeline(handle)
     }
 
-    fn set_vertex_buffer(
-        &mut self,
-        handle: BufferHandle,
-        binding: u32,
-    ) -> anyhow::Result<()> {
+    fn set_vertex_buffer(&mut self, handle: BufferHandle, binding: u32) -> anyhow::Result<()> {
         self.device_mut().set_vertex_buffer(handle, binding)
     }
 
-    fn set_index_buffer(
-        &mut self,
-        handle: BufferHandle,
-    ) -> anyhow::Result<()> {
+    fn set_index_buffer(&mut self, handle: BufferHandle) -> anyhow::Result<()> {
         self.device_mut().set_index_buffer(handle)
     }
 
@@ -204,68 +148,21 @@ impl GraphicsDevice for Renderer {
     ) -> anyhow::Result<()> {
         self.device_mut().set_uniform_2f(pipeline, name, x, y)
     }
-    fn set_uniform_1i(
-        &mut self,
-        pipeline: PipelineHandle,
-        name: &str,
-        value: i32,
-    ) -> anyhow::Result<()> {
-        self.device_mut().set_uniform_1i(pipeline, name, value)
-    }
 
-
-    fn draw_indexed(
-        &mut self,
-        draw: DrawIndexed,
-    ) -> anyhow::Result<()> {
-        self.device_mut().draw_indexed(draw)
-    }
-
-    fn draw_indexed_instanced(
-        &mut self,
-        draw: DrawIndexedInstanced,
-    ) -> anyhow::Result<()> {
+    fn draw_indexed_instanced(&mut self, draw: DrawIndexedInstanced) -> anyhow::Result<()> {
         self.device_mut().draw_indexed_instanced(draw)
     }
 
-    fn texture_gen_mipmap(
-        &mut self, 
-        texture: TextureHandle,
-    ) -> anyhow::Result<()> {
-        self.device_mut().texture_gen_mipmap(texture)
-    }
-    fn create_texture_array(
-        &mut self,
-        desc: TextureArrayDesc,
-    ) -> anyhow::Result<TextureHandle> {
+    fn create_texture_array(&mut self, desc: TextureArrayDesc) -> anyhow::Result<TextureHandle> {
         self.device_mut().create_texture_array(desc)
     }
 
     fn write_texture_array_layer(
         &mut self,
-        texture: TextureHandle,
-        x: u32,
-        y: u32,
-        layer: u32,
-        width: u32,
-        height: u32,
+        write: TextureArrayWrite,
         pixels_rgba: &[u8],
     ) -> anyhow::Result<()> {
-        self.device_mut().write_texture_array_layer(
-            texture, x, y, layer, 
-            width, height, pixels_rgba
-        )
+        self.device_mut()
+            .write_texture_array_layer(write, pixels_rgba)
     }
-
-    fn texture_get_kind(
-        &mut self,
-        texture: TextureHandle,
-    ) -> anyhow::Result<TextureKind> {
-        self.device_mut().texture_get_kind(texture)
-    }
-
-    fn size(&self) -> (u32, u32) {
-        self.device().size()
-    }
-
 }

@@ -1,16 +1,26 @@
 use std::collections::HashMap;
-use std::ffi::{CString, c_char, c_void};
+use std::ffi::{CString, c_char};
 use std::hash::Hash;
 
-use crate::graphics::device::{DrawIndexedInstanced, TextureArrayDesc, TextureKind, UniformBindingShaderStage, VertexAttribute, VertexBufferBindingLayout, VertexFormat};
+use crate::graphics::device::{
+    DrawIndexedInstanced, TextureArrayDesc, UniformBindingShaderStage, VertexAttribute,
+    VertexBufferBindingLayout, VertexFormat,
+};
 use crate::graphics::vulkan::{VulkanBuffer, VulkanPipeline, VulkanTexture, VulkanTextureKind};
-use crate::platform::{Platform};
-use crate::graphics::{BufferDesc, BufferHandle, BufferTarget, BufferUsage, BuiltinShaderPipeline, Color, DrawIndexed, GraphicsDevice, PipelineDesc, PipelineHandle, TextureDesc, TextureFormat, TextureHandle, UniformBindingType, VertexStepMode};
+use crate::graphics::{
+    BufferDesc, BufferHandle, BufferTarget, BufferUsage, BuiltinShaderPipeline, Color,
+    GraphicsDevice, PipelineDesc, PipelineHandle, TextureArrayWrite, TextureDesc, TextureFormat,
+    TextureHandle, UniformBindingType, VertexStepMode,
+};
+use crate::platform::Platform;
 
-use anyhow::{Context};
-use ash::vk::{ColorComponentFlags, DescriptorPoolCreateFlags, Extent2D, ImageViewCreateInfo, PipelineCache, QueueFlags };
+use anyhow::Context;
+use ash::vk::{
+    ColorComponentFlags, DescriptorPoolCreateFlags, Extent2D, ImageViewCreateInfo, PipelineCache,
+    QueueFlags,
+};
 use ash::{Entry, vk};
-use vk_mem::{Alloc};
+use vk_mem::Alloc;
 
 const MAX_STAGING_RING_MEM: vk::DeviceSize = 1024 * 1024 * 256;
 const FRAME_COUNT: usize = 2;
@@ -29,13 +39,13 @@ struct PendingResize {
 pub struct StagingRing {
     buf: BufferHandle,
     head: vk::DeviceSize,
-    cap: vk::DeviceSize
+    cap: vk::DeviceSize,
 }
 
 pub struct UploadContext {
     cmd_pool: vk::CommandPool,
     cmd_buf: vk::CommandBuffer,
-    fence: vk::Fence
+    fence: vk::Fence,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FramePhase {
@@ -44,12 +54,29 @@ enum FramePhase {
     InRenderPass,
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct TextureDescriptorKey {
     pipeline: PipelineHandle,
     texture: TextureHandle,
     binding: u32,
+}
+
+struct SwapchainCreationArgs<'a> {
+    instance: &'a ash::Instance,
+    swapchain: &'a mut Swapchain,
+    swapchain_dev: &'a ash::khr::swapchain::Device,
+
+    surface: &'a vk::SurfaceKHR,
+    surface_inst: &'a ash::khr::surface::Instance,
+
+    logical_dev: &'a ash::Device,
+    phys_dev: &'a vk::PhysicalDevice,
+    width: u32,
+    height: u32,
+
+    graphics_queue_family_idx: u32,
+    present_queue_family_idx: u32,
+    log: bool,
 }
 
 pub struct VulkanRenderer {
@@ -69,7 +96,7 @@ pub struct VulkanRenderer {
     present_queue_family_idx: u32,
 
     swapchain: Swapchain,
-    swapchain_dev:  ash::khr::swapchain::Device,
+    swapchain_dev: ash::khr::swapchain::Device,
 
     frameloop: Frameloop,
     allocator: Option<vk_mem::Allocator>,
@@ -86,7 +113,6 @@ pub struct VulkanRenderer {
     textures: Vec<Option<VulkanTexture>>,
     pipelines: Vec<Option<VulkanPipeline>>,
 
-
     current_pipeline: Option<PipelineHandle>,
     current_vbos: [Option<BufferHandle>; MAX_VBOS],
     current_ibo: Option<BufferHandle>,
@@ -102,14 +128,11 @@ pub struct VulkanRenderer {
 
 #[derive(Default)]
 struct SwapchainInfo {
-    present_modes: Vec<vk::PresentModeKHR>,
-    surface_fmts: Vec<vk::SurfaceFormatKHR>,
     capabilities: vk::SurfaceCapabilitiesKHR,
 
     ideal_present_mode: vk::PresentModeKHR,
     ideal_surface_fmt: vk::SurfaceFormatKHR,
 }
-
 
 #[derive(Default)]
 struct Swapchain {
@@ -117,14 +140,14 @@ struct Swapchain {
 
     info: SwapchainInfo,
 
-    handle: vk::SwapchainKHR, 
+    handle: vk::SwapchainKHR,
     images: Vec<vk::Image>,
-    extent: Extent2D, 
+    extent: Extent2D,
 
     img_views: Vec<vk::ImageView>,
     imgs_in_flight: Vec<vk::Fence>,
 
-    image_idx: usize 
+    image_idx: usize,
 }
 
 #[derive(Default)]
@@ -132,7 +155,7 @@ struct Frameloop {
     pub frame_idx: usize,
     pub crnt_pass: vk::RenderPass,
     pub fbs: Vec<vk::Framebuffer>,
-    frames: [Frame; FRAME_COUNT], 
+    frames: [Frame; FRAME_COUNT],
 }
 
 #[derive(Default)]
@@ -171,9 +194,7 @@ impl VulkanRenderer {
             .ok_or_else(|| anyhow::anyhow!("invalid texture handle {:?}", handle))
     }
 
-    fn check_exts(
-        entry: &ash::Entry, 
-    ) -> anyhow::Result<(bool, bool, bool, bool, bool)> {
+    fn check_exts(entry: &ash::Entry) -> anyhow::Result<(bool, bool, bool, bool, bool)> {
         let exts = unsafe { entry.enumerate_instance_extension_properties(None)? };
 
         if exts.is_empty() {
@@ -187,27 +208,28 @@ impl VulkanRenderer {
 
         for ext in exts {
             match ext.extension_name_as_c_str()?.to_str()? {
-                "VK_KHR_surface"            => have_ext_vk_khr_surface = true,
-                "VK_KHR_xcb_surface"        => have_ext_vk_khr_xcb_surface = true,
-                "VK_KHR_xlib_surface"       => have_ext_vk_khr_xlib_surface = true,
-                "VK_KHR_wayland_surface"    => have_ext_vk_khr_wayland_surface = true,
+                "VK_KHR_surface" => have_ext_vk_khr_surface = true,
+                "VK_KHR_xcb_surface" => have_ext_vk_khr_xcb_surface = true,
+                "VK_KHR_xlib_surface" => have_ext_vk_khr_xlib_surface = true,
+                "VK_KHR_wayland_surface" => have_ext_vk_khr_wayland_surface = true,
                 &_ => {}
-            } 
+            }
         }
 
-        Ok((true,
-                have_ext_vk_khr_surface,
-                have_ext_vk_khr_xcb_surface, 
-                have_ext_vk_khr_xlib_surface, 
-                have_ext_vk_khr_wayland_surface, 
+        Ok((
+            true,
+            have_ext_vk_khr_surface,
+            have_ext_vk_khr_xcb_surface,
+            have_ext_vk_khr_xlib_surface,
+            have_ext_vk_khr_wayland_surface,
         ))
     }
 
     fn pick_phys_device(
         instance: &ash::Instance,
         phys_dev: vk::PhysicalDevice,
-        present_queue_family_idx: u32, 
-        graphics_queue_family_idx: u32, 
+        present_queue_family_idx: u32,
+        graphics_queue_family_idx: u32,
     ) -> anyhow::Result<vk::PhysicalDeviceLimits> {
         let props = unsafe { instance.get_physical_device_properties(phys_dev) };
 
@@ -215,12 +237,12 @@ impl VulkanRenderer {
             "Picked Vulkan physical device: (name: {}, API version: {}.{}.{}, 
             driver version: {}.{}.{}, present queue: {}, graphics queue: {})",
             props.device_name_as_c_str()?.to_str()?,
-            vk::api_version_major(props.api_version), 
-            vk::api_version_minor(props.api_version), 
-            vk::api_version_patch(props.api_version), 
-            vk::api_version_major(props.driver_version), 
-            vk::api_version_minor(props.driver_version), 
-            vk::api_version_patch(props.driver_version), 
+            vk::api_version_major(props.api_version),
+            vk::api_version_minor(props.api_version),
+            vk::api_version_patch(props.api_version),
+            vk::api_version_major(props.driver_version),
+            vk::api_version_minor(props.driver_version),
+            vk::api_version_patch(props.driver_version),
             present_queue_family_idx,
             graphics_queue_family_idx
         );
@@ -239,9 +261,8 @@ impl VulkanRenderer {
         let mut present_queue_family_idx: isize = -1;
 
         for phys_dev in phys_devs {
-            let queue_family_props = unsafe { 
-                instance.get_physical_device_queue_family_properties(phys_dev) 
-            };
+            let queue_family_props =
+                unsafe { instance.get_physical_device_queue_family_properties(phys_dev) };
 
             for (queue_family_index, queue_family) in queue_family_props.iter().enumerate() {
                 if queue_family.queue_flags.contains(QueueFlags::GRAPHICS) {
@@ -251,38 +272,39 @@ impl VulkanRenderer {
                     surface_inst.get_physical_device_surface_support(
                         phys_dev,
                         queue_family_index as u32,
-                        *surface
+                        *surface,
                     )?
                 };
 
                 if device_supports_presentation {
-                    present_queue_family_idx = queue_family_index as isize; 
-                } 
+                    present_queue_family_idx = queue_family_index as isize;
+                }
             }
 
             if graphics_queue_family_idx >= 0 && present_queue_family_idx >= 0 {
-                let limits = Self::pick_phys_device(instance, 
-                    phys_dev, 
-                    present_queue_family_idx as u32, 
-                    graphics_queue_family_idx as u32)?;
+                let limits = Self::pick_phys_device(
+                    instance,
+                    phys_dev,
+                    present_queue_family_idx as u32,
+                    graphics_queue_family_idx as u32,
+                )?;
                 return Ok((
-                        graphics_queue_family_idx as u32, 
-                        present_queue_family_idx as u32, 
-                        phys_dev,
-                        limits
+                    graphics_queue_family_idx as u32,
+                    present_queue_family_idx as u32,
+                    phys_dev,
+                    limits,
                 ));
             }
-        } 
+        }
 
         anyhow::bail!(
             "None of your GPUs support all Vulkan features needed for 
             rendering in the application window. Either a physical device (GPU) 
-            queue for graphics or presentation is missing.");
+            queue for graphics or presentation is missing."
+        );
     }
 
-    fn string_vec_to_cstrings(
-        vec: &Vec<String> 
-    ) -> Vec<CString> {
+    fn string_vec_to_cstrings(vec: &[String]) -> Vec<CString> {
         vec.iter()
             .map(|s| CString::new(s.as_str()).expect("String contains Nullbyte"))
             .collect()
@@ -292,9 +314,8 @@ impl VulkanRenderer {
         instance: &ash::Instance,
         phys_dev: &vk::PhysicalDevice,
         present_queue_family_idx: u32,
-        graphics_queue_family_idx: u32
+        graphics_queue_family_idx: u32,
     ) -> anyhow::Result<(ash::Device, vk::Queue, vk::Queue)> {
-
         let queue_priority = [1.0_f32];
 
         let mut queues = Vec::new();
@@ -319,14 +340,12 @@ impl VulkanRenderer {
 
         let enabled_exts = Self::string_vec_to_cstrings(&enabled_exts_vec);
 
-        let enabled_exts_final: Vec<*const c_char> = enabled_exts 
-            .iter()
-            .map(|cs| cs.as_ptr())
-            .collect();
+        let enabled_exts_final: Vec<*const c_char> =
+            enabled_exts.iter().map(|cs| cs.as_ptr()).collect();
 
         let device_info = vk::DeviceCreateInfo {
             enabled_extension_count: enabled_exts_final.len() as u32,
-            pp_enabled_extension_names: enabled_exts_final.as_ptr(), 
+            pp_enabled_extension_names: enabled_exts_final.as_ptr(),
             p_queue_create_infos: queues.as_ptr(),
             queue_create_info_count: queues.len() as u32,
             ..Default::default()
@@ -334,27 +353,28 @@ impl VulkanRenderer {
 
         let logical_device = unsafe { instance.create_device(*phys_dev, &device_info, None)? };
 
-        let graphics_queue = unsafe {
-            logical_device.get_device_queue(graphics_queue_family_idx as u32, 0)
-        };
+        let graphics_queue =
+            unsafe { logical_device.get_device_queue(graphics_queue_family_idx, 0) };
 
-        let present_queue = unsafe {
-            logical_device.get_device_queue(present_queue_family_idx as u32, 0)
-        };
+        let present_queue = unsafe { logical_device.get_device_queue(present_queue_family_idx, 0) };
 
-        tracing::info!("Initialized Vulkan logical device (graphics queue index: {}, present queue index: {})",
-        graphics_queue_family_idx, present_queue_family_idx);
+        tracing::info!(
+            "Initialized Vulkan logical device (graphics queue index: {}, present queue index: {})",
+            graphics_queue_family_idx,
+            present_queue_family_idx
+        );
 
         Ok((logical_device, graphics_queue, present_queue))
     }
 
     fn get_ideal_swapchain_surface_fmt(
-        surface_fmts: &Vec<vk::SurfaceFormatKHR>
+        surface_fmts: &Vec<vk::SurfaceFormatKHR>,
     ) -> anyhow::Result<vk::SurfaceFormatKHR> {
         for fmt in surface_fmts {
-            if fmt.format == vk::Format::B8G8R8A8_UNORM && 
-                fmt.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR {
-                    return Ok(*fmt);
+            if fmt.format == vk::Format::B8G8R8A8_UNORM
+                && fmt.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+            {
+                return Ok(*fmt);
             }
         }
         if surface_fmts.is_empty() {
@@ -363,84 +383,73 @@ impl VulkanRenderer {
         Ok(surface_fmts[0])
     }
 
-    fn get_ideal_swapchain_present_mode(
-        modes: &Vec<vk::PresentModeKHR>
-    ) -> vk::PresentModeKHR {
+    fn get_ideal_swapchain_present_mode(modes: &Vec<vk::PresentModeKHR>) -> vk::PresentModeKHR {
         for mode in modes {
             if *mode == vk::PresentModeKHR::MAILBOX {
                 return *mode;
-            } 
+            }
         }
         vk::PresentModeKHR::FIFO
     }
 
-    fn get_swapchain_extent(
-        swap_info: &SwapchainInfo, 
-        width: u32, 
-        height: u32, 
-    ) -> Extent2D {
+    fn get_swapchain_extent(swap_info: &SwapchainInfo, width: u32, height: u32) -> Extent2D {
         if swap_info.capabilities.current_extent.width != u32::MAX {
             return swap_info.capabilities.current_extent;
         }
 
-        let mut extent = Extent2D {
-            width, height
-        };
+        let mut extent = Extent2D { width, height };
 
-        extent.width    = std::cmp::min(width, 
-            swap_info.capabilities.max_image_extent.width); 
-        extent.height   = std::cmp::min(height, 
-            swap_info.capabilities.max_image_extent.height); 
+        extent.width = std::cmp::min(width, swap_info.capabilities.max_image_extent.width);
+        extent.height = std::cmp::min(height, swap_info.capabilities.max_image_extent.height);
 
-        extent.width    = std::cmp::max(width, 
-            swap_info.capabilities.min_image_extent.width); 
-        extent.height   = std::cmp::max(height, 
-            swap_info.capabilities.min_image_extent.height); 
+        extent.width = std::cmp::max(width, swap_info.capabilities.min_image_extent.width);
+        extent.height = std::cmp::max(height, swap_info.capabilities.min_image_extent.height);
 
         extent
     }
 
     fn get_swapchain_info(
-        instance: &ash::Instance,
+        _instance: &ash::Instance,
         phys_dev: &vk::PhysicalDevice,
         surface_inst: &ash::khr::surface::Instance,
         surface: &vk::SurfaceKHR,
     ) -> anyhow::Result<SwapchainInfo> {
-        let capabilities    = unsafe { surface_inst.get_physical_device_surface_capabilities(*phys_dev, *surface)? };
-        let surface_fmts    = unsafe { surface_inst.get_physical_device_surface_formats(*phys_dev, *surface)? };
-        let present_modes   = unsafe { surface_inst.get_physical_device_surface_present_modes(*phys_dev, *surface)? };
+        let capabilities =
+            unsafe { surface_inst.get_physical_device_surface_capabilities(*phys_dev, *surface)? };
+        let surface_fmts =
+            unsafe { surface_inst.get_physical_device_surface_formats(*phys_dev, *surface)? };
+        let present_modes =
+            unsafe { surface_inst.get_physical_device_surface_present_modes(*phys_dev, *surface)? };
 
-        let ideal_present_mode  = Self::get_ideal_swapchain_present_mode(&present_modes);
-        let ideal_surface_fmt   = Self::get_ideal_swapchain_surface_fmt(&surface_fmts)?;
+        let ideal_present_mode = Self::get_ideal_swapchain_present_mode(&present_modes);
+        let ideal_surface_fmt = Self::get_ideal_swapchain_surface_fmt(&surface_fmts)?;
 
-        Ok(SwapchainInfo { 
-            present_modes, 
-            surface_fmts, 
+        Ok(SwapchainInfo {
             capabilities,
-            ideal_present_mode, 
-            ideal_surface_fmt, 
+            ideal_present_mode,
+            ideal_surface_fmt,
         })
     }
 
+    fn create_swapchain(mut args: SwapchainCreationArgs) -> anyhow::Result<()> {
+        let SwapchainCreationArgs {
+            instance,
+            ref mut swapchain,
+            swapchain_dev,
+            surface,
+            surface_inst,
+            logical_dev,
+            phys_dev,
+            width,
+            height,
+            graphics_queue_family_idx,
+            present_queue_family_idx,
+            log,
+        } = args;
 
-    fn create_swapchain(
-        instance: &ash::Instance,
-        swapchain: &mut Swapchain,
-        swapchain_dev: &ash::khr::swapchain::Device,
-
-        surface: &vk::SurfaceKHR,
-        surface_inst: &ash::khr::surface::Instance,
-
-        logical_dev: &ash::Device,
-        phys_dev: &vk::PhysicalDevice,
-        width: u32,
-        height: u32,
-
-        graphics_queue_family_idx: u32,
-        present_queue_family_idx: u32,
-        log: bool
-    ) -> anyhow::Result<()> {
-        if log { tracing::info!("Creating Vulkan swapchain..."); }
+        if log {
+            tracing::info!("Creating Vulkan swapchain...");
+        }
 
         for view in swapchain.img_views.drain(..) {
             unsafe {
@@ -454,30 +463,31 @@ impl VulkanRenderer {
             anyhow::bail!("No supported Vulkan surface format found.");
         }
 
-        let extent = Self::get_swapchain_extent(&swapchain.info, 
-            width, height);
+        let extent = Self::get_swapchain_extent(&swapchain.info, width, height);
 
-        let mut img_count = swapchain.img_count.max(swapchain.info.capabilities.min_image_count);
+        let mut img_count = swapchain
+            .img_count
+            .max(swapchain.info.capabilities.min_image_count);
 
         if swapchain.info.capabilities.max_image_count > 0 {
             img_count = img_count.min(swapchain.info.capabilities.max_image_count);
         }
 
-        let old_swapchain = swapchain.handle; 
+        let old_swapchain = swapchain.handle;
 
         let mut create_info = vk::SwapchainCreateInfoKHR {
             surface: *surface,
             min_image_count: img_count,
             image_format: swapchain.info.ideal_surface_fmt.format,
-            image_color_space:   swapchain.info.ideal_surface_fmt.color_space,
+            image_color_space: swapchain.info.ideal_surface_fmt.color_space,
             image_array_layers: 1,
-            image_usage:  vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST,
-            image_extent : extent, 
+            image_usage: vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST,
+            image_extent: extent,
             pre_transform: swapchain.info.capabilities.current_transform,
             composite_alpha: vk::CompositeAlphaFlagsKHR::OPAQUE,
             present_mode: swapchain.info.ideal_present_mode,
-            clipped: vk::TRUE, 
-            old_swapchain, 
+            clipped: vk::TRUE,
+            old_swapchain,
             ..Default::default()
         };
 
@@ -493,8 +503,7 @@ impl VulkanRenderer {
             create_info.p_queue_family_indices = std::ptr::null();
         }
 
-        let swapchain_handle = unsafe { swapchain_dev.create_swapchain(
-            &create_info, None)? };
+        let swapchain_handle = unsafe { swapchain_dev.create_swapchain(&create_info, None)? };
 
         if old_swapchain != vk::SwapchainKHR::null() {
             unsafe {
@@ -509,7 +518,9 @@ impl VulkanRenderer {
         swapchain.img_views.reserve(images.len());
 
         swapchain.imgs_in_flight.clear();
-        swapchain.imgs_in_flight.resize(images.len(), vk::Fence::null());
+        swapchain
+            .imgs_in_flight
+            .resize(images.len(), vk::Fence::null());
 
         swapchain.extent = extent;
 
@@ -517,17 +528,17 @@ impl VulkanRenderer {
 
         for &image in swapchain.images.iter() {
             let image_view_info = ImageViewCreateInfo {
-                image, 
+                image,
                 view_type: vk::ImageViewType::TYPE_2D,
                 format: swapchain.info.ideal_surface_fmt.format,
-                components: vk::ComponentMapping { 
+                components: vk::ComponentMapping {
                     r: vk::ComponentSwizzle::IDENTITY,
                     g: vk::ComponentSwizzle::IDENTITY,
                     b: vk::ComponentSwizzle::IDENTITY,
                     a: vk::ComponentSwizzle::IDENTITY,
-                }, 
-                subresource_range: vk::ImageSubresourceRange { 
-                    aspect_mask: vk::ImageAspectFlags::COLOR, 
+                },
+                subresource_range: vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
                     base_mip_level: 0,
                     level_count: 1,
                     base_array_layer: 0,
@@ -541,20 +552,20 @@ impl VulkanRenderer {
                 Err(err) => {
                     return Err(err.into());
                 }
-            }; 
+            };
 
             swapchain.img_views.push(img_view);
         }
 
-        if log { tracing::info!(
-            "Initialized Vulkan swapchain (width: {}, height: {})",
-            extent.width,
-            extent.height
-        );
+        if log {
+            tracing::info!(
+                "Initialized Vulkan swapchain (width: {}, height: {})",
+                extent.width,
+                extent.height
+            );
         }
 
         Ok(())
-
     }
 
     fn allocator(&self) -> anyhow::Result<&vk_mem::Allocator> {
@@ -563,9 +574,7 @@ impl VulkanRenderer {
             .ok_or_else(|| anyhow::anyhow!("Vulkan allocator already destroyed"))
     }
 
-    fn handle_resize(
-        &mut self
-    ) -> anyhow::Result<()> {
+    fn handle_resize(&mut self) -> anyhow::Result<()> {
         if !self.pending_resize.pending {
             return Ok(());
         }
@@ -594,59 +603,53 @@ impl VulkanRenderer {
             ..
         } = self;
 
-            Self::create_swapchain(
+        Self::create_swapchain(SwapchainCreationArgs {
             instance,
             swapchain,
             swapchain_dev,
             surface,
             surface_inst,
-            logical_device,
+            logical_dev: logical_device,
             phys_dev,
-            pending_resize.width,
-            pending_resize.height,
-            *graphics_queue_family_idx,
-            *present_queue_family_idx,
-            !IS_RELEASE_BUILD
-        )?;
+            width: pending_resize.width,
+            height: pending_resize.height,
+            graphics_queue_family_idx: *graphics_queue_family_idx,
+            present_queue_family_idx: *present_queue_family_idx,
+            log: !IS_RELEASE_BUILD,
+        })?;
 
         self.frameloop.fbs.reserve(self.swapchain.images.len());
 
-        for (i, &img_view) in self.swapchain
-            .img_views.iter().enumerate() {
-                let attachments = [
-                    img_view,
-                ];
+        for (i, &img_view) in self.swapchain.img_views.iter().enumerate() {
+            let attachments = [img_view];
 
-                let fb_info = vk::FramebufferCreateInfo {
-                    render_pass: self.frameloop.crnt_pass,
-                    attachment_count: attachments.len() as u32,
-                    p_attachments: attachments.as_ptr(),
-                    width: self.swapchain.extent.width,
-                    height: self.swapchain.extent.height,
-                    layers: 1,
-                    ..Default::default()
-                };
+            let fb_info = vk::FramebufferCreateInfo {
+                render_pass: self.frameloop.crnt_pass,
+                attachment_count: attachments.len() as u32,
+                p_attachments: attachments.as_ptr(),
+                width: self.swapchain.extent.width,
+                height: self.swapchain.extent.height,
+                layers: 1,
+                ..Default::default()
+            };
 
-                let framebuffer = unsafe {
-                    self.logical_device.create_framebuffer(&fb_info, None)?
-                };
+            let framebuffer = unsafe { self.logical_device.create_framebuffer(&fb_info, None)? };
 
-                self.frameloop.fbs.push(framebuffer);
+            self.frameloop.fbs.push(framebuffer);
 
-                if !IS_RELEASE_BUILD { tracing::info!(
+            if !IS_RELEASE_BUILD {
+                tracing::info!(
                     "Initialized Vulkan frameloop framebuffer for swapchain image view {}",
                     i
                 );
-                }
             }
+        }
 
         for frame in &mut self.frameloop.frames {
             unsafe {
-                self.logical_device.reset_command_pool(
-                    frame.cmd_pool,
-                    vk::CommandPoolResetFlags::empty(),
-                )?;
-                }
+                self.logical_device
+                    .reset_command_pool(frame.cmd_pool, vk::CommandPoolResetFlags::empty())?;
+            }
 
             let sem_info = vk::SemaphoreCreateInfo {
                 ..Default::default()
@@ -654,7 +657,8 @@ impl VulkanRenderer {
 
             if frame.image_available != vk::Semaphore::null() {
                 unsafe {
-                    self.logical_device.destroy_semaphore(frame.image_available, None);
+                    self.logical_device
+                        .destroy_semaphore(frame.image_available, None);
                 }
 
                 frame.image_available = vk::Semaphore::null();
@@ -666,32 +670,33 @@ impl VulkanRenderer {
                 }
             }
 
-            frame.image_available = unsafe {
-                self.logical_device.create_semaphore(&sem_info, None)?
-            };
+            frame.image_available =
+                unsafe { self.logical_device.create_semaphore(&sem_info, None)? };
 
             frame
                 .render_finished_per_image
                 .reserve(self.swapchain.images.len());
 
             for _ in 0..self.swapchain.images.len() {
-                let sem = unsafe {
-                    self.logical_device.create_semaphore(&sem_info, None)?
-                };
+                let sem = unsafe { self.logical_device.create_semaphore(&sem_info, None)? };
 
                 frame.render_finished_per_image.push(sem);
             }
         }
 
-        self.width  = self.pending_resize.width;
+        self.width = self.pending_resize.width;
         self.height = self.pending_resize.height;
 
         self.pending_resize.pending = false;
-        self.frameloop.frame_idx    = 0;
-        self.swapchain.image_idx    = 0;
+        self.frameloop.frame_idx = 0;
+        self.swapchain.image_idx = 0;
 
         if !IS_RELEASE_BUILD {
-            tracing::info!("Resized render viewport of application window: {}x{}px.", self.width, self.height);
+            tracing::info!(
+                "Resized render viewport of application window: {}x{}px.",
+                self.width,
+                self.height
+            );
         }
 
         Ok(())
@@ -701,7 +706,7 @@ impl VulkanRenderer {
         frameloop: &mut Frameloop,
         swapchain: &Swapchain,
         logical_dev: &ash::Device,
-        graphics_queue_family_idx: u32
+        graphics_queue_family_idx: u32,
     ) -> anyhow::Result<()> {
         tracing::info!("Creating Vulkan frameloop...");
         let pool_create_info = vk::CommandPoolCreateInfo {
@@ -711,9 +716,7 @@ impl VulkanRenderer {
         };
 
         for (i, frame) in frameloop.frames.iter_mut().enumerate() {
-            frame.cmd_pool = unsafe {
-                logical_dev.create_command_pool(&pool_create_info, None)?
-            };
+            frame.cmd_pool = unsafe { logical_dev.create_command_pool(&pool_create_info, None)? };
 
             let buf_info = vk::CommandBufferAllocateInfo {
                 command_pool: frame.cmd_pool,
@@ -722,28 +725,24 @@ impl VulkanRenderer {
                 ..Default::default()
             };
 
-            let cmd_buffers = unsafe {
-                logical_dev.allocate_command_buffers(&buf_info)?
-            };
+            let cmd_buffers = unsafe { logical_dev.allocate_command_buffers(&buf_info)? };
 
-            frame.cmd_buf = *cmd_buffers
-                .first()
-                .ok_or_else(|| anyhow::anyhow!("vkAllocateCommandBuffers returned no command buffers"))?;
+            frame.cmd_buf = *cmd_buffers.first().ok_or_else(|| {
+                anyhow::anyhow!("vkAllocateCommandBuffers returned no command buffers")
+            })?;
 
             let sem_info = vk::SemaphoreCreateInfo {
                 ..Default::default()
             };
 
-            frame.image_available = unsafe {
-                logical_dev.create_semaphore(&sem_info, None)?
-            };
+            frame.image_available = unsafe { logical_dev.create_semaphore(&sem_info, None)? };
 
-            frame.render_finished_per_image.reserve(swapchain.images.len());
+            frame
+                .render_finished_per_image
+                .reserve(swapchain.images.len());
 
             for _ in 0..swapchain.images.len() {
-                let sem = unsafe {
-                    logical_dev.create_semaphore(&sem_info, None)?
-                };
+                let sem = unsafe { logical_dev.create_semaphore(&sem_info, None)? };
 
                 frame.render_finished_per_image.push(sem);
             }
@@ -753,14 +752,9 @@ impl VulkanRenderer {
                 ..Default::default()
             };
 
-            frame.in_flight_fence = unsafe {
-                logical_dev.create_fence(&fence_info, None)?
-            };
+            frame.in_flight_fence = unsafe { logical_dev.create_fence(&fence_info, None)? };
 
-            tracing::info!(
-                "Initialized Vulkan frameloop frame data for frame {}",
-                i
-            );
+            tracing::info!("Initialized Vulkan frameloop frame data for frame {}", i);
         }
 
         frameloop.frame_idx = 0;
@@ -786,7 +780,6 @@ impl VulkanRenderer {
             layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
         };
 
-
         let color_references = [color_reference];
 
         let subpass = vk::SubpassDescription {
@@ -803,18 +796,16 @@ impl VulkanRenderer {
             src_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
                 | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
 
-                dst_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
-                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+            dst_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
 
-                    src_access_mask: vk::AccessFlags::empty(),
-                    dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            src_access_mask: vk::AccessFlags::empty(),
+            dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
 
-                    ..Default::default()
+            ..Default::default()
         };
 
-        let attachments = [
-            color_attachment,
-        ];
+        let attachments = [color_attachment];
 
         let subpasses = [subpass];
         let dependencies = [dep];
@@ -832,46 +823,36 @@ impl VulkanRenderer {
             ..Default::default()
         };
 
-        frameloop.crnt_pass = unsafe {
-            logical_dev.create_render_pass(&pass_info, None)?
-        };
+        frameloop.crnt_pass = unsafe { logical_dev.create_render_pass(&pass_info, None)? };
 
         frameloop.fbs.clear();
         frameloop.fbs.reserve(swapchain.images.len());
 
-        for (i, &img_view) in swapchain
-            .img_views
-                .iter()
-                .enumerate()
-                {
-                    let fb_attachments = [
-                        img_view,
-                    ];
+        for (i, &img_view) in swapchain.img_views.iter().enumerate() {
+            let fb_attachments = [img_view];
 
-                    let fb_info = vk::FramebufferCreateInfo {
-                        render_pass: frameloop.crnt_pass,
+            let fb_info = vk::FramebufferCreateInfo {
+                render_pass: frameloop.crnt_pass,
 
-                        attachment_count: fb_attachments.len() as u32,
-                        p_attachments: fb_attachments.as_ptr(),
+                attachment_count: fb_attachments.len() as u32,
+                p_attachments: fb_attachments.as_ptr(),
 
-                        width: swapchain.extent.width,
-                        height: swapchain.extent.height,
-                        layers: 1,
+                width: swapchain.extent.width,
+                height: swapchain.extent.height,
+                layers: 1,
 
-                        ..Default::default()
-                    };
+                ..Default::default()
+            };
 
-                    let framebuffer = unsafe {
-                        logical_dev.create_framebuffer(&fb_info, None)?
-                    };
+            let framebuffer = unsafe { logical_dev.create_framebuffer(&fb_info, None)? };
 
-                    frameloop.fbs.push(framebuffer);
+            frameloop.fbs.push(framebuffer);
 
-                    tracing::info!(
-                        "Initialized Vulkan frameloop framebuffer for swapchain image view {}",
-                        i
-                    );
-                }
+            tracing::info!(
+                "Initialized Vulkan frameloop framebuffer for swapchain image view {}",
+                i
+            );
+        }
 
         tracing::info!("Initialized Vulkan frameloop.");
 
@@ -888,9 +869,7 @@ impl VulkanRenderer {
             ..Default::default()
         };
 
-        let cmd_pool = unsafe {
-            logical_dev.create_command_pool(&pool_info, None)?
-        };
+        let cmd_pool = unsafe { logical_dev.create_command_pool(&pool_info, None)? };
 
         let buf_info = vk::CommandBufferAllocateInfo {
             command_pool: cmd_pool,
@@ -912,9 +891,7 @@ impl VulkanRenderer {
             ..Default::default()
         };
 
-        let fence = unsafe {
-            logical_dev.create_fence(&fence_info, None)?
-        };
+        let fence = unsafe { logical_dev.create_fence(&fence_info, None)? };
 
         Ok(UploadContext {
             cmd_pool,
@@ -923,19 +900,20 @@ impl VulkanRenderer {
         })
     }
 
-    fn destroy_upload_context(
-        logical_dev: &ash::Device,
-        upload: &mut UploadContext,
-    ) {
+    fn destroy_upload_context(logical_dev: &ash::Device, upload: &mut UploadContext) {
         if upload.fence != vk::Fence::null() {
-            unsafe { logical_dev.destroy_fence(upload.fence, None); } 
+            unsafe {
+                logical_dev.destroy_fence(upload.fence, None);
+            }
             upload.fence = vk::Fence::null();
         }
 
         if upload.cmd_pool != vk::CommandPool::null() {
             // No need to free upload.cmd_buf manually.
             // Destroying the command pool frees command buffers from it.
-            unsafe { logical_dev.destroy_command_pool(upload.cmd_pool, None); }
+            unsafe {
+                logical_dev.destroy_command_pool(upload.cmd_pool, None);
+            }
             upload.cmd_pool = vk::CommandPool::null();
             upload.cmd_buf = vk::CommandBuffer::null();
         }
@@ -955,7 +933,7 @@ impl VulkanRenderer {
                 allocator.destroy_buffer(buffer.raw, &mut buffer.alloc);
             }
         }
-    } 
+    }
 
     fn destroy_all_textures(&mut self) {
         let Some(allocator) = self.allocator.as_ref() else {
@@ -985,9 +963,9 @@ impl VulkanRenderer {
                 self.logical_device.destroy_image_view(view, None);
             }
 
-
             if self.swapchain.handle != vk::SwapchainKHR::null() {
-                self.swapchain_dev.destroy_swapchain(self.swapchain.handle, None);
+                self.swapchain_dev
+                    .destroy_swapchain(self.swapchain.handle, None);
                 self.swapchain.handle = vk::SwapchainKHR::null();
             }
         }
@@ -1059,16 +1037,18 @@ impl VulkanRenderer {
         }
     }
 
-    pub fn new(platform: &Platform) -> anyhow::Result<Self> { 
+    pub fn new(platform: &Platform) -> anyhow::Result<Self> {
         tracing::info!("Using Vulkan rendering backend");
 
         let entry = Entry::linked();
 
-        let (have_vulkan, 
+        let (
+            have_vulkan,
             have_ext_vk_khr_surface,
             have_ext_vk_khr_xcb_surface,
             have_ext_vk_khr_xlib_surface,
-            have_ext_vk_khr_wayland_surface) = Self::check_exts(&entry)?;
+            have_ext_vk_khr_wayland_surface,
+        ) = Self::check_exts(&entry)?;
 
         if !have_vulkan {
             anyhow::bail!("Vulkan rendering is not supported on your device.");
@@ -1077,23 +1057,27 @@ impl VulkanRenderer {
         tracing::info!("Required Vulkan extensions have been satisfied.");
 
         if !have_ext_vk_khr_surface {
-            anyhow::bail!("VK_KHR_surface extension not supported, cannot create application window.");
+            anyhow::bail!(
+                "VK_KHR_surface extension not supported, cannot create application window."
+            );
         }
 
         let mut required_exts = Vec::new();
         required_exts.push(CString::new("VK_KHR_surface")?);
 
         match platform {
-            Platform::X11(_)  => {
+            Platform::X11(_) => {
                 if have_ext_vk_khr_xcb_surface {
                     required_exts.push(CString::new("VK_KHR_xcb_surface")?);
                 } else if have_ext_vk_khr_xlib_surface {
                     required_exts.push(CString::new("VK_KHR_xlib_surface")?);
                 } else {
-                    anyhow::bail!("Neither VK_KHR_xcb_surface nor VK_KHR_xlib_surface is supported.");
+                    anyhow::bail!(
+                        "Neither VK_KHR_xcb_surface nor VK_KHR_xlib_surface is supported."
+                    );
                 }
             }
-            Platform::Wayland(_)  => {
+            Platform::Wayland(_) => {
                 if !have_ext_vk_khr_wayland_surface {
                     anyhow::bail!("VK_KHR_wayland_surface is not supported.");
                 }
@@ -1107,10 +1091,8 @@ impl VulkanRenderer {
             ..Default::default()
         };
 
-        let pp_enabled_extension_names: Vec<*const i8> = required_exts 
-            .iter()
-            .map(|c_str| c_str.as_ptr() as *const i8)
-            .collect();
+        let pp_enabled_extension_names: Vec<*const i8> =
+            required_exts.iter().map(|c_str| c_str.as_ptr()).collect();
 
         let layer_names: Vec<std::ffi::CString> =
             vec![std::ffi::CString::new("VK_LAYER_KHRONOS_validation").unwrap()];
@@ -1122,12 +1104,11 @@ impl VulkanRenderer {
 
         let create_info = vk::InstanceCreateInfo {
             enabled_extension_count: required_exts.len() as u32,
-            pp_enabled_extension_names: 
-                pp_enabled_extension_names.as_ptr(),
-                pp_enabled_layer_names: layer_name_pointers.as_ptr(),
-                enabled_layer_count: layer_name_pointers.len() as u32,
-                p_application_info: &app_info,
-                ..Default::default()
+            pp_enabled_extension_names: pp_enabled_extension_names.as_ptr(),
+            pp_enabled_layer_names: layer_name_pointers.as_ptr(),
+            enabled_layer_count: layer_name_pointers.len() as u32,
+            p_application_info: &app_info,
+            ..Default::default()
         };
 
         let instance = unsafe { entry.create_instance(&create_info, None)? };
@@ -1146,26 +1127,30 @@ impl VulkanRenderer {
         let (graphics_queue_family_idx, present_queue_family_idx, phys_dev, phys_dev_limits) =
             Self::pick_phys_device_and_device_queues(&instance, &surface_inst, &surface)?;
 
-        let (logical_device, graphics_queue, present_queue) = 
-            Self::create_logical_device(
-                &instance, &phys_dev, 
-                present_queue_family_idx, 
-                graphics_queue_family_idx)?;
+        let (logical_device, graphics_queue, present_queue) = Self::create_logical_device(
+            &instance,
+            &phys_dev,
+            present_queue_family_idx,
+            graphics_queue_family_idx,
+        )?;
 
-        let allocator   = unsafe { vk_mem::Allocator::new(
-            vk_mem::AllocatorCreateInfo::new(
-                &instance, 
-                &logical_device, phys_dev))? 
+        let allocator = unsafe {
+            vk_mem::Allocator::new(vk_mem::AllocatorCreateInfo::new(
+                &instance,
+                &logical_device,
+                phys_dev,
+            ))?
         };
-        let upload_ctx  = Self::create_upload_context(&logical_device, 
-            graphics_queue_family_idx)?;
-        let staging_buf = Self::create_vk_buffer_raw(&allocator, 
-            BufferDesc { 
-                target: BufferTarget::Unspecified, 
+        let upload_ctx = Self::create_upload_context(&logical_device, graphics_queue_family_idx)?;
+        let staging_buf = Self::create_vk_buffer_raw(
+            &allocator,
+            BufferDesc {
+                target: BufferTarget::Unspecified,
                 usage: BufferUsage::Staging,
                 size: MAX_STAGING_RING_MEM as usize,
                 data: None,
-            })?;
+            },
+        )?;
 
         let mut initial_buffers = Vec::new();
         let staging_handle = BufferHandle(initial_buffers.len() as u32);
@@ -1174,32 +1159,37 @@ impl VulkanRenderer {
         let staging_ring = StagingRing {
             cap: MAX_STAGING_RING_MEM,
             head: 0,
-            buf: staging_handle 
+            buf: staging_handle,
         };
 
-        let mut swapchain  = Swapchain::default();
-        let swapchain_dev = ash::khr::swapchain::Device::new(&instance, 
-            &logical_device);
+        let mut swapchain = Swapchain::default();
+        let swapchain_dev = ash::khr::swapchain::Device::new(&instance, &logical_device);
 
         let (width, height) = platform.size();
 
-        Self::create_swapchain(&instance, 
-            &mut swapchain, 
-            &swapchain_dev, 
-            &surface, 
-            &surface_inst, 
-            &logical_device, 
-            &phys_dev, 
+        Self::create_swapchain(SwapchainCreationArgs {
+            instance: &instance,
+            swapchain: &mut swapchain,
+            swapchain_dev: &swapchain_dev,
+            surface: &surface,
+            surface_inst: &surface_inst,
+            logical_dev: &logical_device,
+            phys_dev: &phys_dev,
             width,
             height,
             graphics_queue_family_idx,
             present_queue_family_idx,
-            true)?;
+            log: true,
+        })?;
 
         let mut frameloop = Frameloop::default();
 
-        Self::create_frameloop(&mut frameloop, &swapchain, 
-            &logical_device, graphics_queue_family_idx)?;
+        Self::create_frameloop(
+            &mut frameloop,
+            &swapchain,
+            &logical_device,
+            graphics_queue_family_idx,
+        )?;
 
         Ok(Self {
             instance,
@@ -1214,8 +1204,8 @@ impl VulkanRenderer {
             graphics_queue,
             present_queue,
 
-            graphics_queue_family_idx: graphics_queue_family_idx, 
-            present_queue_family_idx: present_queue_family_idx, 
+            graphics_queue_family_idx,
+            present_queue_family_idx,
 
             swapchain,
             swapchain_dev,
@@ -1231,8 +1221,8 @@ impl VulkanRenderer {
 
             clear_color: [0.0, 0.0, 0.0, 1.0],
 
-            buffers: initial_buffers, 
-            textures: Vec::new(), 
+            buffers: initial_buffers,
+            textures: Vec::new(),
             pipelines: Vec::new(),
 
             staging_ring,
@@ -1244,12 +1234,11 @@ impl VulkanRenderer {
             current_textures: [None; MAX_TEXTURE_SLOTS],
 
             frame_phase: FramePhase::Idle,
-            texture_descriptor_cache: HashMap::new()
+            texture_descriptor_cache: HashMap::new(),
         })
     }
 
     fn vk_buffer_usage_from_desc(desc: &BufferDesc) -> vk::BufferUsageFlags {
-
         let mut usage = vk::BufferUsageFlags::empty();
 
         match desc.target {
@@ -1262,10 +1251,6 @@ impl VulkanRenderer {
             BufferTarget::Index => {
                 usage |= vk::BufferUsageFlags::INDEX_BUFFER;
             }
-
-            BufferTarget::Uniform => {
-                usage |= vk::BufferUsageFlags::UNIFORM_BUFFER;
-            }
         }
 
         match desc.usage {
@@ -1273,7 +1258,7 @@ impl VulkanRenderer {
                 usage |= vk::BufferUsageFlags::TRANSFER_DST;
             }
 
-            BufferUsage::Dynamic | BufferUsage::Stream => {
+            BufferUsage::Dynamic => {
                 // Mapped CPU-visible buffer.
             }
 
@@ -1288,12 +1273,13 @@ impl VulkanRenderer {
     fn vk_texture_format(format: TextureFormat) -> vk::Format {
         match format {
             TextureFormat::Rgba8 => vk::Format::R8G8B8A8_UNORM,
-            TextureFormat::Alpha8 => vk::Format::R8_UNORM,
         }
     }
 
     fn create_vk_buffer_raw(
-        allocator: &vk_mem::Allocator, desc: BufferDesc) -> anyhow::Result<VulkanBuffer> {
+        allocator: &vk_mem::Allocator,
+        desc: BufferDesc,
+    ) -> anyhow::Result<VulkanBuffer> {
         let mut vk_usage = Self::vk_buffer_usage_from_desc(&desc);
         let mut mem_props = vk::MemoryPropertyFlags::empty();
 
@@ -1308,10 +1294,10 @@ impl VulkanRenderer {
                 mem_props |= vk::MemoryPropertyFlags::DEVICE_LOCAL;
             }
 
-            BufferUsage::Dynamic | BufferUsage::Stream => {
-                // CPU-visible buffer. 
-                mem_props |= vk::MemoryPropertyFlags::HOST_VISIBLE
-                    | vk::MemoryPropertyFlags::HOST_COHERENT;
+            BufferUsage::Dynamic => {
+                // CPU-visible buffer.
+                mem_props |=
+                    vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
 
                 want_mapping = true;
 
@@ -1323,8 +1309,8 @@ impl VulkanRenderer {
                 // CPU-written upload buffer.
                 vk_usage |= vk::BufferUsageFlags::TRANSFER_SRC;
 
-                mem_props |= vk::MemoryPropertyFlags::HOST_VISIBLE
-                    | vk::MemoryPropertyFlags::HOST_COHERENT;
+                mem_props |=
+                    vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
 
                 want_mapping = true;
 
@@ -1355,7 +1341,7 @@ impl VulkanRenderer {
 
         let mapped = if want_mapping {
             let info = allocator.get_allocation_info(&alloc);
-            Some(info.mapped_data as *mut c_void)
+            Some(info.mapped_data)
         } else {
             None
         };
@@ -1373,9 +1359,6 @@ impl VulkanRenderer {
             alloc,
             size: desc.size,
             target: desc.target,
-            usage: desc.usage,
-            vk_usage,
-            mem_props,
             mapped,
         })
     }
@@ -1409,7 +1392,7 @@ impl VulkanRenderer {
                 target,
                 usage: BufferUsage::Static,
                 size: data.len(),
-                data: Some(data)
+                data: Some(data),
             },
         )?;
 
@@ -1443,7 +1426,7 @@ impl VulkanRenderer {
         }
 
         Ok(())
-    } 
+    }
 
     fn upload_into_device_local_buffer(
         &mut self,
@@ -1463,19 +1446,14 @@ impl VulkanRenderer {
         let device = &self.logical_device;
 
         // Wait until the upload context is free.
-        unsafe { device.wait_for_fences(
-            &[self.upload_ctx.fence],
-            true,
-            u64::MAX,
-        )?;
+        unsafe {
+            device.wait_for_fences(&[self.upload_ctx.fence], true, u64::MAX)?;
         }
 
         unsafe {
             device.reset_fences(&[self.upload_ctx.fence])?;
-            device.reset_command_pool(
-                self.upload_ctx.cmd_pool,
-                vk::CommandPoolResetFlags::empty(),
-            )?;
+            device
+                .reset_command_pool(self.upload_ctx.cmd_pool, vk::CommandPoolResetFlags::empty())?;
         }
 
         let begin_info = vk::CommandBufferBeginInfo {
@@ -1513,11 +1491,12 @@ impl VulkanRenderer {
             dst.raw
         };
 
-        unsafe { std::ptr::copy_nonoverlapping(
-            data.as_ptr(),
-            (staging_mapped as *mut u8).add(staging_offset as usize),
-            data.len(),
-        );
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                data.as_ptr(),
+                (staging_mapped as *mut u8).add(staging_offset as usize),
+                data.len(),
+            );
         }
 
         let copy = vk::BufferCopy {
@@ -1526,16 +1505,11 @@ impl VulkanRenderer {
             size,
         };
 
-        unsafe { device.cmd_copy_buffer(
-            self.upload_ctx.cmd_buf,
-            staging_raw,
-            dst_raw,
-            &[copy],
-        );
+        unsafe {
+            device.cmd_copy_buffer(self.upload_ctx.cmd_buf, staging_raw, dst_raw, &[copy]);
         }
 
-        let (dst_stage_mask, dst_access_mask) = 
-            Self::buffer_target_barrier_dst(target)?;
+        let (dst_stage_mask, dst_access_mask) = Self::buffer_target_barrier_dst(target)?;
 
         let barrier = vk::BufferMemoryBarrier {
             src_access_mask: vk::AccessFlags::TRANSFER_WRITE,
@@ -1548,18 +1522,21 @@ impl VulkanRenderer {
             ..Default::default()
         };
 
-        unsafe { device.cmd_pipeline_barrier(
-            self.upload_ctx.cmd_buf,
-            vk::PipelineStageFlags::TRANSFER,
-            dst_stage_mask,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[barrier],
-            &[],
-        );
+        unsafe {
+            device.cmd_pipeline_barrier(
+                self.upload_ctx.cmd_buf,
+                vk::PipelineStageFlags::TRANSFER,
+                dst_stage_mask,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[barrier],
+                &[],
+            );
         }
 
-        unsafe { device.end_command_buffer(self.upload_ctx.cmd_buf)?; }
+        unsafe {
+            device.end_command_buffer(self.upload_ctx.cmd_buf)?;
+        }
 
         let cmd_bufs = [self.upload_ctx.cmd_buf];
 
@@ -1569,18 +1546,12 @@ impl VulkanRenderer {
             ..Default::default()
         };
 
-        unsafe { device.queue_submit(
-            self.graphics_queue,
-            &[submit_info],
-            self.upload_ctx.fence,
-        )?;
+        unsafe {
+            device.queue_submit(self.graphics_queue, &[submit_info], self.upload_ctx.fence)?;
         }
 
-        unsafe { device.wait_for_fences(
-            &[self.upload_ctx.fence],
-            true,
-            u64::MAX,
-        )?;
+        unsafe {
+            device.wait_for_fences(&[self.upload_ctx.fence], true, u64::MAX)?;
         }
 
         Ok(())
@@ -1590,18 +1561,13 @@ impl VulkanRenderer {
     ) -> anyhow::Result<(vk::PipelineStageFlags, vk::AccessFlags)> {
         match target {
             BufferTarget::Vertex => Ok((
-                    vk::PipelineStageFlags::VERTEX_INPUT,
-                    vk::AccessFlags::VERTEX_ATTRIBUTE_READ,
+                vk::PipelineStageFlags::VERTEX_INPUT,
+                vk::AccessFlags::VERTEX_ATTRIBUTE_READ,
             )),
 
             BufferTarget::Index => Ok((
-                    vk::PipelineStageFlags::VERTEX_INPUT,
-                    vk::AccessFlags::INDEX_READ,
-            )),
-
-            BufferTarget::Uniform => Ok((
-                    vk::PipelineStageFlags::VERTEX_SHADER | vk::PipelineStageFlags::FRAGMENT_SHADER,
-                    vk::AccessFlags::UNIFORM_READ,
+                vk::PipelineStageFlags::VERTEX_INPUT,
+                vk::AccessFlags::INDEX_READ,
             )),
 
             BufferTarget::Unspecified => {
@@ -1653,8 +1619,8 @@ impl VulkanRenderer {
     }
 
     fn resize(&mut self, width: u32, height: u32) {
-        self.pending_resize.width   = width;
-        self.pending_resize.height  = height;
+        self.pending_resize.width = width;
+        self.pending_resize.height = height;
         self.pending_resize.pending = true;
     }
 
@@ -1670,11 +1636,8 @@ impl VulkanRenderer {
         let frame = &mut self.frameloop.frames[self.frameloop.frame_idx];
 
         unsafe {
-            self.logical_device.wait_for_fences(
-                &[frame.in_flight_fence],
-                true,
-                u64::MAX,
-            )?;
+            self.logical_device
+                .wait_for_fences(&[frame.in_flight_fence], true, u64::MAX)?;
         }
 
         let acquire_res = unsafe {
@@ -1718,10 +1681,8 @@ impl VulkanRenderer {
         unsafe {
             self.logical_device.reset_fences(&[frame.in_flight_fence])?;
 
-            self.logical_device.reset_command_pool(
-                frame.cmd_pool,
-                vk::CommandPoolResetFlags::empty(),
-            )?;
+            self.logical_device
+                .reset_command_pool(frame.cmd_pool, vk::CommandPoolResetFlags::empty())?;
         }
 
         let begin_info = vk::CommandBufferBeginInfo {
@@ -1730,7 +1691,8 @@ impl VulkanRenderer {
         };
 
         unsafe {
-            self.logical_device.begin_command_buffer(frame.cmd_buf, &begin_info)?;
+            self.logical_device
+                .begin_command_buffer(frame.cmd_buf, &begin_info)?;
         }
 
         self.frame_phase = FramePhase::RecordingUploads;
@@ -1754,13 +1716,11 @@ impl VulkanRenderer {
         let image_idx = self.swapchain.image_idx;
         let frame = &self.frameloop.frames[frame_idx];
 
-        let clear_values = [
-            vk::ClearValue {
-                color: vk::ClearColorValue {
-                    float32: self.clear_color,
-                },
+        let clear_values = [vk::ClearValue {
+            color: vk::ClearColorValue {
+                float32: self.clear_color,
             },
-        ];
+        }];
 
         let render_area = vk::Rect2D {
             offset: vk::Offset2D { x: 0, y: 0 },
@@ -1807,7 +1767,6 @@ impl VulkanRenderer {
             anyhow::bail!("end_frame called without active render pass");
         }
 
-
         let frame_idx = self.frameloop.frame_idx;
         let image_idx = self.swapchain.image_idx;
 
@@ -1820,21 +1779,13 @@ impl VulkanRenderer {
 
         let wait_stage = vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT;
 
-        let wait_semaphores = [
-            frame.image_available,
-        ];
+        let wait_semaphores = [frame.image_available];
 
-        let wait_stages = [
-            wait_stage,
-        ];
+        let wait_stages = [wait_stage];
 
-        let command_buffers = [
-            frame.cmd_buf,
-        ];
+        let command_buffers = [frame.cmd_buf];
 
-        let signal_semaphores = [
-            frame.render_finished_per_image[image_idx],
-        ];
+        let signal_semaphores = [frame.render_finished_per_image[image_idx]];
 
         let submit_info = vk::SubmitInfo {
             wait_semaphore_count: wait_semaphores.len() as u32,
@@ -1859,13 +1810,9 @@ impl VulkanRenderer {
             )?;
         }
 
-        let swapchains = [
-            self.swapchain.handle,
-        ];
+        let swapchains = [self.swapchain.handle];
 
-        let image_indices = [
-            image_idx as u32,
-        ];
+        let image_indices = [image_idx as u32];
 
         let present_info = vk::PresentInfoKHR {
             wait_semaphore_count: signal_semaphores.len() as u32,
@@ -1880,7 +1827,8 @@ impl VulkanRenderer {
         };
 
         let present_res = unsafe {
-            self.swapchain_dev.queue_present(self.present_queue, &present_info)
+            self.swapchain_dev
+                .queue_present(self.present_queue, &present_info)
         };
 
         match present_res {
@@ -1899,22 +1847,15 @@ impl VulkanRenderer {
             }
         }
 
-        self.frameloop.frame_idx =
-            (self.frameloop.frame_idx + 1) % FRAME_COUNT;
+        self.frameloop.frame_idx = (self.frameloop.frame_idx + 1) % FRAME_COUNT;
 
         self.frame_phase = FramePhase::Idle;
 
         Ok(())
     }
     pub fn clear_color(&mut self, color: Color) {
-        self.clear_color = [
-            color.r,
-            color.g,
-            color.b,
-            color.a,
-        ];
+        self.clear_color = [color.r, color.g, color.b, color.a];
     }
-
 
     fn ensure_render_pass_started(&mut self) -> anyhow::Result<()> {
         match self.frame_phase {
@@ -1926,23 +1867,15 @@ impl VulkanRenderer {
         }
     }
 
-    fn create_shader_module_from_bytes(
-        &self,
-        bytes: &[u8],
-    ) -> anyhow::Result<vk::ShaderModule> {
-        if bytes.len() % 4 != 0 {
+    fn create_shader_module_from_bytes(&self, bytes: &[u8]) -> anyhow::Result<vk::ShaderModule> {
+        if !bytes.len().is_multiple_of(4) {
             anyhow::bail!("SPIR-V bytecode length is not a multiple of 4");
         }
 
         let mut words = Vec::with_capacity(bytes.len() / 4);
 
         for chunk in bytes.chunks_exact(4) {
-            words.push(u32::from_le_bytes([
-                    chunk[0],
-                    chunk[1],
-                    chunk[2],
-                    chunk[3],
-            ]));
+            words.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
         }
 
         let create_info = vk::ShaderModuleCreateInfo {
@@ -1952,71 +1885,57 @@ impl VulkanRenderer {
         };
 
         let module = unsafe {
-            self.logical_device.create_shader_module(&create_info, None)?
+            self.logical_device
+                .create_shader_module(&create_info, None)?
         };
 
         Ok(module)
     }
 
-    fn vertex_fmt_to_vk_vertex_fmt(
-        &self, 
-        fmt: VertexFormat 
-    ) -> vk::Format {
+    fn vertex_fmt_to_vk_vertex_fmt(&self, fmt: VertexFormat) -> vk::Format {
         match fmt {
-            VertexFormat::Float32 =>  vk::Format::R32_SFLOAT,  
             VertexFormat::Float32x2 => vk::Format::R32G32_SFLOAT,
-            VertexFormat::Float32x3 => vk::Format::R32G32B32_SFLOAT,
             VertexFormat::Float32x4 => vk::Format::R32G32B32A32_SFLOAT,
-
-            VertexFormat::Uint32 => vk::Format::R32_UINT,
-            VertexFormat::Uint32x2 => vk::Format::R32G32_UINT,
-            VertexFormat::Uint32x3 => vk::Format::R32G32B32_UINT,
-            VertexFormat::Uint32x4 => vk::Format::R32G32B32A32_UINT,
-
-            VertexFormat::Unorm8x4 => vk::Format::R8G8B8A8_UNORM,
         }
-    } 
+    }
 
     fn get_vertex_input_attribute_desc(
-        &self, 
+        &self,
         attrib: VertexAttribute,
         binding: u32,
     ) -> anyhow::Result<vk::VertexInputAttributeDescription> {
-        let location    = attrib.location;
-        let binding     = binding;
-        let format      = self.vertex_fmt_to_vk_vertex_fmt(attrib.format);
-        let offset      = attrib.offset;
+        let location = attrib.location;
+        let format = self.vertex_fmt_to_vk_vertex_fmt(attrib.format);
+        let offset = attrib.offset;
 
         let desc = vk::VertexInputAttributeDescription {
             location,
             binding,
             format,
             offset,
-            ..Default::default()
         };
 
         Ok(desc)
     }
 
     fn get_vertex_input_rate_from_step_mode(
-        &self, 
-        step_mode: VertexStepMode
+        &self,
+        step_mode: VertexStepMode,
     ) -> vk::VertexInputRate {
         match step_mode {
-            VertexStepMode::Vertex => vk::VertexInputRate::VERTEX, 
-            VertexStepMode::Instance => vk::VertexInputRate::INSTANCE, 
+            VertexStepMode::Vertex => vk::VertexInputRate::VERTEX,
+            VertexStepMode::Instance => vk::VertexInputRate::INSTANCE,
         }
     }
 
     fn get_vertex_input_binding_desc(
-        &self, 
+        &self,
         binding: &VertexBufferBindingLayout,
     ) -> vk::VertexInputBindingDescription {
-        vk::VertexInputBindingDescription  {
+        vk::VertexInputBindingDescription {
             binding: binding.binding,
             stride: binding.stride,
             input_rate: self.get_vertex_input_rate_from_step_mode(binding.step_mode),
-            ..Default::default()
         }
     }
 
@@ -2030,21 +1949,20 @@ impl VulkanRenderer {
                 include_bytes!(concat!(env!("OUT_DIR"), "/vert.spv")).as_slice(),
                 include_bytes!(concat!(env!("OUT_DIR"), "/frag_dedicated.spv")).as_slice(),
             ),
-        }; 
+        };
         let vert_module = self.create_shader_module_from_bytes(vertex_spv)?;
         let frag_module = self.create_shader_module_from_bytes(fragment_spv)?;
-
 
         let shader_stages: [vk::PipelineShaderStageCreateInfo; 2] = [
             vk::PipelineShaderStageCreateInfo {
                 stage: vk::ShaderStageFlags::VERTEX,
-                p_name: b"main\0".as_ptr() as *const i8,
+                p_name: c"main".as_ptr(),
                 module: vert_module,
                 ..Default::default()
             },
             vk::PipelineShaderStageCreateInfo {
                 stage: vk::ShaderStageFlags::FRAGMENT,
-                p_name: b"main\0".as_ptr() as *const i8,
+                p_name: c"main".as_ptr(),
                 module: frag_module,
                 ..Default::default()
             },
@@ -2085,10 +2003,7 @@ impl VulkanRenderer {
             ..Default::default()
         };
 
-        let dynamic_states = [
-            vk::DynamicState::VIEWPORT,
-            vk::DynamicState::SCISSOR,
-        ];
+        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
 
         let dynamic_state = vk::PipelineDynamicStateCreateInfo {
             p_dynamic_states: dynamic_states.as_ptr(),
@@ -2103,7 +2018,6 @@ impl VulkanRenderer {
             p_scissors: std::ptr::null(),
             ..Default::default()
         };
-
 
         let bindings = desc
             .vert_bindings
@@ -2126,20 +2040,16 @@ impl VulkanRenderer {
             ..Default::default()
         };
 
-        let mut pc_size: u32 = 0; 
+        let mut pc_size: u32 = 0;
         let mut stage_flags = vk::ShaderStageFlags::empty();
         for pc in &desc.uniform_bindings {
-            match pc.ty {
-                UniformBindingType::Vec2 => {
-                    pc_size += 
-                        size_of::<f32>() as u32 * 2;
-                    let vk_stage = match pc.stage {
-                        UniformBindingShaderStage::Vertex => vk::ShaderStageFlags::VERTEX,
-                        UniformBindingShaderStage::Fragment => vk::ShaderStageFlags::FRAGMENT
-                    };
-                    stage_flags |= vk_stage; 
-                }
-                _ => {},
+            if pc.ty == UniformBindingType::Vec2 {
+                pc_size += size_of::<f32>() as u32 * 2;
+                let vk_stage = match pc.stage {
+                    UniformBindingShaderStage::Vertex => vk::ShaderStageFlags::VERTEX,
+                    UniformBindingShaderStage::Fragment => vk::ShaderStageFlags::FRAGMENT,
+                };
+                stage_flags |= vk_stage;
             }
         }
 
@@ -2155,17 +2065,16 @@ impl VulkanRenderer {
 
         let max_cached_textures = 1024u32;
 
-        let mut desc_layout_bindings    = Vec::new();
-        let mut desc_pool_sizes         = Vec::new();
+        let mut desc_layout_bindings = Vec::new();
+        let mut desc_pool_sizes = Vec::new();
 
         for binding in &desc.uniform_bindings {
             if binding.ty != UniformBindingType::Sampler2dArray {
                 continue;
             }
             let vk_type = match binding.ty {
-                UniformBindingType::Sampler2dArray => 
-                    vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                _ => anyhow::bail!("This should not exist.")
+                UniformBindingType::Sampler2dArray => vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                _ => anyhow::bail!("This should not exist."),
             };
 
             desc_layout_bindings.push(vk::DescriptorSetLayoutBinding {
@@ -2173,21 +2082,16 @@ impl VulkanRenderer {
                 descriptor_type: vk_type,
                 descriptor_count: 1,
                 stage_flags: match binding.stage {
-                    UniformBindingShaderStage::Vertex => 
-                        vk::ShaderStageFlags::VERTEX,
-                    UniformBindingShaderStage::Fragment => 
-                        vk::ShaderStageFlags::FRAGMENT,
+                    UniformBindingShaderStage::Vertex => vk::ShaderStageFlags::VERTEX,
+                    UniformBindingShaderStage::Fragment => vk::ShaderStageFlags::FRAGMENT,
                 },
                 ..Default::default()
             });
 
-            desc_pool_sizes.push(
-                vk::DescriptorPoolSize {
-                    ty: vk_type, 
-                    descriptor_count: max_cached_textures * self.swapchain.images.len() as u32,
-            }
-
-            );
+            desc_pool_sizes.push(vk::DescriptorPoolSize {
+                ty: vk_type,
+                descriptor_count: max_cached_textures * self.swapchain.images.len() as u32,
+            });
         }
 
         let desc_layout_info = vk::DescriptorSetLayoutCreateInfo {
@@ -2219,7 +2123,7 @@ impl VulkanRenderer {
 
         let pool_info = vk::DescriptorPoolCreateInfo {
             flags: DescriptorPoolCreateFlags::empty(),
-            max_sets: max_cached_textures *  self.swapchain.images.len() as u32,
+            max_sets: max_cached_textures * self.swapchain.images.len() as u32,
             pool_size_count: desc_pool_sizes.len() as u32,
             p_pool_sizes: desc_pool_sizes.as_ptr(),
             ..Default::default()
@@ -2239,9 +2143,7 @@ impl VulkanRenderer {
             ..Default::default()
         };
 
-        let desc_sets = unsafe {
-            self.logical_device.allocate_descriptor_sets(&alloc_info)?
-        };
+        unsafe { self.logical_device.allocate_descriptor_sets(&alloc_info)? };
 
         let pipeline_info = [vk::GraphicsPipelineCreateInfo {
             stage_count: shader_stages.len() as u32,
@@ -2259,12 +2161,11 @@ impl VulkanRenderer {
         }];
 
         let pipelines = unsafe {
-            let result = self.logical_device
-                .create_graphics_pipelines(
-                    PipelineCache::null(),
-                    pipeline_info.as_slice(),
-                    None,
-                );
+            let result = self.logical_device.create_graphics_pipelines(
+                PipelineCache::null(),
+                pipeline_info.as_slice(),
+                None,
+            );
 
             self.logical_device.destroy_shader_module(vert_module, None);
             self.logical_device.destroy_shader_module(frag_module, None);
@@ -2282,9 +2183,8 @@ impl VulkanRenderer {
         self.pipelines.push(Some(VulkanPipeline {
             raw,
             layout: pipeline_layout,
-            desc_layout: desc_layout,
+            desc_layout,
             desc_pool,
-            descriptor_sets: desc_sets, 
             push_constant_size: pc_size,
             push_constant_stage_flags: stage_flags,
         }));
@@ -2310,15 +2210,11 @@ impl VulkanRenderer {
                 }
 
                 match desc.usage {
-                    BufferUsage::Static => {
-                        self.upload_device_local_buffer(data, desc.target)
-                    }
+                    BufferUsage::Static => self.upload_device_local_buffer(data, desc.target),
 
-                    BufferUsage::Dynamic | BufferUsage::Stream | BufferUsage::Staging => {
-                        let handle = self.create_vk_buffer_handle(BufferDesc {
-                            data: None,
-                            ..desc
-                        })?;
+                    BufferUsage::Dynamic | BufferUsage::Staging => {
+                        let handle =
+                            self.create_vk_buffer_handle(BufferDesc { data: None, ..desc })?;
 
                         self.write_buffer(handle, 0, 0, data)?;
 
@@ -2327,9 +2223,7 @@ impl VulkanRenderer {
                 }
             }
 
-            None => {
-                self.create_vk_buffer_handle(desc)
-            }
+            None => self.create_vk_buffer_handle(desc),
         }
     }
 
@@ -2364,13 +2258,12 @@ impl VulkanRenderer {
             samples: vk::SampleCountFlags::TYPE_1,
             tiling: vk::ImageTiling::OPTIMAL,
 
-            usage: vk::ImageUsageFlags::SAMPLED
-                | vk::ImageUsageFlags::TRANSFER_DST,
+            usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
 
-                sharing_mode: vk::SharingMode::EXCLUSIVE,
-                initial_layout: vk::ImageLayout::UNDEFINED,
+            sharing_mode: vk::SharingMode::EXCLUSIVE,
+            initial_layout: vk::ImageLayout::UNDEFINED,
 
-                ..Default::default()
+            ..Default::default()
         };
 
         let alloc_info = vk_mem::AllocationCreateInfo {
@@ -2384,9 +2277,7 @@ impl VulkanRenderer {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan allocator already destroyed"))?;
 
-        let (image, alloc) = unsafe {
-            allocator.create_image(&image_info, &alloc_info)?
-        };
+        let (image, alloc) = unsafe { allocator.create_image(&image_info, &alloc_info)? };
 
         let view_info = vk::ImageViewCreateInfo {
             image,
@@ -2404,9 +2295,7 @@ impl VulkanRenderer {
             ..Default::default()
         };
 
-        let view = match unsafe {
-            self.logical_device.create_image_view(&view_info, None)
-        } {
+        let view = match unsafe { self.logical_device.create_image_view(&view_info, None) } {
             Ok(view) => view,
             Err(err) => {
                 unsafe {
@@ -2442,9 +2331,7 @@ impl VulkanRenderer {
             ..Default::default()
         };
 
-        let sampler = match unsafe {
-            self.logical_device.create_sampler(&sampler_info, None)
-        } {
+        let sampler = match unsafe { self.logical_device.create_sampler(&sampler_info, None) } {
             Ok(sampler) => sampler,
             Err(err) => {
                 unsafe {
@@ -2459,20 +2346,18 @@ impl VulkanRenderer {
             }
         };
 
-        if let Err(err) = 
-            self.transition_image_layout_immediate(
-                image,
-                vk::ImageLayout::UNDEFINED,
-                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: desc.layers,
-                },
-            )
-        {
+        if let Err(err) = self.transition_image_layout_immediate(
+            image,
+            vk::ImageLayout::UNDEFINED,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: desc.layers,
+            },
+        ) {
             unsafe {
                 self.logical_device.destroy_sampler(sampler, None);
                 self.logical_device.destroy_image_view(view, None);
@@ -2498,7 +2383,6 @@ impl VulkanRenderer {
             layers: desc.layers,
 
             format: desc.format,
-            vk_format,
             kind: VulkanTextureKind::Texture2DArray,
 
             layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
@@ -2525,14 +2409,12 @@ impl VulkanRenderer {
     ) -> anyhow::Result<()> {
         let device = &self.logical_device;
 
-        unsafe  {
+        unsafe {
             device.wait_for_fences(&[self.upload_ctx.fence], true, u64::MAX)?;
             device.reset_fences(&[self.upload_ctx.fence])?;
 
-            device.reset_command_pool(
-                self.upload_ctx.cmd_pool,
-                vk::CommandPoolResetFlags::empty(),
-            )?;
+            device
+                .reset_command_pool(self.upload_ctx.cmd_pool, vk::CommandPoolResetFlags::empty())?;
         }
 
         let begin_info = vk::CommandBufferBeginInfo {
@@ -2540,7 +2422,7 @@ impl VulkanRenderer {
             ..Default::default()
         };
 
-        unsafe  {
+        unsafe {
             device.begin_command_buffer(self.upload_ctx.cmd_buf, &begin_info)?;
         }
 
@@ -2598,51 +2480,43 @@ impl VulkanRenderer {
         old_layout: vk::ImageLayout,
         new_layout: vk::ImageLayout,
     ) -> anyhow::Result<(
-    vk::PipelineStageFlags,
-    vk::AccessFlags,
-    vk::PipelineStageFlags,
-    vk::AccessFlags,
+        vk::PipelineStageFlags,
+        vk::AccessFlags,
+        vk::PipelineStageFlags,
+        vk::AccessFlags,
     )> {
         match (old_layout, new_layout) {
-            (
-                vk::ImageLayout::UNDEFINED,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            ) => Ok((
+            (vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL) => Ok((
                 vk::PipelineStageFlags::TOP_OF_PIPE,
                 vk::AccessFlags::empty(),
                 vk::PipelineStageFlags::TRANSFER,
                 vk::AccessFlags::TRANSFER_WRITE,
             )),
 
-            (
-                vk::ImageLayout::UNDEFINED,
-                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            ) => Ok((
+            (vk::ImageLayout::UNDEFINED, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL) => Ok((
                 vk::PipelineStageFlags::TOP_OF_PIPE,
                 vk::AccessFlags::empty(),
                 vk::PipelineStageFlags::FRAGMENT_SHADER,
                 vk::AccessFlags::SHADER_READ,
             )),
 
-            (
-                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            ) => Ok((
-                vk::PipelineStageFlags::FRAGMENT_SHADER,
-                vk::AccessFlags::SHADER_READ,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::AccessFlags::TRANSFER_WRITE,
-            )),
+            (vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::ImageLayout::TRANSFER_DST_OPTIMAL) => {
+                Ok((
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::AccessFlags::SHADER_READ,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::AccessFlags::TRANSFER_WRITE,
+                ))
+            }
 
-            (
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            ) => Ok((
-                vk::PipelineStageFlags::TRANSFER,
-                vk::AccessFlags::TRANSFER_WRITE,
-                vk::PipelineStageFlags::FRAGMENT_SHADER,
-                vk::AccessFlags::SHADER_READ,
-            )),
+            (vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL) => {
+                Ok((
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::AccessFlags::TRANSFER_WRITE,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::AccessFlags::SHADER_READ,
+                ))
+            }
 
             _ => {
                 anyhow::bail!(
@@ -2694,9 +2568,7 @@ impl VulkanRenderer {
             self.write_mapped_buffer(handle, offset, data)
         } else {
             if self.frame_phase == FramePhase::InRenderPass {
-                anyhow::bail!(
-                    "device local write_buffer called after render pass started" 
-                );
+                anyhow::bail!("device local write_buffer called after render pass started");
             }
             self.transfer_to_device_local_buffer(handle, offset, data)
         }
@@ -2705,7 +2577,6 @@ impl VulkanRenderer {
     fn texture_format_size(format: TextureFormat) -> usize {
         match format {
             TextureFormat::Rgba8 => 4,
-            TextureFormat::Alpha8=> 1,
         }
     }
 
@@ -2740,15 +2611,16 @@ impl VulkanRenderer {
             ..Default::default()
         };
 
-        unsafe {self.logical_device.cmd_pipeline_barrier(
-            cmd_buf,
-            src_stage,
-            dst_stage,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[barrier],
-        );
+        unsafe {
+            self.logical_device.cmd_pipeline_barrier(
+                cmd_buf,
+                src_stage,
+                dst_stage,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[barrier],
+            );
         }
 
         Ok(())
@@ -2839,12 +2711,8 @@ impl VulkanRenderer {
         let cmd_buf = self.frameloop.frames[self.frameloop.frame_idx].cmd_buf;
 
         unsafe {
-            self.logical_device.cmd_copy_buffer(
-                cmd_buf,
-                staging_raw,
-                dst_raw,
-                &[copy],
-            );
+            self.logical_device
+                .cmd_copy_buffer(cmd_buf, staging_raw, dst_raw, &[copy]);
         }
 
         let (dst_stage, dst_access) = Self::buffer_target_barrier_dst(dst_target)?;
@@ -2889,11 +2757,8 @@ impl VulkanRenderer {
         let raw = self.get_vk_pipeline(handle)?.raw;
 
         unsafe {
-            self.logical_device.cmd_bind_pipeline(
-                cmd_buf,
-                vk::PipelineBindPoint::GRAPHICS,
-                raw,
-            );
+            self.logical_device
+                .cmd_bind_pipeline(cmd_buf, vk::PipelineBindPoint::GRAPHICS, raw);
 
             let viewport = vk::Viewport {
                 x: 0.0,
@@ -2909,7 +2774,8 @@ impl VulkanRenderer {
                 extent: self.swapchain.extent,
             };
 
-            self.logical_device.cmd_set_viewport(cmd_buf, 0, &[viewport]);
+            self.logical_device
+                .cmd_set_viewport(cmd_buf, 0, &[viewport]);
             self.logical_device.cmd_set_scissor(cmd_buf, 0, &[scissor]);
         }
 
@@ -2918,17 +2784,17 @@ impl VulkanRenderer {
         Ok(())
     }
 
-    pub fn set_vertex_buffer(
-        &mut self,
-        handle: BufferHandle,
-        binding: u32,
-    ) -> anyhow::Result<()> {
+    pub fn set_vertex_buffer(&mut self, handle: BufferHandle, binding: u32) -> anyhow::Result<()> {
         self.ensure_render_pass_started()?;
 
         let binding_usize = binding as usize;
 
         if binding_usize >= MAX_VBOS {
-            anyhow::bail!("vertex buffer binding {} exceeds MAX_VBOS {}", binding, MAX_VBOS);
+            anyhow::bail!(
+                "vertex buffer binding {} exceeds MAX_VBOS {}",
+                binding,
+                MAX_VBOS
+            );
         }
 
         if self.current_vbos[binding_usize] == Some(handle) {
@@ -2972,12 +2838,8 @@ impl VulkanRenderer {
         let cmd_buf = self.current_cmd_buf();
 
         unsafe {
-            self.logical_device.cmd_bind_index_buffer(
-                cmd_buf,
-                raw,
-                0,
-                vk::IndexType::UINT32,
-            );
+            self.logical_device
+                .cmd_bind_index_buffer(cmd_buf, raw, 0, vk::IndexType::UINT32);
         }
 
         self.current_ibo = Some(handle);
@@ -2985,11 +2847,7 @@ impl VulkanRenderer {
         Ok(())
     }
 
-    pub fn set_texture(
-        &mut self,
-        slot: u32,
-        texture: TextureHandle,
-    ) -> anyhow::Result<()> {
+    pub fn set_texture(&mut self, slot: u32, texture: TextureHandle) -> anyhow::Result<()> {
         self.ensure_render_pass_started()?;
 
         if slot as usize >= MAX_TEXTURE_SLOTS {
@@ -3017,18 +2875,15 @@ impl VulkanRenderer {
         };
 
         let descriptor_set = {
-            let sets = self.get_or_create_texture_descriptor_sets(
-                pipeline_handle,
-                texture,
-                slot,
-            )?;
+            let sets =
+                self.get_or_create_texture_descriptor_sets(pipeline_handle, texture, slot)?;
 
             *sets
                 .get(image_idx)
                 .ok_or_else(|| anyhow::anyhow!("missing descriptor set for image {}", image_idx))?
         };
 
-         unsafe {
+        unsafe {
             self.logical_device.cmd_bind_descriptor_sets(
                 cmd_buf,
                 vk::PipelineBindPoint::GRAPHICS,
@@ -3086,29 +2941,18 @@ impl VulkanRenderer {
         let data = [x, y];
 
         let bytes = unsafe {
-            std::slice::from_raw_parts(
-                data.as_ptr() as *const u8,
-                std::mem::size_of_val(&data),
-            )
+            std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(&data))
         };
 
         unsafe {
-            self.logical_device.cmd_push_constants(
-                cmd_buf,
-                layout,
-                stage_flags,
-                0,
-                bytes,
-            );
+            self.logical_device
+                .cmd_push_constants(cmd_buf, layout, stage_flags, 0, bytes);
         }
 
         Ok(())
     }
 
-    pub fn draw_indexed_instanced(
-        &mut self,
-        draw: DrawIndexedInstanced,
-    ) -> anyhow::Result<()> {
+    pub fn draw_indexed_instanced(&mut self, draw: DrawIndexedInstanced) -> anyhow::Result<()> {
         self.ensure_render_pass_started()?;
 
         if self.current_pipeline.is_none() {
@@ -3141,11 +2985,7 @@ impl VulkanRenderer {
         data: Option<&[u8]>,
     ) -> anyhow::Result<TextureHandle> {
         if desc.width == 0 || desc.height == 0 {
-            anyhow::bail!(
-                "invalid texture size: {}x{}",
-                desc.width,
-                desc.height,
-            );
+            anyhow::bail!("invalid texture size: {}x{}", desc.width, desc.height,);
         }
 
         let vk_format = Self::vk_texture_format(desc.format);
@@ -3166,13 +3006,12 @@ impl VulkanRenderer {
             samples: vk::SampleCountFlags::TYPE_1,
             tiling: vk::ImageTiling::OPTIMAL,
 
-            usage: vk::ImageUsageFlags::SAMPLED
-                | vk::ImageUsageFlags::TRANSFER_DST,
+            usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
 
-                sharing_mode: vk::SharingMode::EXCLUSIVE,
-                initial_layout: vk::ImageLayout::UNDEFINED,
+            sharing_mode: vk::SharingMode::EXCLUSIVE,
+            initial_layout: vk::ImageLayout::UNDEFINED,
 
-                ..Default::default()
+            ..Default::default()
         };
 
         let alloc_info = vk_mem::AllocationCreateInfo {
@@ -3186,9 +3025,7 @@ impl VulkanRenderer {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan allocator already destroyed"))?;
 
-        let (image, alloc) = unsafe {
-            allocator.create_image(&image_info, &alloc_info)?
-        };
+        let (image, alloc) = unsafe { allocator.create_image(&image_info, &alloc_info)? };
 
         let view_info = vk::ImageViewCreateInfo {
             image,
@@ -3213,9 +3050,7 @@ impl VulkanRenderer {
             ..Default::default()
         };
 
-        let view = match unsafe {
-            self.logical_device.create_image_view(&view_info, None)
-        } {
+        let view = match unsafe { self.logical_device.create_image_view(&view_info, None) } {
             Ok(view) => view,
             Err(err) => {
                 unsafe {
@@ -3251,9 +3086,7 @@ impl VulkanRenderer {
             ..Default::default()
         };
 
-        let sampler = match unsafe {
-            self.logical_device.create_sampler(&sampler_info, None)
-        } {
+        let sampler = match unsafe { self.logical_device.create_sampler(&sampler_info, None) } {
             Ok(sampler) => sampler,
             Err(err) => {
                 unsafe {
@@ -3271,9 +3104,7 @@ impl VulkanRenderer {
         let handle = TextureHandle(self.textures.len() as u32);
 
         let expected_size =
-            desc.width as usize
-            * desc.height as usize
-            * Self::texture_format_size(desc.format);
+            desc.width as usize * desc.height as usize * Self::texture_format_size(desc.format);
 
         if expected_size as vk::DeviceSize > self.staging_ring.cap {
             self.destroy_texture(handle)?;
@@ -3307,7 +3138,6 @@ impl VulkanRenderer {
             layers: 1,
 
             format: desc.format,
-            vk_format,
             kind: VulkanTextureKind::Texture2D,
 
             layout: vk::ImageLayout::UNDEFINED,
@@ -3315,9 +3145,7 @@ impl VulkanRenderer {
 
         if let Some(data) = data {
             let expected_size =
-                desc.width as usize
-                * desc.height as usize
-                * Self::texture_format_size(desc.format);
+                desc.width as usize * desc.height as usize * Self::texture_format_size(desc.format);
 
             if data.len() < expected_size {
                 self.destroy_texture(handle)?;
@@ -3351,17 +3179,11 @@ impl VulkanRenderer {
 
     fn texture_upload_cmd_buf(&self) -> vk::CommandBuffer {
         match self.frame_phase {
-            FramePhase::RecordingUploads => {
-                self.frameloop.frames[self.frameloop.frame_idx].cmd_buf
-            }
+            FramePhase::RecordingUploads => self.frameloop.frames[self.frameloop.frame_idx].cmd_buf,
 
-            FramePhase::Idle => {
-                self.upload_ctx.cmd_buf
-            }
+            FramePhase::Idle => self.upload_ctx.cmd_buf,
 
-            FramePhase::InRenderPass => {
-                self.frameloop.frames[self.frameloop.frame_idx].cmd_buf
-            }
+            FramePhase::InRenderPass => self.frameloop.frames[self.frameloop.frame_idx].cmd_buf,
         }
     }
 
@@ -3380,10 +3202,8 @@ impl VulkanRenderer {
             device.wait_for_fences(&[self.upload_ctx.fence], true, u64::MAX)?;
             device.reset_fences(&[self.upload_ctx.fence])?;
 
-            device.reset_command_pool(
-                self.upload_ctx.cmd_pool,
-                vk::CommandPoolResetFlags::empty(),
-            )?;
+            device
+                .reset_command_pool(self.upload_ctx.cmd_pool, vk::CommandPoolResetFlags::empty())?;
 
             let begin_info = vk::CommandBufferBeginInfo {
                 flags: vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
@@ -3414,11 +3234,7 @@ impl VulkanRenderer {
                 ..Default::default()
             };
 
-            device.queue_submit(
-                self.graphics_queue,
-                &[submit],
-                self.upload_ctx.fence,
-            )?;
+            device.queue_submit(self.graphics_queue, &[submit], self.upload_ctx.fence)?;
 
             device.wait_for_fences(&[self.upload_ctx.fence], true, u64::MAX)?;
         }
@@ -3467,9 +3283,7 @@ impl VulkanRenderer {
             Self::texture_format_size(tex.format)
         };
 
-        let expected_size = width as usize
-            * height as usize
-            * pixel_size;
+        let expected_size = width as usize * height as usize * pixel_size;
 
         if pixels.len() < expected_size {
             anyhow::bail!(
@@ -3596,7 +3410,6 @@ impl VulkanRenderer {
         tex.layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
 
         Ok(())
-
     }
 
     pub fn write_texture(
@@ -3649,47 +3462,47 @@ impl VulkanRenderer {
 
     fn write_texture_array_layer_recorded(
         &mut self,
-        texture: TextureHandle,
-        x: u32,
-        y: u32,
-        layer: u32,
-        width: u32,
-        height: u32,
+        write: TextureArrayWrite,
         pixels: &[u8],
     ) -> anyhow::Result<()> {
-
-        if width == 0 || height == 0 {
+        if write.width == 0 || write.height == 0 {
             return Ok(());
         }
 
         let pixel_size = {
             let tex = self
                 .textures
-                .get(texture.0 as usize)
+                .get(write.texture.0 as usize)
                 .and_then(|slot| slot.as_ref())
-                .ok_or_else(|| anyhow::anyhow!("invalid texture handle {:?}", texture))?;
+                .ok_or_else(|| anyhow::anyhow!("invalid texture handle {:?}", write.texture))?;
 
             if tex.kind != VulkanTextureKind::Texture2DArray {
-                anyhow::bail!("texture {:?} is not a texture array", texture);
+                anyhow::bail!("texture {:?} is not a texture array", write.texture);
             }
 
-            if layer >= tex.layers {
+            if write.layer >= tex.layers {
                 anyhow::bail!(
                     "texture array layer out of bounds: layer={} layers={}",
-                    layer,
+                    write.layer,
                     tex.layers,
                 );
             }
 
-            if x.checked_add(width).is_none_or(|v| v > tex.width)
-                || y.checked_add(height).is_none_or(|v| v > tex.height)
+            if write
+                .x
+                .checked_add(write.width)
+                .is_none_or(|v| v > tex.width)
+                || write
+                    .y
+                    .checked_add(write.height)
+                    .is_none_or(|v| v > tex.height)
             {
                 anyhow::bail!(
                     "texture write out of bounds: write=({}, {}) {}x{}, texture={}x{}",
-                    x,
-                    y,
-                    width,
-                    height,
+                    write.x,
+                    write.y,
+                    write.width,
+                    write.height,
                     tex.width,
                     tex.height,
                 );
@@ -3698,9 +3511,7 @@ impl VulkanRenderer {
             Self::texture_format_size(tex.format)
         };
 
-        let expected_size = width as usize
-            * height as usize
-            * pixel_size;
+        let expected_size = write.width as usize * write.height as usize * pixel_size;
 
         if pixels.len() < expected_size {
             anyhow::bail!(
@@ -3746,9 +3557,9 @@ impl VulkanRenderer {
         let (image, old_layout) = {
             let tex = self
                 .textures
-                .get(texture.0 as usize)
+                .get(write.texture.0 as usize)
                 .and_then(|slot| slot.as_ref())
-                .ok_or_else(|| anyhow::anyhow!("invalid texture handle {:?}", texture))?;
+                .ok_or_else(|| anyhow::anyhow!("invalid texture handle {:?}", write.texture))?;
 
             (tex.image, tex.layout)
         };
@@ -3765,7 +3576,7 @@ impl VulkanRenderer {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
                     base_mip_level: 0,
                     level_count: 1,
-                    base_array_layer: layer,
+                    base_array_layer: write.layer,
                     layer_count: 1,
                 },
             )?;
@@ -3778,19 +3589,19 @@ impl VulkanRenderer {
                 image_subresource: vk::ImageSubresourceLayers {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
                     mip_level: 0,
-                    base_array_layer: layer,
+                    base_array_layer: write.layer,
                     layer_count: 1,
                 },
 
                 image_offset: vk::Offset3D {
-                    x: x as i32,
-                    y: y as i32,
+                    x: write.x as i32,
+                    y: write.y as i32,
                     z: 0,
                 },
 
                 image_extent: vk::Extent3D {
-                    width,
-                    height,
+                    width: write.width,
+                    height: write.height,
                     depth: 1,
                 },
             };
@@ -3812,7 +3623,7 @@ impl VulkanRenderer {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
                     base_mip_level: 0,
                     level_count: 1,
-                    base_array_layer: layer,
+                    base_array_layer: write.layer,
                     layer_count: 1,
                 },
             )?;
@@ -3820,25 +3631,19 @@ impl VulkanRenderer {
 
         let tex = self
             .textures
-            .get_mut(texture.0 as usize)
+            .get_mut(write.texture.0 as usize)
             .and_then(|slot| slot.as_mut())
-            .ok_or_else(|| anyhow::anyhow!("invalid texture handle {:?}", texture))?;
+            .ok_or_else(|| anyhow::anyhow!("invalid texture handle {:?}", write.texture))?;
 
         tex.layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
 
         Ok(())
     }
 
-
     fn write_texture_array_layer(
         &mut self,
-        texture: TextureHandle,
-        x: u32,
-        y: u32,
-        layer: u32,
-        width: u32,
-        height: u32,
-        pixels: &[u8],
+        write: TextureArrayWrite,
+        pixels_rgba: &[u8],
     ) -> anyhow::Result<()> {
         if self.frame_phase == FramePhase::InRenderPass {
             anyhow::bail!("texture array upload called after render pass started");
@@ -3846,9 +3651,7 @@ impl VulkanRenderer {
 
         let immediate = self.begin_immediate_upload_if_needed()?;
 
-        let result = self.write_texture_array_layer_recorded(
-            texture, x, y, layer, width, height, pixels
-        );
+        let result = self.write_texture_array_layer_recorded(write, pixels_rgba);
 
         if let Err(err) = result {
             let _ = self.end_immediate_upload_if_needed(immediate);
@@ -3861,77 +3664,75 @@ impl VulkanRenderer {
     }
 
     fn get_or_create_texture_descriptor_sets(
-    &mut self,
-    pipeline_handle: PipelineHandle,
-    texture_handle: TextureHandle,
-    binding: u32,
-) -> anyhow::Result<&Vec<vk::DescriptorSet>> {
-    let key = TextureDescriptorKey {
-        pipeline: pipeline_handle,
-        texture: texture_handle,
-        binding,
-    };
+        &mut self,
+        pipeline_handle: PipelineHandle,
+        texture_handle: TextureHandle,
+        binding: u32,
+    ) -> anyhow::Result<&Vec<vk::DescriptorSet>> {
+        let key = TextureDescriptorKey {
+            pipeline: pipeline_handle,
+            texture: texture_handle,
+            binding,
+        };
 
-    if self.texture_descriptor_cache.contains_key(&key) {
-        return Ok(self.texture_descriptor_cache.get(&key).unwrap());
-    }
-
-    let set_count = self.swapchain.images.len();
-
-    let desc_layout = {
-        let pipeline = self.get_vk_pipeline(pipeline_handle)?;
-        pipeline.desc_layout
-    };
-
-    let desc_pool = {
-        let pipeline = self.get_vk_pipeline(pipeline_handle)?;
-        pipeline.desc_pool
-    };
-
-    let set_layouts = vec![desc_layout; set_count];
-
-    let alloc_info = vk::DescriptorSetAllocateInfo {
-        descriptor_pool: desc_pool,
-        descriptor_set_count: set_layouts.len() as u32,
-        p_set_layouts: set_layouts.as_ptr(),
-        ..Default::default()
-    };
-
-    let sets = unsafe {
-        self.logical_device.allocate_descriptor_sets(&alloc_info)?
-    };
-
-    let (view, sampler, layout) = {
-        let tex = self.get_vk_texture(texture_handle)?;
-        (tex.view, tex.sampler, tex.layout)
-    };
-
-    for &set in &sets {
-        let image_info = [vk::DescriptorImageInfo {
-            sampler,
-            image_view: view,
-            image_layout: layout,
-        }];
-
-        let write = [vk::WriteDescriptorSet {
-            dst_set: set,
-            dst_binding: binding,
-            dst_array_element: 0,
-            descriptor_count: 1,
-            descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            p_image_info: image_info.as_ptr(),
-            ..Default::default()
-        }];
-
-        unsafe {
-            self.logical_device.update_descriptor_sets(&write, &[]);
+        if self.texture_descriptor_cache.contains_key(&key) {
+            return Ok(self.texture_descriptor_cache.get(&key).unwrap());
         }
+
+        let set_count = self.swapchain.images.len();
+
+        let desc_layout = {
+            let pipeline = self.get_vk_pipeline(pipeline_handle)?;
+            pipeline.desc_layout
+        };
+
+        let desc_pool = {
+            let pipeline = self.get_vk_pipeline(pipeline_handle)?;
+            pipeline.desc_pool
+        };
+
+        let set_layouts = vec![desc_layout; set_count];
+
+        let alloc_info = vk::DescriptorSetAllocateInfo {
+            descriptor_pool: desc_pool,
+            descriptor_set_count: set_layouts.len() as u32,
+            p_set_layouts: set_layouts.as_ptr(),
+            ..Default::default()
+        };
+
+        let sets = unsafe { self.logical_device.allocate_descriptor_sets(&alloc_info)? };
+
+        let (view, sampler, layout) = {
+            let tex = self.get_vk_texture(texture_handle)?;
+            (tex.view, tex.sampler, tex.layout)
+        };
+
+        for &set in &sets {
+            let image_info = [vk::DescriptorImageInfo {
+                sampler,
+                image_view: view,
+                image_layout: layout,
+            }];
+
+            let write = [vk::WriteDescriptorSet {
+                dst_set: set,
+                dst_binding: binding,
+                dst_array_element: 0,
+                descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                p_image_info: image_info.as_ptr(),
+                ..Default::default()
+            }];
+
+            unsafe {
+                self.logical_device.update_descriptor_sets(&write, &[]);
+            }
+        }
+
+        self.texture_descriptor_cache.insert(key, sets);
+
+        Ok(self.texture_descriptor_cache.get(&key).unwrap())
     }
-
-    self.texture_descriptor_cache.insert(key, sets);
-
-    Ok(self.texture_descriptor_cache.get(&key).unwrap())
-}
 }
 
 impl Drop for VulkanRenderer {
@@ -4025,14 +3826,7 @@ impl GraphicsDevice for VulkanRenderer {
         VulkanRenderer::set_uniform_2f(self, pipeline, name, x, y)
     }
 
-    fn draw_indexed(&mut self, _draw: DrawIndexed) -> anyhow::Result<()> {
-        anyhow::bail!("Vulkan draw_indexed not implemented yet")
-    }
-
-    fn draw_indexed_instanced(
-        &mut self,
-        draw: DrawIndexedInstanced,
-    ) -> anyhow::Result<()> {
+    fn draw_indexed_instanced(&mut self, draw: DrawIndexedInstanced) -> anyhow::Result<()> {
         VulkanRenderer::draw_indexed_instanced(self, draw)
     }
 
@@ -4044,68 +3838,19 @@ impl GraphicsDevice for VulkanRenderer {
         VulkanRenderer::create_texture(self, desc, data)
     }
 
-    fn write_texture(
-        &mut self,
-        texture: TextureHandle,
-        x: u32,
-        y: u32,
-        width: u32,
-        height: u32,
-        data: &[u8]) -> anyhow::Result<()> {
-        VulkanRenderer::write_texture(self, texture, x, y, width, height, data)
-    }
-
-
     fn set_texture(&mut self, slot: u32, texture: TextureHandle) -> anyhow::Result<()> {
         VulkanRenderer::set_texture(self, slot, texture)
     }
 
-    fn set_uniform_1i(
-        &mut self,
-        _pipeline: PipelineHandle,
-        _name: &str,
-        _value: i32,
-    ) -> anyhow::Result<()> {
-        anyhow::bail!("Vulkan set_uniform_1i not implemented yet")
-    }
-
-    fn texture_gen_mipmap(
-        &mut self, 
-        _texture: TextureHandle,
-    ) -> anyhow::Result<()> {
-        anyhow::bail!("Vulkan texture_gen_mipmap not implemented yet")
-    }
-
-    fn create_texture_array(
-        &mut self,
-        desc: TextureArrayDesc,
-    ) -> anyhow::Result<TextureHandle> {
+    fn create_texture_array(&mut self, desc: TextureArrayDesc) -> anyhow::Result<TextureHandle> {
         VulkanRenderer::create_texture_array(self, desc)
     }
 
     fn write_texture_array_layer(
         &mut self,
-        texture: TextureHandle,
-        x: u32,
-        y: u32,
-        layer: u32,
-        width: u32,
-        height: u32,
-        pixels: &[u8],
+        write: TextureArrayWrite,
+        pixels_rgba: &[u8],
     ) -> anyhow::Result<()> {
-        VulkanRenderer::write_texture_array_layer(self, 
-            texture, x, y, layer, width, height, pixels)
+        VulkanRenderer::write_texture_array_layer(self, write, pixels_rgba)
     }
-
-    fn texture_get_kind(
-        &mut self,
-        _texture: TextureHandle,
-    ) -> anyhow::Result<TextureKind> {
-        anyhow::bail!("Vulkan texture_get_kind not implemented yet")
-    }
-
-    fn size(&self) -> (u32, u32) {
-        (self.width, self.height)
-    }
-
 }

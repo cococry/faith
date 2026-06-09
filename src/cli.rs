@@ -9,7 +9,6 @@ pub struct Cli {
     #[arg(long, value_enum, default_value_t = GraphicsBackendArg::Auto)]
     pub graphics: GraphicsBackendArg,
 
-    
     #[arg(long, default_value_t = 1280)]
     pub width: u32,
 
@@ -28,11 +27,10 @@ pub enum PlatformBackend {
 pub enum GraphicsBackendArg {
     Auto,
     Vulkan,
-    
+
     #[value(name = "opengl")]
     OpenGl,
 }
-
 
 impl From<GraphicsBackendArg> for crate::graphics::GraphicsBackend {
     fn from(value: GraphicsBackendArg) -> Self {

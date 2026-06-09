@@ -1,12 +1,10 @@
 use bytemuck::{Pod, Zeroable};
 
-use crate::graphics::{
-    Color, TextureHandle,
-};
+use crate::graphics::Color;
 
 /// Represents one vertex of the shared UI quad.
 ///
-/// The local position and UV are expanded by 
+/// The local position and UV are expanded by
 /// per-instance data in the UI vertex shader.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -17,8 +15,8 @@ pub struct QuadVertex {
 
 /// Represents one renderable UI quad instance.
 ///
-/// Stores the screen-space rectangle, color, 
-/// UV coordinates and shader parameters used 
+/// Stores the screen-space rectangle, color,
+/// UV coordinates and shader parameters used
 /// to render one quad.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -29,31 +27,26 @@ pub struct QuadInstance {
 
     // Extra shader parameters.
     //
-    // Currently used for atlas layer and 
+    // Currently used for atlas layer and
     // QuadType information.
     pub params: [f32; 4],
 }
 
 impl QuadInstance {
-    /// Creates a textured quad instance using 
-    /// the given rectangle, UV coordinates, 
+    /// Creates a textured quad instance using
+    /// the given rectangle, UV coordinates,
     /// tint color and shader parameters.
-    pub fn textured(
-        rect: [f32; 4],
-        uv: [f32; 4],
-        tint: Color,
-        params: [f32; 4],
-    ) -> Self {
+    pub fn textured(rect: [f32; 4], uv: [f32; 4], tint: Color, params: [f32; 4]) -> Self {
         Self {
-            rect: rect, 
+            rect,
             color: [tint.r, tint.g, tint.b, tint.a],
             uv,
-            params, 
+            params,
         }
     }
 }
 
-/// Shared unit quad vertices used by all UI 
+/// Shared unit quad vertices used by all UI
 /// quad instances.
 pub const QUAD_VERTICES: [QuadVertex; 4] = [
     QuadVertex {
@@ -74,9 +67,6 @@ pub const QUAD_VERTICES: [QuadVertex; 4] = [
     },
 ];
 
-/// Indices for rendering the shared unit quad 
+/// Indices for rendering the shared unit quad
 /// as two triangles.
-pub const QUAD_INDICES: [u32; 6] = [
-    0, 1, 2,
-    0, 2, 3,
-];
+pub const QUAD_INDICES: [u32; 6] = [0, 1, 2, 0, 2, 3];

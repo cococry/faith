@@ -1,10 +1,10 @@
-mod vulkan;
+mod backend;
 
-use ash::{vk};
+use ash::vk;
 
-pub use vulkan::VulkanRenderer;
+pub use backend::VulkanRenderer;
 
-use crate::graphics::{BufferTarget, BufferUsage, TextureFormat};
+use crate::graphics::{BufferTarget, TextureFormat};
 
 struct VulkanBuffer {
     raw: vk::Buffer,
@@ -12,10 +12,6 @@ struct VulkanBuffer {
 
     size: usize,
     target: BufferTarget,
-    usage: BufferUsage,
-
-    vk_usage: vk::BufferUsageFlags,
-    mem_props: vk::MemoryPropertyFlags,
 
     mapped: Option<*mut std::ffi::c_void>,
 }
@@ -26,7 +22,6 @@ pub struct VulkanPipeline {
 
     pub desc_layout: vk::DescriptorSetLayout,
     pub desc_pool: vk::DescriptorPool,
-    pub descriptor_sets: Vec<vk::DescriptorSet>,
 
     pub push_constant_size: u32,
     pub push_constant_stage_flags: vk::ShaderStageFlags,
@@ -49,7 +44,6 @@ pub struct VulkanTexture {
     pub layers: u32,
 
     pub format: TextureFormat,
-    pub vk_format: vk::Format,
     pub kind: VulkanTextureKind,
 
     pub layout: vk::ImageLayout,

@@ -1,14 +1,16 @@
 use freetype::{self as ft, bitmap};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 use unicode_bidi::Level;
 use unicode_script::Script;
-use std::{collections::HashMap, path::{Path, PathBuf}};
-use harfbuzz_rs::{Script as HbScript, Tag};
 
 use crate::graphics::FontHandle;
 
-use harfbuzz_rs::{shape, UnicodeBuffer};
+use harfbuzz_rs::{UnicodeBuffer, shape};
 
-/// Used as the key to get cached glyphs for 
+/// Used as the key to get cached glyphs for
 /// a given font/glyph index combination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GlyphKey {
@@ -16,18 +18,18 @@ pub struct GlyphKey {
     pub glyph_idx: u32,
 }
 
-/// Font loading, shaping and glyph 
+/// Font loading, shaping and glyph
 /// rasterization manager.
 ///
-/// Manages the FreeType library handle, 
+/// Manages the FreeType library handle,
 /// loaded fonts and rasterized glyph cache.
 pub struct FontManager {
     lib_handle: ft::Library,
     fonts: Vec<Font>,
-    glyph_cache: HashMap<GlyphKey, Glyph>
+    glyph_cache: HashMap<GlyphKey, Glyph>,
 }
 
-/// Represents one rasterized glyph bitmap 
+/// Represents one rasterized glyph bitmap
 /// and its layout metrics.
 #[derive(Debug, Clone)]
 pub struct Glyph {
@@ -35,12 +37,11 @@ pub struct Glyph {
     pub height: u32,
     pub bearing_x: i32,
     pub bearing_y: i32,
-    pub advance_x: i64,
 
-    pub pixels: Vec<u8>
+    pub pixels: Vec<u8>,
 }
 
-/// Represents one glyph produced by text 
+/// Represents one glyph produced by text
 /// shaping.
 #[derive(Debug, Clone)]
 pub struct ShapedGlyph {
@@ -54,40 +55,44 @@ pub struct ShapedGlyph {
 
 /// Represents one loaded font face.
 ///
-/// Stores both the FreeType face used for 
-/// rasterization and the HarfBuzz font used 
+/// Stores both the FreeType face used for
+/// rasterization and the HarfBuzz font used
 /// for shaping.
 pub struct Font {
+    #[allow(dead_code)]
     pub size: u32,
 
-    // Selected strike size for bitmap-strike 
-    // fonts. This is equal to the size field 
+    // Selected strike size for bitmap-strike
+    // fonts. This is equal to the size field
     // for almost all fonts except Emoji fonts.
+    #[allow(dead_code)]
     pub raster_size: u32,
 
-    // Scale factor from selected raster 
+    // Scale factor from selected raster
     // size to the requested font size.
-    // This is 1.0 for almost all fonts 
+    // This is 1.0 for almost all fonts
     // except Emoji fonts.
-    pub scale: f32, 
+    #[allow(dead_code)]
+    pub scale: f32,
 
     pub bitmap_strike: bool,
 
+    #[allow(dead_code)]
     pub path: PathBuf,
     pub face: freetype::Face,
     pub hb_font: harfbuzz_rs::Owned<harfbuzz_rs::Font<'static>>,
 }
 
 impl FontManager {
-    /// Creates a new font manager and initializes 
+    /// Creates a new font manager and initializes
     /// the FreeType library.
     pub fn new() -> anyhow::Result<Self> {
         let lib_handle = ft::Library::init()?;
 
         Ok(Self {
             lib_handle,
-            fonts: Vec::new(), 
-            glyph_cache: HashMap::new() 
+            fonts: Vec::new(),
+            glyph_cache: HashMap::new(),
         })
     }
 
@@ -101,21 +106,21 @@ impl FontManager {
     ) -> anyhow::Result<Vec<u8>> {
         use image::{ImageBuffer, Rgba};
 
-        // Resize the RGBa pixel buffer with 
-        // 'image' and FilterType::Triangle. 
-        // This is done to drastically improve 
-        // rendering quality of glyphs that need 
-        // scaling (meaning their font's raster size 
+        // Resize the RGBa pixel buffer with
+        // 'image' and FilterType::Triangle.
+        // This is done to drastically improve
+        // rendering quality of glyphs that need
+        // scaling (meaning their font's raster size
         // is not equal to their actual preferred size).
         //
         // This is almost exclusively done for emojis.
         //
-        // We have found that FilterType::Triangle is 
-        // the bets trade off between performance and 
+        // We have found that FilterType::Triangle is
+        // the bets trade off between performance and
         // quality.
         let img: ImageBuffer<Rgba<u8>, Vec<u8>> =
             ImageBuffer::from_raw(width, height, pixels.to_vec())
-            .ok_or_else(|| anyhow::anyhow!("invalid RGBA bitmap buffer"))?;
+                .ok_or_else(|| anyhow::anyhow!("invalid RGBA bitmap buffer"))?;
 
         let resized = image::imageops::resize(
             &img,
@@ -127,18 +132,15 @@ impl FontManager {
         Ok(resized.into_raw())
     }
 
-    fn alpha_to_rgba(
-        &self,
-        bitmap: &freetype::Bitmap,
-    ) -> Vec<u8> {
-        // Convert an alpha-only bitmap to a RGBA 
+    fn alpha_to_rgba(&self, bitmap: &freetype::Bitmap) -> Vec<u8> {
+        // Convert an alpha-only bitmap to a RGBA
         // bitmap by extending the given u8 Vec
-        // with 1 btye per pixel to a newly |allocate|d 
-        // u8 Vec with 4 bytes per pixel with 
-        // R,G,B=255 A=alpha and returning the result 
+        // with 1 btye per pixel to a newly |allocate|d
+        // u8 Vec with 4 bytes per pixel with
+        // R,G,B=255 A=alpha and returning the result
         let width = bitmap.width() as usize;
         let height = bitmap.rows() as usize;
-        let pitch = bitmap.pitch().abs() as usize;
+        let pitch = bitmap.pitch().unsigned_abs() as usize;
         let src = bitmap.buffer();
 
         let mut dst = Vec::with_capacity(width * height * 4);
@@ -155,19 +157,16 @@ impl FontManager {
         dst
     }
 
-    fn bgra_to_rgba(
-        &self,
-        bitmap: &freetype::Bitmap,
-    ) -> Vec<u8> {
-        // Convert a BGRA bitmap to a RGBA 
+    fn bgra_to_rgba(&self, bitmap: &freetype::Bitmap) -> Vec<u8> {
+        // Convert a BGRA bitmap to a RGBA
         // bitmap by reversing the given u8 Vec's
-        // B,G,R bytes -> R,G,B bytes and storing 
-        // the result + the A byte in a newly 
-        // |allocate|d u8 Vec with 4 bytes per pixel with 
-        // R,G,B,A and returning the result 
+        // B,G,R bytes -> R,G,B bytes and storing
+        // the result + the A byte in a newly
+        // |allocate|d u8 Vec with 4 bytes per pixel with
+        // R,G,B,A and returning the result
         let width = bitmap.width() as usize;
         let height = bitmap.rows() as usize;
-        let pitch = bitmap.pitch().abs() as usize;
+        let pitch = bitmap.pitch().unsigned_abs() as usize;
         let src = bitmap.buffer();
 
         let mut dst = Vec::with_capacity(width * height * 4);
@@ -185,9 +184,11 @@ impl FontManager {
                 if a == 0 {
                     dst.extend_from_slice(&[0, 0, 0, 0]);
                 } else {
-                    let r = ((r * 255 + a / 2) / a).min(255) as u8;
-                    let g = ((g * 255 + a / 2) / a).min(255) as u8;
-                    let b = ((b * 255 + a / 2) / a).min(255) as u8;
+                    let r = (r * 255 + a / 2).checked_div(a).unwrap_or(0).min(255) as u8;
+
+                    let g = (g * 255 + a / 2).checked_div(a).unwrap_or(0).min(255) as u8;
+
+                    let b = (b * 255 + a / 2).checked_div(a).unwrap_or(0).min(255) as u8;
 
                     dst.extend_from_slice(&[r, g, b, a as u8]);
                 }
@@ -198,36 +199,32 @@ impl FontManager {
     }
 
     fn rasterize_glyph(
-        &mut self, 
+        &mut self,
         font_handle: FontHandle,
-        glyph_idx: u32
+        glyph_idx: u32,
     ) -> anyhow::Result<Glyph> {
-        // Get the font from the opaque handle 
-        let font = self.get_font(font_handle)?; 
+        // Get the font from the opaque handle
+        let font = self.get_font(font_handle)?;
 
-        // If the font has bitmap_strike set to 
-        // true, it means the font has fixed 
-        // sizes, e.g 32px, 64px, 128px. This is 
-        // true for all Emoji fonts, making it a 
+        // If the font has bitmap_strike set to
+        // true, it means the font has fixed
+        // sizes, e.g 32px, 64px, 128px. This is
+        // true for all Emoji fonts, making it a
         // reasonable way to determine if a glyph
         // needs color loaded.
         let flags = if font.bitmap_strike {
-            ft::face::LoadFlag::RENDER | 
-                ft::face::LoadFlag::COLOR 
+            ft::face::LoadFlag::RENDER | ft::face::LoadFlag::COLOR
         } else {
-            ft::face::LoadFlag::RENDER 
+            ft::face::LoadFlag::RENDER
         };
 
         // Load/rasterize the glyph with freetype
-        font.face.load_glyph(
-            glyph_idx,
-            flags
-        )?;
+        font.face.load_glyph(glyph_idx, flags)?;
 
-        let glyph           = font.face.glyph();
-        let bitmap          = glyph.bitmap();
-        let mut width       = bitmap.width() as u32;
-        let mut height      = bitmap.rows() as u32;
+        let glyph = font.face.glyph();
+        let bitmap = glyph.bitmap();
+        let mut width = bitmap.width() as u32;
+        let mut height = bitmap.rows() as u32;
 
         // Convert the pixels to RGBA
         let mut pixels_rgba = match bitmap.pixel_mode()? {
@@ -236,32 +233,24 @@ impl FontManager {
             _ => bitmap.buffer().to_vec(),
         };
 
-        let mut bearing_x   = glyph.bitmap_left();
-        let mut bearing_y   = glyph.bitmap_top();
-        let mut advance_x   = glyph.advance().x;
+        let mut bearing_x = glyph.bitmap_left();
+        let mut bearing_y = glyph.bitmap_top();
 
         // If the font is an emoji font and it's
-        // preferred font size is not equal to 
-        // selected strike size, resize the glyph 
-        // bitmap to include the font's scale factor. 
+        // preferred font size is not equal to
+        // selected strike size, resize the glyph
+        // bitmap to include the font's scale factor.
         if font.bitmap_strike && font.scale != 1.0 {
             let new_width = ((width as f32 * font.scale).round() as u32).max(1);
             let new_height = ((height as f32 * font.scale).round() as u32).max(1);
 
-            pixels_rgba = self.resize_rgba(
-                &pixels_rgba,
-                width,
-                height,
-                new_width,
-                new_height,
-            )?;
+            pixels_rgba = self.resize_rgba(&pixels_rgba, width, height, new_width, new_height)?;
 
             width = new_width;
             height = new_height;
 
             bearing_x = (bearing_x as f32 * font.scale).round() as i32;
             bearing_y = (bearing_y as f32 * font.scale).round() as i32;
-            advance_x = (advance_x as f32 * font.scale) as i64;
         }
 
         Ok(Glyph {
@@ -269,21 +258,20 @@ impl FontManager {
             height,
             bearing_x,
             bearing_y,
-            advance_x,
             pixels: pixels_rgba,
         })
     }
 
-    /// Gets a cached glyph or rasterizes and 
+    /// Gets a cached glyph or rasterizes and
     /// caches it if it has not been loaded yet.
     pub fn get_or_load_glyph(
         &mut self,
         font_handle: FontHandle,
-        glyph_idx: u32
+        glyph_idx: u32,
     ) -> anyhow::Result<&Glyph> {
         let key = GlyphKey {
             font_handle,
-            glyph_idx
+            glyph_idx,
         };
 
         // Cached rasterization of glyphs
@@ -304,21 +292,17 @@ impl FontManager {
 
         let num_fixed_sizes = raw.num_fixed_sizes;
 
-        // No available sizes -> Return None to 
+        // No available sizes -> Return None to
         // indicate.
         if num_fixed_sizes <= 0 || raw.available_sizes.is_null() {
             return Ok(None);
         }
 
         // Get available strikes (no safe function available)
-        let strikes = unsafe {
-            std::slice::from_raw_parts(
-                raw.available_sizes,
-                num_fixed_sizes as usize,
-            )
-        };
+        let strikes =
+            unsafe { std::slice::from_raw_parts(raw.available_sizes, num_fixed_sizes as usize) };
 
-        // Get closest strike match  
+        // Get closest strike match
         let mut best_larger_or_equal: Option<(usize, u32)> = None;
         let mut best_smaller: Option<(usize, u32)> = None;
 
@@ -342,25 +326,24 @@ impl FontManager {
             }
         }
 
-        let (best_idx, raster_size) =
-            if let Some(best) = best_larger_or_equal {
-                best
-            } else if let Some(best) = best_smaller {
-                best
-            } else {
-                return Ok(None);
-            };
+        let (best_idx, raster_size) = if let Some(best) = best_larger_or_equal {
+            best
+        } else if let Some(best) = best_smaller {
+            best
+        } else {
+            return Ok(None);
+        };
 
         face.select_size(best_idx as i32)?;
 
         Ok(Some(raster_size))
     }
 
-    /// Loads a font from disk and stores it in 
+    /// Loads a font from disk and stores it in
     /// the font manager.
     ///
-    /// Selects the best bitmap strike when the 
-    /// font has fixed-size strikes, otherwise 
+    /// Selects the best bitmap strike when the
+    /// font has fixed-size strikes, otherwise
     /// configures the face for scalable rendering.
     pub fn load_font(
         &mut self,
@@ -379,13 +362,13 @@ impl FontManager {
         let mut raster_size = size;
         let mut bitmap_strike = false;
 
-        // Select best fixed size if the font is a 
+        // Select best fixed size if the font is a
         // fixed-size font
         if let Some(selected_raster_size) = self.select_best_bitmap_strike(&face, size)? {
             raster_size = selected_raster_size;
             bitmap_strike = true;
         } else {
-            // If the font supports it, set exact preferred 
+            // If the font supports it, set exact preferred
             // pixel size
             face.set_pixel_sizes(0, size)?;
         }
@@ -394,10 +377,7 @@ impl FontManager {
         let mut hb_font = harfbuzz_rs::Font::new(hb_face);
 
         // HarfBuzz needs * 64
-        hb_font.set_scale(
-            (raster_size as i32) * 64,
-            (raster_size as i32) * 64,
-        );
+        hb_font.set_scale((raster_size as i32) * 64, (raster_size as i32) * 64);
 
         let handle = FontHandle(self.fonts.len() as u32);
 
@@ -415,8 +395,7 @@ impl FontManager {
     }
 
     fn get_font(&self, handle: FontHandle) -> anyhow::Result<&Font> {
-        self
-            .fonts
+        self.fonts
             .get(handle.0 as usize)
             .ok_or_else(|| anyhow::anyhow!("invalid texture handle: {:?}", handle))
     }
@@ -428,25 +407,25 @@ impl FontManager {
     }
 
     /// Returns the font line height in pixels.
-    pub fn line_height(&self, font_handle: FontHandle) -> anyhow::Result<i32>  {
+    pub fn line_height(&self, font_handle: FontHandle) -> anyhow::Result<i32> {
         let font = self.get_font(font_handle)?;
         Ok(font.face.size_metrics().unwrap().height as i32 >> 6)
     }
 
-    /// Returns the font scale from selected raster 
+    /// Returns the font scale from selected raster
     /// size to requested font size.
-    pub fn scale(&self, font_handle: FontHandle) -> anyhow::Result<f32>  {
+    pub fn scale(&self, font_handle: FontHandle) -> anyhow::Result<f32> {
         let font = self.get_font(font_handle)?;
         Ok(font.scale)
     }
 
-    /// Returns the scale that should be applied 
+    /// Returns the scale that should be applied
     /// during rendering.
     ///
-    /// Bitmap-strike fonts are already rasterized 
-    /// at their target size and use a render scale 
+    /// Bitmap-strike fonts are already rasterized
+    /// at their target size and use a render scale
     /// of 1.0.
-    pub fn render_scale(&self, font_handle: FontHandle) -> anyhow::Result<f32>  {
+    pub fn render_scale(&self, font_handle: FontHandle) -> anyhow::Result<f32> {
         let font = self.get_font(font_handle)?;
 
         if font.bitmap_strike {
@@ -456,41 +435,11 @@ impl FontManager {
         }
     }
 
-    /// Returns whether the font uses colored 
+    /// Returns whether the font uses colored
     /// bitmap-strike glyphs.
-    pub fn is_colored(&self, font_handle: FontHandle) -> anyhow::Result<bool>  {
+    pub fn is_colored(&self, font_handle: FontHandle) -> anyhow::Result<bool> {
         let font = self.get_font(font_handle)?;
         Ok(font.bitmap_strike)
-    }
-
-    /// Shapes text into positioned glyphs using 
-    /// HarfBuzz.
-    pub fn shape_text(&self, font_handle: FontHandle, text: &str) -> anyhow::Result<Vec<ShapedGlyph>> {
-        let font = self.get_font(font_handle)?;
-
-        let buffer = UnicodeBuffer::new().add_str(text);
-
-        // Use HarfBuzz to Shape the text
-        let output = shape(&font.hb_font, buffer, &[]);
-
-        let infos = output.get_glyph_infos();
-        let positions = output.get_glyph_positions();
-
-        // Iterate HarfBuzz positions and infos to 
-        // collect shaped glyph information
-        let shaped = infos.iter().zip(positions.iter())
-            .map(|(info, pos)| ShapedGlyph {
-                glyph_idx: info.codepoint,
-                cluster: info.cluster,
-
-                // convert from fixed point vals
-                x_adv: pos.x_advance as f32 / 64.0,
-                y_adv: pos.y_advance as f32 / 64.0,
-                x_off: pos.x_offset as f32 / 64.0,
-                y_off: pos.y_offset as f32 / 64.0,
-            }).collect();
-
-        Ok(shaped)
     }
 
     fn hb_tag(&self, tag: &str) -> harfbuzz_rs::Tag {
@@ -501,7 +450,7 @@ impl FontManager {
         let c = chars.next().unwrap_or('z');
         let d = chars.next().unwrap_or('z');
 
-            harfbuzz_rs::Tag::new(a, b, c, d)
+        harfbuzz_rs::Tag::new(a, b, c, d)
     }
 
     fn hb_script_tag_from_unicode_script(&self, script: Script) -> harfbuzz_rs::Tag {
@@ -553,51 +502,50 @@ impl FontManager {
             _ => "Zzzz",
         };
 
-
         self.hb_tag(tag)
     }
 
     pub fn shape_text_with_props(
-        &self, 
+        &self,
         text: &str,
         bidi_lvl: Level,
         script: Script,
-        font_handle: FontHandle) 
-        -> anyhow::Result<Vec<ShapedGlyph>>  {
-            let font = self.get_font(font_handle)?;
+        font_handle: FontHandle,
+    ) -> anyhow::Result<Vec<ShapedGlyph>> {
+        let font = self.get_font(font_handle)?;
 
-
-            let buffer = UnicodeBuffer::new()
-                .add_str(text)
-                .set_direction(if bidi_lvl.is_rtl() {
-                    harfbuzz_rs::Direction::Rtl
-                } else {
-                    harfbuzz_rs::Direction::Ltr
-                })
+        let buffer = UnicodeBuffer::new()
+            .add_str(text)
+            .set_direction(if bidi_lvl.is_rtl() {
+                harfbuzz_rs::Direction::Rtl
+            } else {
+                harfbuzz_rs::Direction::Ltr
+            })
             .set_script(self.hb_script_tag_from_unicode_script(script));
 
+        // Use HarfBuzz to Shape the text
+        let output = shape(&font.hb_font, buffer, &[]);
 
-            // Use HarfBuzz to Shape the text
-            let output = shape(&font.hb_font, buffer, &[]);
+        let infos = output.get_glyph_infos();
+        let positions = output.get_glyph_positions();
 
-            let infos = output.get_glyph_infos();
-            let positions = output.get_glyph_positions();
+        // Iterate HarfBuzz positions and infos to
+        // collect shaped glyph information
+        let shaped = infos
+            .iter()
+            .zip(positions.iter())
+            .map(|(info, pos)| ShapedGlyph {
+                glyph_idx: info.codepoint,
+                cluster: info.cluster,
 
-            // Iterate HarfBuzz positions and infos to 
-            // collect shaped glyph information
-            let shaped = infos.iter().zip(positions.iter())
-                .map(|(info, pos)| ShapedGlyph {
-                    glyph_idx: info.codepoint,
-                    cluster: info.cluster,
-
-                    // convert from fixed point vals
+                // convert from fixed point vals
                 x_adv: pos.x_advance as f32 / 64.0,
                 y_adv: pos.y_advance as f32 / 64.0,
                 x_off: pos.x_offset as f32 / 64.0,
                 y_off: pos.y_offset as f32 / 64.0,
-            }).collect();
+            })
+            .collect();
 
         Ok(shaped)
     }
-
 }

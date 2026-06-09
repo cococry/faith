@@ -3,16 +3,19 @@ use std::ffi::c_void;
 
 use anyhow::Ok;
 use glow::HasContext;
-use khronos_egl::{Display, Surface, Context};
+use khronos_egl::{Context, Display, Surface};
 
-use crate::graphics::device::{DrawIndexedInstanced, TextureArrayDesc, TextureKind, VertexFormat};
+use crate::graphics::device::{DrawIndexedInstanced, TextureArrayDesc, VertexFormat};
 use crate::graphics::opengl::{GlBuffer, GlPipeline, GlTexture, GlTextureKind};
+use crate::graphics::{
+    BufferDesc, BufferHandle, BufferTarget, BufferUsage, BuiltinShaderPipeline, Color,
+    GraphicsDevice, PipelineDesc, PipelineHandle, TextureArrayWrite, TextureDesc, TextureFormat,
+    TextureHandle, VertexStepMode,
+};
 use crate::platform::Platform;
 use crate::platform::window::WindowHandleInfo;
-use crate::graphics::{BufferDesc, BufferHandle, BufferTarget, BufferUsage, BuiltinShaderPipeline, Color, DrawIndexed, GraphicsDevice, PipelineDesc, PipelineHandle, TextureDesc, TextureFormat, TextureHandle, VertexStepMode};
 
 const MAX_VBOS: usize = 8;
-
 
 pub const UI_QUAD_VERTEX_SHADER: &str = r#"
 #version 330 core
@@ -134,7 +137,6 @@ pub struct OpenGLRenderer {
 
 impl OpenGLRenderer {
     pub fn new(platform: &Platform) -> anyhow::Result<Self> {
-        
         tracing::info!("Using OpenGL rendering backend");
 
         let handle = platform.native_handle();
@@ -149,25 +151,28 @@ impl OpenGLRenderer {
         };
 
         let egl = egl::Instance::new(egl::Static);
-        let egl_display = unsafe {
-            egl.get_display(native_display as *mut c_void)
-        }
-        .ok_or_else(|| anyhow::anyhow!("failed to get EGL display from native display"))?;
+        let egl_display = unsafe { egl.get_display(native_display) }
+            .ok_or_else(|| anyhow::anyhow!("failed to get EGL display from native display"))?;
 
         egl.initialize(egl_display)?;
 
         egl.bind_api(egl::OPENGL_API)?;
 
         let attributes = [
-            egl::SURFACE_TYPE, egl::WINDOW_BIT,
-            egl::RENDERABLE_TYPE, egl::OPENGL_BIT,
-
-            egl::RED_SIZE, 8,
-            egl::GREEN_SIZE, 8,
-            egl::BLUE_SIZE, 8,
-            egl::ALPHA_SIZE, 0,
-            egl::STENCIL_SIZE, 0,
-
+            egl::SURFACE_TYPE,
+            egl::WINDOW_BIT,
+            egl::RENDERABLE_TYPE,
+            egl::OPENGL_BIT,
+            egl::RED_SIZE,
+            8,
+            egl::GREEN_SIZE,
+            8,
+            egl::BLUE_SIZE,
+            8,
+            egl::ALPHA_SIZE,
+            0,
+            egl::STENCIL_SIZE,
+            0,
             egl::NONE,
         ];
 
@@ -178,28 +183,32 @@ impl OpenGLRenderer {
         let major = 4;
         let minor = 0;
         let context_attributes = [
-            egl::CONTEXT_MAJOR_VERSION, major,
-            egl::CONTEXT_MINOR_VERSION, minor,
+            egl::CONTEXT_MAJOR_VERSION,
+            major,
+            egl::CONTEXT_MINOR_VERSION,
+            minor,
             egl::CONTEXT_OPENGL_PROFILE_MASK,
             egl::CONTEXT_OPENGL_CORE_PROFILE_BIT,
-            egl::NONE
+            egl::NONE,
         ];
 
-        let context = egl.create_context(egl_display, 
-            config, None, &context_attributes)?;
-        
-        tracing::info!("Created OpenGL Core profile context (version {}.{})",
-            major, minor);
+        let context = egl.create_context(egl_display, config, None, &context_attributes)?;
 
-        let egl_surface = unsafe {
-            egl.create_window_surface(
-                egl_display, 
-                config,
-                native_window,
-                None)
-        }?;
+        tracing::info!(
+            "Created OpenGL Core profile context (version {}.{})",
+            major,
+            minor
+        );
 
-        egl.make_current(egl_display, Some(egl_surface), Some(egl_surface), Some(context))?;
+        let egl_surface =
+            unsafe { egl.create_window_surface(egl_display, config, native_window, None) }?;
+
+        egl.make_current(
+            egl_display,
+            Some(egl_surface),
+            Some(egl_surface),
+            Some(context),
+        )?;
 
         let gl = unsafe {
             glow::Context::from_loader_function(|name| {
@@ -211,7 +220,6 @@ impl OpenGLRenderer {
         let (width, height) = platform.size();
 
         unsafe {
-
             gl.disable(glow::DEPTH_TEST);
             gl.disable(glow::CULL_FACE);
 
@@ -221,13 +229,13 @@ impl OpenGLRenderer {
             gl.viewport(0, 0, width as i32, height as i32);
         }
 
-        let global_vao = unsafe { 
-            let vao = gl.create_vertex_array()
-                .map_err(|e| anyhow::anyhow!("Failed to create VAO: {e}"))?; 
+        let global_vao = unsafe {
+            let vao = gl
+                .create_vertex_array()
+                .map_err(|e| anyhow::anyhow!("Failed to create VAO: {e}"))?;
             gl.bind_vertex_array(Some(vao));
             vao
         };
-
 
         Ok(Self {
             gl,
@@ -270,7 +278,8 @@ impl OpenGLRenderer {
 
     pub fn begin_frame(&mut self) -> anyhow::Result<()> {
         unsafe {
-            self.gl.viewport(0, 0, self.width as i32, self.height as i32); 
+            self.gl
+                .viewport(0, 0, self.width as i32, self.height as i32);
             self.gl.clear(glow::COLOR_BUFFER_BIT);
         }
         Ok(())
@@ -285,8 +294,7 @@ impl OpenGLRenderer {
         match target {
             BufferTarget::Vertex => glow::ARRAY_BUFFER,
             BufferTarget::Index => glow::ELEMENT_ARRAY_BUFFER,
-            BufferTarget::Uniform => glow::UNIFORM_BUFFER,
-            BufferTarget::Unspecified => 0, 
+            BufferTarget::Unspecified => 0,
         }
     }
 
@@ -294,8 +302,7 @@ impl OpenGLRenderer {
         match usage {
             BufferUsage::Static => glow::STATIC_DRAW,
             BufferUsage::Dynamic => glow::DYNAMIC_DRAW,
-            BufferUsage::Stream => glow::STREAM_DRAW,
-            BufferUsage::Staging => glow::DYNAMIC_DRAW 
+            BufferUsage::Staging => glow::DYNAMIC_DRAW,
         }
     }
 
@@ -333,7 +340,9 @@ impl OpenGLRenderer {
 
     fn compile_shader(&self, kind: u32, source: &str) -> anyhow::Result<glow::NativeShader> {
         unsafe {
-            let shader = self.gl.create_shader(kind)
+            let shader = self
+                .gl
+                .create_shader(kind)
                 .map_err(|e| anyhow::anyhow!("Failed to create shader: {e}"))?;
 
             self.gl.shader_source(shader, source);
@@ -351,7 +360,9 @@ impl OpenGLRenderer {
 
     fn link_program(&self, shaders: &[glow::NativeShader]) -> anyhow::Result<glow::NativeProgram> {
         unsafe {
-            let program = self.gl.create_program()
+            let program = self
+                .gl
+                .create_program()
                 .map_err(|e| anyhow::anyhow!("Failed to create shader program: {e}"))?;
 
             for &shader in shaders {
@@ -370,7 +381,7 @@ impl OpenGLRenderer {
                 self.gl.delete_program(program);
                 anyhow::bail!("Shader program linking failed: {log}");
             }
-            
+
             for &shader in shaders {
                 self.gl.detach_shader(program, shader);
                 self.gl.delete_shader(shader);
@@ -382,32 +393,14 @@ impl OpenGLRenderer {
 
     fn gl_vertex_format(&self, format: VertexFormat) -> (i32, u32, bool) {
         match format {
-            VertexFormat::Float32 => (1, glow::FLOAT, false),
             VertexFormat::Float32x2 => (2, glow::FLOAT, false),
-            VertexFormat::Float32x3 => (3, glow::FLOAT, false),
             VertexFormat::Float32x4 => (4, glow::FLOAT, false),
-
-            VertexFormat::Uint32 => (1, glow::UNSIGNED_INT, false),
-            VertexFormat::Uint32x2 => (2, glow::UNSIGNED_INT, false),
-            VertexFormat::Uint32x3 => (3, glow::UNSIGNED_INT, false),
-            VertexFormat::Uint32x4 => (4, glow::UNSIGNED_INT, false),
-
-            VertexFormat::Unorm8x4 => (4, glow::UNSIGNED_BYTE, true),
         }
     }
 
     fn gl_texture_format(&self, format: TextureFormat) -> (u32, u32, u32) {
         match format {
-            TextureFormat::Rgba8 => (
-                glow::RGBA8,
-                glow::RGBA,
-                glow::UNSIGNED_BYTE,
-            ),
-            TextureFormat::Alpha8 => (
-                glow::R8,
-                glow::RED,
-                glow::UNSIGNED_BYTE,
-            ),
+            TextureFormat::Rgba8 => (glow::RGBA8, glow::RGBA, glow::UNSIGNED_BYTE),
         }
     }
 
@@ -416,9 +409,10 @@ impl OpenGLRenderer {
         desc: TextureDesc,
         data: Option<&[u8]>,
     ) -> anyhow::Result<TextureHandle> {
-
         unsafe {
-            let raw = self.gl.create_texture()
+            let raw = self
+                .gl
+                .create_texture()
                 .map_err(|e| anyhow::anyhow!("Failed to create OpenGL texture: {e}"))?;
 
             let (internal_format, format, gl_type) = self.gl_texture_format(desc.format);
@@ -467,88 +461,24 @@ impl OpenGLRenderer {
 
             let handle = TextureHandle(self.textures.len() as u32);
 
-            self.textures.push(Some(GlTexture { 
-                raw, 
-                width: desc.width,  
-                height: desc.height, 
+            self.textures.push(Some(GlTexture {
+                raw,
+                width: desc.width,
+                height: desc.height,
                 format: desc.format,
-                kind: super::GlTextureKind::Texture2D
+                kind: super::GlTextureKind::Texture2D,
             }));
 
             Ok(handle)
         }
     }
 
-    pub fn write_texture(
-        &mut self,
-        texture: TextureHandle,
-        x: u32,
-        y: u32,
-        width: u32,
-        height: u32,
-        data: &[u8],
-    ) -> anyhow::Result<()> {
-        let tex = self.get_texture(texture)?;
-
-        if x + width > tex.width || y + height > tex.height {
-            anyhow::bail!("texture write out of bounds");
-        }
-
-        let raw = tex.raw;
-        let format = tex.format;
-
-        let (_, external_format, ty) = self.gl_texture_format(format);
-
-        unsafe {
-            self.gl.bind_texture(glow::TEXTURE_2D, Some(raw));
-            self.gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-
-            self.gl.tex_sub_image_2d(
-                glow::TEXTURE_2D,
-                0,
-                x as i32,
-                y as i32,
-                width as i32,
-                height as i32,
-                external_format,
-                ty,
-                glow::PixelUnpackData::Slice(Some(data)),
-            );
-        }
-
-        Ok(())
-    }
-
-    pub fn texture_gen_mipmap(
-        &mut self, 
-        texture: TextureHandle,
-    ) -> anyhow::Result<()> {
-        let tex = self.get_texture(texture)?;
-
-        let raw = tex.raw;
-        unsafe {
-            let ty = if tex.kind == GlTextureKind::Texture2DArray {
-                glow::TEXTURE_2D_ARRAY 
-            } else {
-                glow::TEXTURE_2D
-            };
-            self.gl.bind_texture(ty, Some(raw));
-            self.gl.generate_mipmap(ty);
-            self.gl.bind_texture(ty, None);
-        }
-        Ok(())
-    }
-
-    pub fn set_texture(
-        &mut self,
-        slot: u32,
-        texture: TextureHandle,
-    ) -> anyhow::Result<()> {
+    pub fn set_texture(&mut self, slot: u32, texture: TextureHandle) -> anyhow::Result<()> {
         let tex = self.get_texture(texture)?;
 
         unsafe {
             let ty = if tex.kind == GlTextureKind::Texture2DArray {
-                glow::TEXTURE_2D_ARRAY 
+                glow::TEXTURE_2D_ARRAY
             } else {
                 glow::TEXTURE_2D
             };
@@ -559,13 +489,14 @@ impl OpenGLRenderer {
         Ok(())
     }
 
-
     pub fn create_texture_array(
         &mut self,
         desc: TextureArrayDesc,
     ) -> anyhow::Result<TextureHandle> {
         unsafe {
-            let raw = self.gl.create_texture()
+            let raw = self
+                .gl
+                .create_texture()
                 .map_err(|e| anyhow::anyhow!("Failed to create OpenGL texture array: {e}"))?;
 
             let (internal_format, format, gl_type) = self.gl_texture_format(desc.format);
@@ -615,32 +546,26 @@ impl OpenGLRenderer {
 
             let handle = TextureHandle(self.textures.len() as u32);
 
-            self.textures.push(Some(GlTexture { 
-                raw, 
-                width: desc.width,  
-                height: desc.height, 
+            self.textures.push(Some(GlTexture {
+                raw,
+                width: desc.width,
+                height: desc.height,
                 format: desc.format,
-                kind: super::GlTextureKind::Texture2DArray
+                kind: super::GlTextureKind::Texture2DArray,
             }));
 
             Ok(handle)
         }
-
     }
 
     fn write_texture_array_layer(
         &mut self,
-        texture: TextureHandle,
-        x: u32,
-        y: u32,
-        layer: u32,
-        width: u32,
-        height: u32,
-        pixels: &[u8],
+        write: TextureArrayWrite,
+        pixels_rgba: &[u8],
     ) -> anyhow::Result<()> {
-        let tex = self.get_texture(texture)?;
+        let tex = self.get_texture(write.texture)?;
 
-        if x + width > tex.width || y + height > tex.height {
+        if write.x + write.width > tex.width || write.y + write.height > tex.height {
             anyhow::bail!("texture write out of bounds");
         }
 
@@ -655,15 +580,15 @@ impl OpenGLRenderer {
             self.gl.tex_sub_image_3d(
                 glow::TEXTURE_2D_ARRAY,
                 0,
-                x as i32,
-                y as i32,
-                layer as i32,
-                width as i32,
-                height as i32,
+                write.x as i32,
+                write.y as i32,
+                write.layer as i32,
+                write.width as i32,
+                write.height as i32,
                 1,
                 external_format,
                 ty,
-                glow::PixelUnpackData::Slice(Some(pixels)),
+                glow::PixelUnpackData::Slice(Some(pixels_rgba)),
             );
 
             self.gl.bind_texture(glow::TEXTURE_2D_ARRAY, None);
@@ -674,15 +599,11 @@ impl OpenGLRenderer {
 
     pub fn create_pipeline(&mut self, desc: PipelineDesc) -> anyhow::Result<PipelineHandle> {
         let (vertex_source, fragment_source) = match desc.shader {
-            BuiltinShaderPipeline::UiQuadAtlas => (
-                UI_QUAD_VERTEX_SHADER,
-                UI_QUAD_FRAGMENT_SHADER,
-            ),
-            BuiltinShaderPipeline::UiQuadDedicated => (
-                UI_QUAD_VERTEX_SHADER,
-                UI_QUAD_FRAGMENT_SHADER_DEDICATED,
-            ),
-        }; 
+            BuiltinShaderPipeline::UiQuadAtlas => (UI_QUAD_VERTEX_SHADER, UI_QUAD_FRAGMENT_SHADER),
+            BuiltinShaderPipeline::UiQuadDedicated => {
+                (UI_QUAD_VERTEX_SHADER, UI_QUAD_FRAGMENT_SHADER_DEDICATED)
+            }
+        };
 
         let vertex_shader = self.compile_shader(glow::VERTEX_SHADER, vertex_source)?;
         let fragment_shader = self.compile_shader(glow::FRAGMENT_SHADER, fragment_source)?;
@@ -690,46 +611,34 @@ impl OpenGLRenderer {
 
         unsafe { self.gl.use_program(Some(program)) };
 
-
-        let pipeline = Some(GlPipeline { program, vert_layouts: desc.vert_bindings });
+        let pipeline = Some(GlPipeline {
+            program,
+            vert_layouts: desc.vert_bindings,
+        });
         self.pipelines.push(pipeline);
-
 
         let pipeline = PipelineHandle((self.pipelines.len() - 1) as u32);
 
         for uniform in desc.uniform_bindings {
             match uniform.ty {
                 crate::graphics::device::UniformBindingType::Vec2 => {
-                    self.set_uniform_2f(pipeline.clone(), &uniform.name, 
-                        uniform.f_data[0], uniform.f_data[1])?;
+                    self.set_uniform_2f(
+                        pipeline,
+                        &uniform.name,
+                        uniform.f_data[0],
+                        uniform.f_data[1],
+                    )?;
                 }
                 crate::graphics::device::UniformBindingType::Sampler2dArray => {
-                    self.set_uniform_1i(pipeline.clone(), &uniform.name, 
-                        uniform.binding)?;
-                }   
+                    self.set_uniform_1i(pipeline, &uniform.name, uniform.binding)?;
+                }
             }
         }
         Ok(pipeline)
     }
-    pub fn draw_indexed(&mut self, draw: DrawIndexed) -> anyhow::Result<()> {
-        unsafe {
-            let offset_bytes = draw.index_offset as i32 * std::mem::size_of::<u32>() as i32;
-
-            self.gl.draw_elements_base_vertex(
-                glow::TRIANGLES,
-                draw.index_count as i32,
-                glow::UNSIGNED_INT,
-                offset_bytes,
-                draw.vertex_offset,
-            );
-        }
-
-        Ok(())
-    }
 
     fn get_texture(&self, handle: TextureHandle) -> anyhow::Result<&GlTexture> {
-        self
-            .textures
+        self.textures
             .get(handle.0 as usize)
             .and_then(|handle| handle.as_ref())
             .ok_or_else(|| anyhow::anyhow!("invalid texture handle: {:?}", handle))
@@ -742,19 +651,12 @@ impl OpenGLRenderer {
             .ok_or_else(|| anyhow::anyhow!("invalid pipeline handle: {:?}", handle))
     }
 
-    fn get_pipeline_mut(&mut self, handle: PipelineHandle) -> anyhow::Result<&mut GlPipeline> {
-        self.pipelines
-            .get_mut(handle.0 as usize)
-            .and_then(|pipeline| pipeline.as_mut())
-            .ok_or_else(|| anyhow::anyhow!("invalid pipeline handle: {:?}", handle))
-    }
-
     fn get_buffer(&self, handle: BufferHandle) -> anyhow::Result<&GlBuffer> {
         self.buffers
             .get(handle.0 as usize)
             .and_then(|buffer| buffer.as_ref())
             .ok_or_else(|| anyhow::anyhow!("invalid buffer handle: {:?}", handle))
-    } 
+    }
 
     pub fn set_vertex_buffer(&mut self, handle: BufferHandle, binding: u32) -> anyhow::Result<()> {
         let binding_idx = binding as usize;
@@ -767,7 +669,8 @@ impl OpenGLRenderer {
             return Ok(());
         }
 
-        let crnt_pipeline = self.current_pipeline
+        let crnt_pipeline = self
+            .current_pipeline
             .ok_or_else(|| anyhow::anyhow!("set_vertex_buffer called before set_pipeline"))?;
 
         let buffer_raw = {
@@ -778,59 +681,47 @@ impl OpenGLRenderer {
             }
             buffer.raw
         };
-        
+
         let layout = {
             let pipeline = self.get_pipeline(crnt_pipeline)?;
 
-            pipeline.vert_layouts.iter().find(|layout| layout.binding == binding)
+            pipeline
+                .vert_layouts
+                .iter()
+                .find(|layout| layout.binding == binding)
                 .cloned()
                 .ok_or_else(|| {
-                    anyhow::anyhow!("pipeline does not have vertex buffer layout for binding {}",
-                        binding)
+                    anyhow::anyhow!(
+                        "pipeline does not have vertex buffer layout for binding {}",
+                        binding
+                    )
                 })?
         };
 
         unsafe {
             self.gl.bind_buffer(glow::ARRAY_BUFFER, Some(buffer_raw));
 
-               for attr in &layout.attrs {
+            for attr in &layout.attrs {
                 let (components, gl_type, normalized) = self.gl_vertex_format(attr.format);
 
                 self.gl.enable_vertex_attrib_array(attr.location);
 
-                match attr.format {
-                    VertexFormat::Uint32
-                        | VertexFormat::Uint32x2
-                        | VertexFormat::Uint32x3
-                        | VertexFormat::Uint32x4 => {
-                            self.gl.vertex_attrib_pointer_i32(
-                                attr.location,
-                                components,
-                                gl_type,
-                                layout.stride as i32,
-                                attr.offset as i32
-                            );
-                        }
-                    _ => {
-                        self.gl.vertex_attrib_pointer_f32(
-                            attr.location,
-                            components,
-                            gl_type,
-                            normalized,
-                            layout.stride as i32,
-                            attr.offset as i32
-                        );
-                    }
-                }
+                self.gl.vertex_attrib_pointer_f32(
+                    attr.location,
+                    components,
+                    gl_type,
+                    normalized,
+                    layout.stride as i32,
+                    attr.offset as i32,
+                );
 
                 let divisor = match layout.step_mode {
                     VertexStepMode::Instance => 1,
-                    VertexStepMode::Vertex => 0
+                    VertexStepMode::Vertex => 0,
                 };
 
                 self.gl.vertex_attrib_divisor(attr.location, divisor);
             }
-
         }
 
         self.current_vbos[binding_idx] = Some(handle);
@@ -842,7 +733,7 @@ impl OpenGLRenderer {
         if self.current_pipeline == Some(handle) {
             return Ok(());
         }
-        
+
         let pipeline = self.get_pipeline(handle)?;
 
         unsafe {
@@ -868,7 +759,8 @@ impl OpenGLRenderer {
 
         let buffer_raw = buffer.raw;
         unsafe {
-            self.gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(buffer_raw));
+            self.gl
+                .bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(buffer_raw));
         }
 
         self.current_ibo = Some(handle);
@@ -901,7 +793,8 @@ impl OpenGLRenderer {
             let gl_target = self.gl_buffer_target(target);
 
             self.gl.bind_buffer(gl_target, Some(raw));
-            self.gl.buffer_sub_data_u8_slice(gl_target, offset as i32, data);
+            self.gl
+                .buffer_sub_data_u8_slice(gl_target, offset as i32, data);
         }
 
         // Conservative cache invalidation.
@@ -921,9 +814,9 @@ impl OpenGLRenderer {
     pub fn set_uniform_2f(
         &mut self,
         pipeline: PipelineHandle,
-        name: &str, 
-        x: f32, 
-        y: f32 
+        name: &str,
+        x: f32,
+        y: f32,
     ) -> anyhow::Result<()> {
         let program = self.get_pipeline(pipeline)?.program;
 
@@ -958,11 +851,9 @@ impl OpenGLRenderer {
         Ok(())
     }
 
-
     fn draw_indexed_instanced(&mut self, draw: DrawIndexedInstanced) -> anyhow::Result<()> {
         unsafe {
-            let offset_bytes =
-                draw.index_offset as i32 * std::mem::size_of::<u32>() as i32;
+            let offset_bytes = draw.index_offset as i32 * std::mem::size_of::<u32>() as i32;
 
             self.gl.draw_elements_instanced_base_vertex_base_instance(
                 glow::TRIANGLES,
@@ -977,52 +868,19 @@ impl OpenGLRenderer {
 
         Ok(())
     }
-
-    fn tex_kind_from_gl_kind(&self, kind: GlTextureKind) -> TextureKind {
-        match kind {
-            GlTextureKind::Texture2D => TextureKind::Texture2d, 
-            GlTextureKind::Texture2DArray => TextureKind::TextureArray2d, 
-        }
-    }
-
-    fn texture_get_kind(
-        &mut self,
-        texture: TextureHandle,
-    ) -> anyhow::Result<TextureKind> {
-
-        let tex = self.get_texture(texture)?;
-        Ok(self.tex_kind_from_gl_kind(tex.kind))
-    }
-
-    fn size(&self) -> (u32, u32) {
-        (self.width, self.height)
-    }
-
 }
 
 impl Drop for OpenGLRenderer {
     fn drop(&mut self) {
-        let _ = self.egl.make_current(
-            self.egl_display,
-            None,
-            None,
-            None,
-        );
+        let _ = self.egl.make_current(self.egl_display, None, None, None);
 
-        let _ = self.egl.destroy_surface(
-            self.egl_display,
-            self.egl_surface,
-        );
+        let _ = self.egl.destroy_surface(self.egl_display, self.egl_surface);
 
-        let _ = self.egl.destroy_context(
-            self.egl_display,
-            self.egl_context,
-        );
+        let _ = self.egl.destroy_context(self.egl_display, self.egl_context);
 
         let _ = self.egl.terminate(self.egl_display);
     }
 }
-
 
 impl GraphicsDevice for OpenGLRenderer {
     fn resize(&mut self, width: u32, height: u32) {
@@ -1063,7 +921,7 @@ impl GraphicsDevice for OpenGLRenderer {
         OpenGLRenderer::set_pipeline(self, handle)
     }
 
-    fn set_vertex_buffer(&mut self,handle: BufferHandle,  binding: u32) -> anyhow::Result<()> {
+    fn set_vertex_buffer(&mut self, handle: BufferHandle, binding: u32) -> anyhow::Result<()> {
         OpenGLRenderer::set_vertex_buffer(self, handle, binding)
     }
 
@@ -1080,28 +938,12 @@ impl GraphicsDevice for OpenGLRenderer {
     ) -> anyhow::Result<()> {
         OpenGLRenderer::set_uniform_2f(self, pipeline, name, x, y)
     }
-    fn set_uniform_1i(
-        &mut self,
-        pipeline: PipelineHandle,
-        name: &str,
-        value: i32,
-    ) -> anyhow::Result<()> {
-        OpenGLRenderer::set_uniform_1i(self, pipeline, name, value)
-    }
-
-    fn draw_indexed(&mut self, draw: DrawIndexed) -> anyhow::Result<()> {
-        OpenGLRenderer::draw_indexed(self, draw)
-    }
 
     fn draw_indexed_instanced(&mut self, draw: DrawIndexedInstanced) -> anyhow::Result<()> {
         OpenGLRenderer::draw_indexed_instanced(self, draw)
     }
 
-    fn set_texture(
-        &mut self,
-        slot: u32,
-        texture: TextureHandle,
-    ) -> anyhow::Result<()> {
+    fn set_texture(&mut self, slot: u32, texture: TextureHandle) -> anyhow::Result<()> {
         OpenGLRenderer::set_texture(self, slot, texture)
     }
 
@@ -1113,57 +955,15 @@ impl GraphicsDevice for OpenGLRenderer {
         OpenGLRenderer::create_texture(self, desc, data)
     }
 
-    fn write_texture(
-        &mut self,
-        texture: TextureHandle,
-        x: u32,
-        y: u32,
-        width: u32,
-        height: u32,
-        data: &[u8],
-    ) -> anyhow::Result<()> {
-        OpenGLRenderer::write_texture(self, texture, x, y, width, height, data)
-    }
-
-    fn texture_gen_mipmap(
-        &mut self, 
-        texture: TextureHandle,
-    ) -> anyhow::Result<()> {
-        OpenGLRenderer::texture_gen_mipmap(self, texture)
-    }
-    fn create_texture_array(
-        &mut self,
-        desc: TextureArrayDesc,
-    ) -> anyhow::Result<TextureHandle> {
+    fn create_texture_array(&mut self, desc: TextureArrayDesc) -> anyhow::Result<TextureHandle> {
         OpenGLRenderer::create_texture_array(self, desc)
     }
-      fn write_texture_array_layer(
+
+    fn write_texture_array_layer(
         &mut self,
-        texture: TextureHandle,
-        x: u32,
-        y: u32,
-        layer: u32,
-        width: u32,
-        height: u32,
-        pixels: &[u8],
+        write: TextureArrayWrite,
+        pixels_rgba: &[u8],
     ) -> anyhow::Result<()> {
-        OpenGLRenderer::write_texture_array_layer(
-            self, texture,
-            x,y, layer, width, height,
-            pixels)
-      }
-      
-      fn texture_get_kind(
-          &mut self,
-          texture: TextureHandle,
-      ) -> anyhow::Result<TextureKind> {
-        OpenGLRenderer::texture_get_kind(
-            self, texture)
-      }
-      
-      fn size(
-          &self
-      ) -> (u32, u32) {
-        OpenGLRenderer::size(self)
-      }
+        OpenGLRenderer::write_texture_array_layer(self, write, pixels_rgba)
+    }
 }

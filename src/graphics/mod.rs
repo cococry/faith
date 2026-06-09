@@ -1,31 +1,17 @@
-mod renderer;
-mod opengl;
-mod vulkan;
+pub mod opengl;
+pub mod renderer;
+pub mod vulkan;
 
 pub use renderer::{GraphicsBackend, Renderer};
 pub mod color;
-pub use color::Color; 
+pub use color::Color;
 
 pub mod handles;
-pub use handles::{
-    BufferHandle,
-    TextureHandle,
-    PipelineHandle,
-    FontHandle,
-};
+pub use handles::{BufferHandle, FontHandle, PipelineHandle, TextureHandle};
 pub mod device;
 pub use device::{
-    BufferTarget,
-    BufferUsage,
-    BufferDesc,
-    DrawIndexed,
-    PipelineDesc,
-    VertexStepMode,
-    GraphicsDevice,
-    TextureDesc,
-    TextureFormat,
-    UniformBindingType,
-    BuiltinShaderPipeline
+    BufferDesc, BufferTarget, BufferUsage, BuiltinShaderPipeline, GraphicsDevice, PipelineDesc,
+    TextureArrayWrite, TextureDesc, TextureFormat, UniformBindingType, VertexStepMode,
 };
 
 pub mod image;

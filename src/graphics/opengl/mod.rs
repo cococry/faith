@@ -1,6 +1,6 @@
-mod opengl;
+mod backend;
 
-pub use opengl::OpenGLRenderer;
+pub use backend::OpenGLRenderer;
 
 use crate::graphics::{BufferTarget, TextureFormat, device::VertexBufferBindingLayout};
 /// OpenGL buffer resource.
@@ -23,19 +23,19 @@ struct GlTexture {
     width: u32,
     height: u32,
     pub format: TextureFormat,
-    kind: GlTextureKind
+    kind: GlTextureKind,
 }
 
 /// OpenGL graphics pipeline resource.
 ///
-/// Stores the linked shader program and the 
-/// vertex buffer layouts used when binding 
+/// Stores the linked shader program and the
+/// vertex buffer layouts used when binding
 /// vertex buffers.
-/// Vertex array is not stored per pipeline, 
-/// the vertex array is pipeline-global in 
-/// the OpenGL backend. 
+/// Vertex array is not stored per pipeline,
+/// the vertex array is pipeline-global in
+/// the OpenGL backend.
 #[derive(Clone)]
 struct GlPipeline {
     program: glow::NativeProgram,
-    vert_layouts: Vec<VertexBufferBindingLayout> 
+    vert_layouts: Vec<VertexBufferBindingLayout>,
 }

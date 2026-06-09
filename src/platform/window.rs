@@ -1,27 +1,31 @@
 use super::event::WindowEvent;
-use crate::{cli::PlatformBackend, platform::{wayland::WaylandWaker, x11::X11Waker}};
+use crate::{
+    cli::PlatformBackend,
+    platform::{wayland::WaylandWaker, x11::X11Waker},
+};
 use tracing::{info, warn};
 
 /// Window creation configuration.
 ///
-/// Specifies the platform backend, 
+/// Specifies the platform backend,
 /// title and initial window size.
 pub struct WindowConfig {
-    pub backend: PlatformBackend, 
+    pub backend: PlatformBackend,
     pub title: String,
     pub width: u32,
     pub height: u32,
 }
 
-
-/// Platform-independent waker handle used 
-/// to request redraws. 
+/// Platform-independent waker handle used
+/// to request redraws.
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct PlatformWaker {
     inner: PlatformWakerInner,
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 enum PlatformWakerInner {
     X11(X11Waker),
     Wayland(WaylandWaker),
@@ -32,8 +36,8 @@ impl Default for WindowConfig {
         Self {
             backend: PlatformBackend::Auto,
             title: "Faith Messenger".to_string(),
-            width: 1280, 
-            height: 720, 
+            width: 1280,
+            height: 720,
         }
     }
 }
@@ -41,24 +45,24 @@ impl Default for WindowConfig {
 /// Platform-specific window implementation.
 pub enum Platform {
     X11(super::x11::X11Platform),
-    Wayland(super::wayland::WaylandPlatform)
+    Wayland(super::wayland::WaylandPlatform),
 }
 
-/// Native window handle information used by 
+/// Native window handle information used by
 /// graphics backends.
 pub enum WindowHandleInfo {
     X11 {
         display: *mut std::ffi::c_void,
         window: u64,
     },
-    Wayland { 
+    Wayland {
         display: *mut std::ffi::c_void,
         egl_win: *mut std::ffi::c_void,
     },
 }
 
-
 impl PlatformWaker {
+    #[allow(dead_code)]
     pub fn request_redraw(&self) -> anyhow::Result<()> {
         match &self.inner {
             PlatformWakerInner::X11(waker) => waker.request_redraw(),
@@ -68,15 +72,18 @@ impl PlatformWaker {
 }
 
 impl Platform {
-    /// Creates a new platform window using the 
+    /// Creates a new platform window using the
     /// configured backend.
     ///
-    /// Automatically chooses a supported backend 
+    /// Automatically chooses a supported backend
     /// when WindowConfig.backend is PlatformBackend::Auto.
-    /// Automatic choosing prefers Wayland and falls 
+    /// Automatic choosing prefers Wayland and falls
     /// back to X11.
     pub fn new(config: &WindowConfig) -> anyhow::Result<Self> {
-        info!("Window '{0}' at {1}x{2}", config.title, config.width, config.height);
+        info!(
+            "Window '{0}' at {1}x{2}",
+            config.title, config.width, config.height
+        );
         match config.backend {
             PlatformBackend::Auto => Self::new_auto(config),
 
@@ -107,23 +114,23 @@ impl Platform {
 
         info!("using X11 backend");
         Ok(Self::X11(super::x11::X11Platform::new(config)?))
-    } 
+    }
 
-    /// Polls and collects pending window events 
+    /// Polls and collects pending window events
     /// from the active platform backend.
     pub fn poll_events(&mut self) -> anyhow::Result<Vec<WindowEvent>> {
         match self {
             Self::X11(platform) => platform.poll_events(),
-            Self::Wayland(platform) => platform.poll_events()
+            Self::Wayland(platform) => platform.poll_events(),
         }
     }
 
-    /// Gets the native window handle from the 
+    /// Gets the native window handle from the
     /// active platform backend.
     pub fn native_handle(&self) -> WindowHandleInfo {
         match self {
             Self::X11(platform) => platform.native_handle(),
-            Self::Wayland(platform) => platform.native_handle()
+            Self::Wayland(platform) => platform.native_handle(),
         }
     }
 
@@ -131,21 +138,22 @@ impl Platform {
     pub fn size(&self) -> (u32, u32) {
         match self {
             Self::X11(platform) => platform.size(),
-            Self::Wayland(platform) => platform.size()
+            Self::Wayland(platform) => platform.size(),
         }
     }
 
-
-    /// Requests a redraw event to be sent by 
-    /// the active platform window (from a seperate 
+    /// Requests a redraw event to be sent by
+    /// the active platform window (from a seperate
     /// thread / from outside the event loop).
+    #[allow(dead_code)]
     pub fn request_redraw(&self) -> anyhow::Result<()> {
         self.waker().request_redraw()
     }
 
-    /// Creates a platform-independent waker for 
-    /// requesting redraws from outside the active 
+    /// Creates a platform-independent waker for
+    /// requesting redraws from outside the active
     /// platform event loop.
+    #[allow(dead_code)]
     pub fn waker(&self) -> PlatformWaker {
         match self {
             Platform::X11(platform) => PlatformWaker {
@@ -161,23 +169,23 @@ impl Platform {
     pub fn create_vulkan_surface(
         &self,
         entry: &ash::Entry,
-        instance: &ash::Instance, 
+        instance: &ash::Instance,
         have_ext_vk_khr_xcb_surface: bool,
         have_ext_vk_khr_wayland_surface: bool,
     ) -> anyhow::Result<ash::vk::SurfaceKHR> {
         match self {
             Self::X11(platform) => platform.create_vulkan_surface(
                 entry,
-                instance, have_ext_vk_khr_xcb_surface,
-                have_ext_vk_khr_wayland_surface
+                instance,
+                have_ext_vk_khr_xcb_surface,
+                have_ext_vk_khr_wayland_surface,
             ),
             Self::Wayland(platform) => platform.create_vulkan_surface(
                 entry,
-                instance, have_ext_vk_khr_xcb_surface,
-                have_ext_vk_khr_wayland_surface
+                instance,
+                have_ext_vk_khr_xcb_surface,
+                have_ext_vk_khr_wayland_surface,
             ),
         }
     }
- }
-
-
+}
