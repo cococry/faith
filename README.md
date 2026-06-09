@@ -50,3 +50,7 @@ faith
 ```
 
 Make sure `~/.cargo/bin` is in your `PATH`.
+
+## Contributing to faith 
+
+See the [contribution manual](https://github.com/cococry/faith/blob/main/CONTRIBUTING.md).
