@@ -110,7 +110,8 @@ struct TextLayoutKey {
 pub struct TextLayout {
     lines: Vec<TextLine>,
     paragraph_runs: Arc<[ShapedTextRun]>,
-    width: f32,
+    pub width: f32,
+    pub height: f32,
     line_height: f32,
     ascender: f32
 }
@@ -1442,11 +1443,13 @@ impl TextRenderer {
         let width = lines.iter()
             .map(|line| line.width)
             .fold(0.0, f32::max);
+        let height = lines.len() as f32 * line_height;
 
         let layout = Arc::new(TextLayout {
             lines,
             paragraph_runs,
             width,
+            height,
             line_height,
             ascender,
         });
@@ -1474,6 +1477,7 @@ impl TextRenderer {
     /// Lays out the text into wrapped lines using 
     /// `max_width` and renders the resulting layout 
     /// at the given position.
+
     pub fn render_wrapped<G: GraphicsDevice>(
         &mut self,
         x: f32,
@@ -1483,13 +1487,12 @@ impl TextRenderer {
         max_width: f32,
         gpu: &mut G,
         ui: &mut UIRenderer,
-    ) -> anyhow::Result<()> {
-        
+    ) -> anyhow::Result<Arc<TextLayout>> {
         let layout = self.layout_cached(
             text,
             font_handle,
             TextLayoutOptions {
-                max_width 
+                max_width,
             },
         )?;
 
@@ -1506,20 +1509,20 @@ impl TextRenderer {
                 let run = &layout.paragraph_runs[slice.run_index];
 
                 self.render_run_slice(
-                    cursor_x, 
-                    baseline_y, 
-                    run, 
+                    cursor_x,
+                    baseline_y,
+                    run,
                     slice,
-                    gpu, 
-                    ui)?;
+                    gpu,
+                    ui,
+                )?;
 
-                cursor_x += slice.x_advance; 
+                cursor_x += slice.x_advance;
             }
 
-            baseline_y += layout.line_height; 
+            baseline_y += layout.line_height;
         }
 
-        Ok(())
-
+        Ok(layout)
     }
 }

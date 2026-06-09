@@ -34,3 +34,7 @@ unicode-script = "0.5.8"
 ash = { version = "0.38.0", features = ["linked"] }
 vma = "0.3.1"
 vk-mem = "0.5.0"
+
+
+[build-dependencies]
+shaderc = "0.8"

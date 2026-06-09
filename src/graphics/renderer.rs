@@ -1,5 +1,5 @@
 
-use anyhow::anyhow;
+use anyhow::{Context, anyhow};
 
 use crate::graphics::{
     BufferDesc,
@@ -21,6 +21,7 @@ use crate::platform::Platform;
 /// Available graphics rendering backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GraphicsBackend {
+    Auto,
     OpenGL,
     Vulkan,
 }
@@ -37,15 +38,55 @@ impl Renderer {
         platform: &Platform,
     ) -> anyhow::Result<Self> {
         match backend {
-            GraphicsBackend::OpenGL => {
-                Ok(Self::OpenGL(OpenGLRenderer::new(platform)?))
+            GraphicsBackend::Auto => {
+                match Self::try_new_vulkan(platform) {
+                    Ok(renderer) => {
+                        tracing::info!("Selected Vulkan rendering backend");
+                        Ok(renderer)
+                    }
+
+                    Err(vk_err) => {
+                        tracing::warn!(
+                            "Vulkan backend unavailable, falling back to OpenGL: {vk_err:?}"
+                        );
+
+                        match Self::try_new_opengl(platform) {
+                            Ok(renderer) => {
+                                tracing::info!("Selected OpenGL rendering backend");
+                                Ok(renderer)
+                            }
+
+                            Err(gl_err) => {
+                                Err(anyhow::anyhow!(
+                                        "No graphics backend could be initialized.\n\
+                                     Vulkan error: {vk_err:?}\n\
+                                     OpenGL error: {gl_err:?}"
+                                ))
+                            }
+                        }
+                    }
+                }
             }
 
             GraphicsBackend::Vulkan => {
-                Ok(Self::Vulkan(VulkanRenderer::new(platform)?))
+                Self::try_new_vulkan(platform)
+                    .context("failed to initialize Vulkan backend")
+            }
+
+            GraphicsBackend::OpenGL => {
+                Self::try_new_opengl(platform)
+                    .context("failed to initialize OpenGL backend")
             }
         }
     }
+
+    fn try_new_vulkan(platform: &Platform) -> anyhow::Result<Self> {
+        Ok(Self::Vulkan(VulkanRenderer::new(platform)?))
+    }
+
+    fn try_new_opengl(platform: &Platform) -> anyhow::Result<Self> {
+        Ok(Self::OpenGL(OpenGLRenderer::new(platform)?))
+    } 
 
     fn device_mut(&mut self) -> &mut dyn GraphicsDevice {
         match self {
@@ -53,7 +94,7 @@ impl Renderer {
             Self::Vulkan(renderer) => renderer,
         }
     }
-    
+
     fn device(&self) -> &dyn GraphicsDevice {
         match self {
             Self::OpenGL(renderer) => renderer,
@@ -127,7 +168,7 @@ impl GraphicsDevice for Renderer {
 
     fn create_pipeline(
         &mut self,
-        desc: PipelineDesc<'_>,
+        desc: PipelineDesc,
     ) -> anyhow::Result<PipelineHandle> {
         self.device_mut().create_pipeline(desc)
     }

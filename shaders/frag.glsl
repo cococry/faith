@@ -1,4 +1,4 @@
-#version 450 
+#version 450
 
 layout(location = 1) in vec2 v_uv;
 layout(location = 2) in vec4 v_color;
@@ -13,7 +13,7 @@ layout(location = 0) out vec4 out_color;
 void main() {
     // 0 = solid rect
     // 1 = text glyph alpha mask
-    // 2 = emoji/atlas image 
+    // 2 = emoji/atlas image
 
     if (v_kind == 0) {
         out_color = v_color;
@@ -30,4 +30,3 @@ void main() {
         out_color = tex_color * v_color;
     }
 }
-

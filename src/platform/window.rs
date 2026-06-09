@@ -1,6 +1,5 @@
 use super::event::WindowEvent;
-use crate::{cli::Backend, platform::{wayland::WaylandWaker, x11::X11Waker}};
-use anyhow::anyhow;
+use crate::{cli::PlatformBackend, platform::{wayland::WaylandWaker, x11::X11Waker}};
 use tracing::{info, warn};
 
 /// Window creation configuration.
@@ -8,7 +7,7 @@ use tracing::{info, warn};
 /// Specifies the platform backend, 
 /// title and initial window size.
 pub struct WindowConfig {
-    pub backend: Backend, 
+    pub backend: PlatformBackend, 
     pub title: String,
     pub width: u32,
     pub height: u32,
@@ -31,7 +30,7 @@ enum PlatformWakerInner {
 impl Default for WindowConfig {
     fn default() -> Self {
         Self {
-            backend: Backend::Auto,
+            backend: PlatformBackend::Auto,
             title: "Faith Messenger".to_string(),
             width: 1280, 
             height: 720, 
@@ -73,20 +72,20 @@ impl Platform {
     /// configured backend.
     ///
     /// Automatically chooses a supported backend 
-    /// when WindowConfig.backend is Backend::Auto.
+    /// when WindowConfig.backend is PlatformBackend::Auto.
     /// Automatic choosing prefers Wayland and falls 
     /// back to X11.
     pub fn new(config: &WindowConfig) -> anyhow::Result<Self> {
         info!("Window '{0}' at {1}x{2}", config.title, config.width, config.height);
         match config.backend {
-            Backend::Auto => Self::new_auto(config),
+            PlatformBackend::Auto => Self::new_auto(config),
 
-            Backend::Wayland => {
+            PlatformBackend::Wayland => {
                 info!("using Wayland backend");
                 Ok(Self::Wayland(super::wayland::WaylandPlatform::new(config)?))
             }
 
-            Backend::X11 => {
+            PlatformBackend::X11 => {
                 info!("using X11 backend");
                 Ok(Self::X11(super::x11::X11Platform::new(config)?))
             }

@@ -110,11 +110,16 @@ pub struct UniformBinding {
 
 } 
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BuiltinShaderPipeline {
+    UiQuadAtlas,
+    UiQuadDedicated,
+}
+
 /// Description used to create a graphics 
 /// pipeline.
-pub struct PipelineDesc<'a> {
-    pub vertex_source: &'a str,
-    pub fragment_source: &'a str,
+pub struct PipelineDesc {
+    pub shader: BuiltinShaderPipeline,
 
     pub vert_bindings: Vec<VertexBufferBindingLayout>,
     pub uniform_bindings: Vec<UniformBinding>,
@@ -195,7 +200,7 @@ pub trait GraphicsDevice {
 
     /// Creates a graphics pipeline from shader 
     /// sources and vertex buffer layouts.
-    fn create_pipeline(&mut self, desc: PipelineDesc<'_>) -> anyhow::Result<PipelineHandle>;
+    fn create_pipeline(&mut self, desc: PipelineDesc) -> anyhow::Result<PipelineHandle>;
 
     /// Binds the active graphics pipeline.
     fn set_pipeline(&mut self, handle: PipelineHandle) -> anyhow::Result<()>;

@@ -24,7 +24,8 @@ pub use device::{
     GraphicsDevice,
     TextureDesc,
     TextureFormat,
-    UniformBindingType
+    UniformBindingType,
+    BuiltinShaderPipeline
 };
 
 pub mod image;

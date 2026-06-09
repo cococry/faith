@@ -9,9 +9,106 @@ use crate::graphics::device::{DrawIndexedInstanced, TextureArrayDesc, TextureKin
 use crate::graphics::opengl::{GlBuffer, GlPipeline, GlTexture, GlTextureKind};
 use crate::platform::Platform;
 use crate::platform::window::WindowHandleInfo;
-use crate::graphics::{BufferDesc, BufferHandle, BufferTarget, BufferUsage, Color, DrawIndexed, GraphicsDevice, PipelineDesc, PipelineHandle, TextureDesc, TextureFormat, TextureHandle, VertexStepMode};
+use crate::graphics::{BufferDesc, BufferHandle, BufferTarget, BufferUsage, BuiltinShaderPipeline, Color, DrawIndexed, GraphicsDevice, PipelineDesc, PipelineHandle, TextureDesc, TextureFormat, TextureHandle, VertexStepMode};
 
 const MAX_VBOS: usize = 8;
+
+
+pub const UI_QUAD_VERTEX_SHADER: &str = r#"
+#version 330 core
+
+layout(location = 0) in vec2 a_local_pos;
+layout(location = 1) in vec2 a_local_uv;
+
+layout(location = 2) in vec4 i_rect;
+layout(location = 3) in vec4 i_color;
+layout(location = 4) in vec4 i_uv;
+layout(location = 5) in vec4 i_params;
+
+uniform vec2 u_screen_size;
+
+out vec2 v_local_pos;
+out vec2 v_uv;
+out vec4 v_color;
+out vec4 v_rect;
+out vec4 v_params;
+flat out int v_layer;
+flat out int v_kind;
+
+void main() {
+    vec2 pixel_pos = i_rect.xy + a_local_pos * i_rect.zw;
+
+    vec2 ndc = vec2(
+        (pixel_pos.x / u_screen_size.x) * 2.0 - 1.0,
+        1.0 - (pixel_pos.y / u_screen_size.y) * 2.0
+    );
+
+    vec2 uv_min = i_uv.xy;
+    vec2 uv_max = i_uv.zw;
+
+    v_local_pos = a_local_pos;
+    v_uv = mix(uv_min, uv_max, a_local_uv);
+    v_color = i_color;
+    v_rect = i_rect;
+    v_params = i_params;
+
+    v_layer = int(i_params.z + 0.5);
+    v_kind = int(v_params.w + 0.5);
+
+    gl_Position = vec4(ndc, 0.0, 1.0);
+}
+"#;
+
+pub const UI_QUAD_FRAGMENT_SHADER: &str = r#"
+#version 330 core
+
+in vec2 v_uv;
+in vec4 v_color;
+
+flat in int v_layer;
+flat in int v_kind;
+
+uniform sampler2DArray u_texture_array;
+
+out vec4 out_color;
+
+void main() {
+    // 0 = solid rect
+    // 1 = text glyph alpha mask
+    // 2 = emoji/atlas image 
+
+    if (v_kind == 0) {
+        out_color = v_color;
+        return;
+    }
+
+    vec4 tex_color = texture(u_texture_array, vec3(v_uv, float(v_layer)));
+
+    if (v_kind == 1) {
+        // text glyph: use texture alpha only
+        out_color = vec4(v_color.rgb, v_color.a * tex_color.a);
+    } else {
+        // emoji/image: use full RGBA texture
+        out_color = tex_color * v_color;
+    }
+}
+"#;
+
+pub const UI_QUAD_FRAGMENT_SHADER_DEDICATED: &str = r#"
+#version 330 core
+
+in vec2 v_uv;
+in vec4 v_color;
+
+uniform sampler2D u_texture;
+
+out vec4 out_color;
+
+void main() {
+    vec4 tex_color = texture(u_texture, v_uv);
+    out_color = tex_color * v_color;
+}
+"#;
 
 pub struct OpenGLRenderer {
     gl: glow::Context,
@@ -52,9 +149,10 @@ impl OpenGLRenderer {
         };
 
         let egl = egl::Instance::new(egl::Static);
-        let egl_display = unsafe { egl.get_display(native_display as *mut c_void) 
-        }.expect("Failed to get EGL display from raw X display");
-
+        let egl_display = unsafe {
+            egl.get_display(native_display as *mut c_void)
+        }
+        .ok_or_else(|| anyhow::anyhow!("failed to get EGL display from native display"))?;
 
         egl.initialize(egl_display)?;
 
@@ -75,7 +173,7 @@ impl OpenGLRenderer {
 
         let config = egl
             .choose_first_config(egl_display, &attributes)?
-            .expect("unable to find an appropriate ELG configuration");
+            .ok_or_else(|| anyhow::anyhow!("unable to find an appropriate EGL configuration"))?;
 
         let major = 4;
         let minor = 0;
@@ -574,9 +672,20 @@ impl OpenGLRenderer {
         Ok(())
     }
 
-    pub fn create_pipeline(&mut self, desc: PipelineDesc<'_>) -> anyhow::Result<PipelineHandle> {
-        let vertex_shader = self.compile_shader(glow::VERTEX_SHADER, desc.vertex_source)?;
-        let fragment_shader = self.compile_shader(glow::FRAGMENT_SHADER, desc.fragment_source)?;
+    pub fn create_pipeline(&mut self, desc: PipelineDesc) -> anyhow::Result<PipelineHandle> {
+        let (vertex_source, fragment_source) = match desc.shader {
+            BuiltinShaderPipeline::UiQuadAtlas => (
+                UI_QUAD_VERTEX_SHADER,
+                UI_QUAD_FRAGMENT_SHADER,
+            ),
+            BuiltinShaderPipeline::UiQuadDedicated => (
+                UI_QUAD_VERTEX_SHADER,
+                UI_QUAD_FRAGMENT_SHADER_DEDICATED,
+            ),
+        }; 
+
+        let vertex_shader = self.compile_shader(glow::VERTEX_SHADER, vertex_source)?;
+        let fragment_shader = self.compile_shader(glow::FRAGMENT_SHADER, fragment_source)?;
         let program = self.link_program(&[vertex_shader, fragment_shader])?;
 
         unsafe { self.gl.use_program(Some(program)) };
@@ -946,7 +1055,7 @@ impl GraphicsDevice for OpenGLRenderer {
         OpenGLRenderer::write_buffer(self, handle, binding, offset, data)
     }
 
-    fn create_pipeline(&mut self, desc: PipelineDesc<'_>) -> anyhow::Result<PipelineHandle> {
+    fn create_pipeline(&mut self, desc: PipelineDesc) -> anyhow::Result<PipelineHandle> {
         OpenGLRenderer::create_pipeline(self, desc)
     }
 

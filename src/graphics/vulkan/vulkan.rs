@@ -1,19 +1,23 @@
+use std::collections::HashMap;
 use std::ffi::{CString, c_char, c_void};
-use std::fs::File;
-use std::io::Read;
+use std::hash::Hash;
 
 use crate::graphics::device::{DrawIndexedInstanced, TextureArrayDesc, TextureKind, UniformBindingShaderStage, VertexAttribute, VertexBufferBindingLayout, VertexFormat};
-use crate::graphics::vulkan::{VulkanBuffer, VulkanPipeline};
+use crate::graphics::vulkan::{VulkanBuffer, VulkanPipeline, VulkanTexture, VulkanTextureKind};
 use crate::platform::{Platform};
-use crate::graphics::{BufferDesc, BufferHandle, BufferTarget, BufferUsage, Color, DrawIndexed, GraphicsDevice, PipelineDesc, PipelineHandle, TextureDesc, TextureHandle, UniformBindingType, VertexStepMode};
+use crate::graphics::{BufferDesc, BufferHandle, BufferTarget, BufferUsage, BuiltinShaderPipeline, Color, DrawIndexed, GraphicsDevice, PipelineDesc, PipelineHandle, TextureDesc, TextureFormat, TextureHandle, UniformBindingType, VertexStepMode};
 
-use anyhow::Context;
+use anyhow::{Context};
 use ash::vk::{ColorComponentFlags, DescriptorPoolCreateFlags, Extent2D, ImageViewCreateInfo, PipelineCache, QueueFlags };
 use ash::{Entry, vk};
-use vk_mem::{Alloc, AllocationCreateInfo};
+use vk_mem::{Alloc};
 
 const MAX_STAGING_RING_MEM: vk::DeviceSize = 1024 * 1024 * 256;
 const FRAME_COUNT: usize = 2;
+const MAX_VBOS: usize = 8;
+const MAX_TEXTURE_SLOTS: usize = 16;
+
+pub const IS_RELEASE_BUILD: bool = !cfg!(debug_assertions);
 
 #[derive(Default)]
 struct PendingResize {
@@ -32,6 +36,20 @@ pub struct UploadContext {
     cmd_pool: vk::CommandPool,
     cmd_buf: vk::CommandBuffer,
     fence: vk::Fence
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FramePhase {
+    Idle,
+    RecordingUploads,
+    InRenderPass,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct TextureDescriptorKey {
+    pipeline: PipelineHandle,
+    texture: TextureHandle,
+    binding: u32,
 }
 
 pub struct VulkanRenderer {
@@ -65,10 +83,21 @@ pub struct VulkanRenderer {
     clear_color: [f32; 4],
 
     buffers: Vec<Option<VulkanBuffer>>,
+    textures: Vec<Option<VulkanTexture>>,
     pipelines: Vec<Option<VulkanPipeline>>,
+
+
+    current_pipeline: Option<PipelineHandle>,
+    current_vbos: [Option<BufferHandle>; MAX_VBOS],
+    current_ibo: Option<BufferHandle>,
+    current_textures: [Option<TextureHandle>; MAX_TEXTURE_SLOTS],
 
     staging_ring: StagingRing,
     upload_ctx: UploadContext,
+
+    frame_phase: FramePhase,
+
+    texture_descriptor_cache: HashMap<TextureDescriptorKey, Vec<vk::DescriptorSet>>,
 }
 
 #[derive(Default)]
@@ -79,7 +108,6 @@ struct SwapchainInfo {
 
     ideal_present_mode: vk::PresentModeKHR,
     ideal_surface_fmt: vk::SurfaceFormatKHR,
-    ideal_depth_fmt: vk::Format,
 }
 
 
@@ -94,9 +122,6 @@ struct Swapchain {
     extent: Extent2D, 
 
     img_views: Vec<vk::ImageView>,
-    img_views_depth: Vec<vk::ImageView>,
-    depth_images: Vec<vk::Image>,
-    depth_image_allocs: Vec<vk_mem::Allocation>,
     imgs_in_flight: Vec<vk::Fence>,
 
     image_idx: usize 
@@ -121,6 +146,31 @@ pub struct Frame {
 }
 
 impl VulkanRenderer {
+    fn current_cmd_buf(&self) -> vk::CommandBuffer {
+        self.frameloop.frames[self.frameloop.frame_idx].cmd_buf
+    }
+
+    fn get_vk_pipeline(&self, handle: PipelineHandle) -> anyhow::Result<&VulkanPipeline> {
+        self.pipelines
+            .get(handle.0 as usize)
+            .and_then(|slot| slot.as_ref())
+            .ok_or_else(|| anyhow::anyhow!("invalid pipeline handle {:?}", handle))
+    }
+
+    fn get_vk_buffer(&self, handle: BufferHandle) -> anyhow::Result<&VulkanBuffer> {
+        self.buffers
+            .get(handle.0 as usize)
+            .and_then(|slot| slot.as_ref())
+            .ok_or_else(|| anyhow::anyhow!("invalid buffer handle {:?}", handle))
+    }
+
+    fn get_vk_texture(&self, handle: TextureHandle) -> anyhow::Result<&VulkanTexture> {
+        self.textures
+            .get(handle.0 as usize)
+            .and_then(|slot| slot.as_ref())
+            .ok_or_else(|| anyhow::anyhow!("invalid texture handle {:?}", handle))
+    }
+
     fn check_exts(
         entry: &ash::Entry, 
     ) -> anyhow::Result<(bool, bool, bool, bool, bool)> {
@@ -302,7 +352,7 @@ impl VulkanRenderer {
         surface_fmts: &Vec<vk::SurfaceFormatKHR>
     ) -> anyhow::Result<vk::SurfaceFormatKHR> {
         for fmt in surface_fmts {
-            if fmt.format == vk::Format::B8G8R8_SRGB && 
+            if fmt.format == vk::Format::B8G8R8A8_UNORM && 
                 fmt.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR {
                     return Ok(*fmt);
             }
@@ -362,7 +412,6 @@ impl VulkanRenderer {
 
         let ideal_present_mode  = Self::get_ideal_swapchain_present_mode(&present_modes);
         let ideal_surface_fmt   = Self::get_ideal_swapchain_surface_fmt(&surface_fmts)?;
-        let ideal_depth_fmt     = Self::get_ideal_swapchain_depth_fmt(instance, phys_dev);
 
         Ok(SwapchainInfo { 
             present_modes, 
@@ -370,53 +419,14 @@ impl VulkanRenderer {
             capabilities,
             ideal_present_mode, 
             ideal_surface_fmt, 
-            ideal_depth_fmt
         })
     }
 
-    fn get_ideal_swapchain_depth_fmt(
-        instance: &ash::Instance, 
-        phys_dev: &vk::PhysicalDevice,
-    ) -> vk::Format {
-        let candidates: [vk::Format; 4] = [
-            vk::Format::D32_SFLOAT,
-            vk::Format::D32_SFLOAT_S8_UINT,
-            vk::Format::D24_UNORM_S8_UINT,
-            vk::Format::D16_UNORM,
-        ];
-
-        for candidate in candidates {
-            let props = unsafe { 
-                instance.get_physical_device_format_properties(
-                    *phys_dev, candidate) 
-            };
-
-            if props.optimal_tiling_features.contains(
-                vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT) {
-                return candidate;
-            }
-        }
-
-        vk::Format::UNDEFINED
-    }
-
-    fn get_depth_image_mask(
-        fmt: vk::Format
-    ) -> vk::ImageAspectFlags {
-        match fmt {
-            vk::Format::D32_SFLOAT_S8_UINT 
-                | vk::Format::D24_UNORM_S8_UINT =>
-                return vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL, 
-
-            _ => return vk::ImageAspectFlags::DEPTH 
-        }
-    }
 
     fn create_swapchain(
         instance: &ash::Instance,
         swapchain: &mut Swapchain,
         swapchain_dev: &ash::khr::swapchain::Device,
-        allocator: &vk_mem::Allocator,
 
         surface: &vk::SurfaceKHR,
         surface_inst: &ash::khr::surface::Instance,
@@ -427,9 +437,10 @@ impl VulkanRenderer {
         height: u32,
 
         graphics_queue_family_idx: u32,
-        present_queue_family_idx: u32
+        present_queue_family_idx: u32,
+        log: bool
     ) -> anyhow::Result<()> {
-        tracing::info!("Creating Vulkan swapchain...");
+        if log { tracing::info!("Creating Vulkan swapchain..."); }
 
         for view in swapchain.img_views.drain(..) {
             unsafe {
@@ -437,24 +448,8 @@ impl VulkanRenderer {
             }
         }
 
-        for view in swapchain.img_views_depth.drain(..) {
-            unsafe {
-                logical_dev.destroy_image_view(view, None);
-            }
-        }
-
-        for (image, mut alloc) in swapchain.depth_images.drain(..)
-            .zip(swapchain.depth_image_allocs.drain(..)) {
-                unsafe {
-                    allocator.destroy_image(image, &mut alloc);
-                }
-            }
-
         swapchain.info = Self::get_swapchain_info(instance, phys_dev, surface_inst, surface)?;
 
-        if swapchain.info.ideal_depth_fmt == vk::Format::UNDEFINED {
-            anyhow::bail!("No supported Vulkan depth format found for application window swapchain.");
-        }
         if swapchain.info.ideal_surface_fmt.format == vk::Format::UNDEFINED {
             anyhow::bail!("No supported Vulkan surface format found.");
         }
@@ -512,9 +507,6 @@ impl VulkanRenderer {
         swapchain.handle = swapchain_handle;
 
         swapchain.img_views.reserve(images.len());
-        swapchain.img_views_depth.reserve(images.len());
-        swapchain.depth_images.reserve(images.len());
-        swapchain.depth_image_allocs.reserve(images.len());
 
         swapchain.imgs_in_flight.clear();
         swapchain.imgs_in_flight.resize(images.len(), vk::Fence::null());
@@ -524,34 +516,6 @@ impl VulkanRenderer {
         swapchain.images = images;
 
         for &image in swapchain.images.iter() {
-            let depth_image_info = vk::ImageCreateInfo {
-                image_type: vk::ImageType::TYPE_2D,
-                format: swapchain.info.ideal_depth_fmt,
-                extent: vk::Extent3D { 
-                    width: extent.width, 
-                    height: extent.height, 
-                    depth: 1 
-                },
-                mip_levels: 1,
-                array_layers: 1,
-                samples: vk::SampleCountFlags::TYPE_1,
-                tiling: vk::ImageTiling::OPTIMAL,
-                usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
-                sharing_mode: vk::SharingMode::EXCLUSIVE,
-                initial_layout: vk::ImageLayout::UNDEFINED,
-
-                ..Default::default()
-            };
-
-            let depth_alloc_info = AllocationCreateInfo {
-                usage: vk_mem::MemoryUsage::AutoPreferDevice,
-                preferred_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
-                ..Default::default()
-            };
-
-            let (depth_image, depth_alloc) =  
-                unsafe { allocator.create_image(&depth_image_info, &depth_alloc_info)? }; 
-
             let image_view_info = ImageViewCreateInfo {
                 image, 
                 view_type: vk::ImageViewType::TYPE_2D,
@@ -571,59 +535,23 @@ impl VulkanRenderer {
                 },
                 ..Default::default()
             };
-            let depth_image_view_info = ImageViewCreateInfo {
-                image: depth_image, 
-                view_type: vk::ImageViewType::TYPE_2D, 
-                format: swapchain.info.ideal_depth_fmt,
-
-                subresource_range: vk::ImageSubresourceRange { 
-                    aspect_mask: Self::get_depth_image_mask(
-                                     swapchain.info.ideal_depth_fmt), 
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                },
-                ..Default::default()
-            };
 
             let img_view = match unsafe { logical_dev.create_image_view(&image_view_info, None) } {
                 Ok(view) => view,
                 Err(err) => {
-                    unsafe {
-                        let mut depth_alloc = depth_alloc;
-                        allocator.destroy_image(depth_image, &mut depth_alloc);
-                    }
                     return Err(err.into());
                 }
-            };
-
-            let img_view_depth = match unsafe {
-                logical_dev.create_image_view(&depth_image_view_info, None)
-            } {
-                Ok(view) => view,
-                Err(err) => {
-                    unsafe {
-                        logical_dev.destroy_image_view(img_view, None);
-
-                        let mut depth_alloc = depth_alloc;
-                        allocator.destroy_image(depth_image, &mut depth_alloc);
-                    }
-                    return Err(err.into());
-                }
-            };
+            }; 
 
             swapchain.img_views.push(img_view);
-            swapchain.img_views_depth.push(img_view_depth);
-            swapchain.depth_images.push(depth_image);
-            swapchain.depth_image_allocs.push(depth_alloc);
         }
 
-        tracing::info!(
+        if log { tracing::info!(
             "Initialized Vulkan swapchain (width: {}, height: {})",
             extent.width,
             extent.height
         );
+        }
 
         Ok(())
 
@@ -652,12 +580,10 @@ impl VulkanRenderer {
             }
         }
 
-        /* Absolute rust psychosis */
         let VulkanRenderer {
             instance,
             swapchain,
             swapchain_dev,
-            allocator,
             surface,
             surface_inst,
             logical_device,
@@ -668,15 +594,10 @@ impl VulkanRenderer {
             ..
         } = self;
 
-        let allocator = allocator
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Vulkan allocator already destroyed"))?;
-
-        Self::create_swapchain(
+            Self::create_swapchain(
             instance,
             swapchain,
             swapchain_dev,
-            allocator,
             surface,
             surface_inst,
             logical_device,
@@ -685,15 +606,15 @@ impl VulkanRenderer {
             pending_resize.height,
             *graphics_queue_family_idx,
             *present_queue_family_idx,
+            !IS_RELEASE_BUILD
         )?;
 
         self.frameloop.fbs.reserve(self.swapchain.images.len());
 
-        for (i, (&img_view, &depth_view)) in self.swapchain
-            .img_views.iter().zip(self.swapchain.img_views_depth.iter()).enumerate() {
+        for (i, &img_view) in self.swapchain
+            .img_views.iter().enumerate() {
                 let attachments = [
                     img_view,
-                    depth_view,
                 ];
 
                 let fb_info = vk::FramebufferCreateInfo {
@@ -712,11 +633,12 @@ impl VulkanRenderer {
 
                 self.frameloop.fbs.push(framebuffer);
 
-                tracing::info!(
+                if !IS_RELEASE_BUILD { tracing::info!(
                     "Initialized Vulkan frameloop framebuffer for swapchain image view {}",
                     i
                 );
-        }
+                }
+            }
 
         for frame in &mut self.frameloop.frames {
             unsafe {
@@ -724,7 +646,7 @@ impl VulkanRenderer {
                     frame.cmd_pool,
                     vk::CommandPoolResetFlags::empty(),
                 )?;
-            }
+                }
 
             let sem_info = vk::SemaphoreCreateInfo {
                 ..Default::default()
@@ -768,7 +690,9 @@ impl VulkanRenderer {
         self.frameloop.frame_idx    = 0;
         self.swapchain.image_idx    = 0;
 
-        tracing::info!("Resized render viewport of application window: {}x{}px.", self.width, self.height);
+        if !IS_RELEASE_BUILD {
+            tracing::info!("Resized render viewport of application window: {}x{}px.", self.width, self.height);
+        }
 
         Ok(())
     }
@@ -862,26 +786,6 @@ impl VulkanRenderer {
             layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
         };
 
-        let depth_attachment = vk::AttachmentDescription {
-            format: swapchain.info.ideal_depth_fmt,
-            samples: vk::SampleCountFlags::TYPE_1,
-
-            load_op: vk::AttachmentLoadOp::CLEAR,
-            store_op: vk::AttachmentStoreOp::DONT_CARE,
-
-            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
-            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
-
-            initial_layout: vk::ImageLayout::UNDEFINED,
-            final_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-
-            ..Default::default()
-        };
-
-        let depth_reference = vk::AttachmentReference {
-            attachment: 1,
-            layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-        };
 
         let color_references = [color_reference];
 
@@ -889,7 +793,6 @@ impl VulkanRenderer {
             pipeline_bind_point: vk::PipelineBindPoint::GRAPHICS,
             color_attachment_count: color_references.len() as u32,
             p_color_attachments: color_references.as_ptr(),
-            p_depth_stencil_attachment: &depth_reference,
             ..Default::default()
         };
 
@@ -904,15 +807,13 @@ impl VulkanRenderer {
                     | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
 
                     src_access_mask: vk::AccessFlags::empty(),
-                    dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE
-                        | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                    dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
 
-                        ..Default::default()
+                    ..Default::default()
         };
 
         let attachments = [
             color_attachment,
-            depth_attachment,
         ];
 
         let subpasses = [subpass];
@@ -938,15 +839,13 @@ impl VulkanRenderer {
         frameloop.fbs.clear();
         frameloop.fbs.reserve(swapchain.images.len());
 
-        for (i, (&img_view, &depth_view)) in swapchain
+        for (i, &img_view) in swapchain
             .img_views
                 .iter()
-                .zip(swapchain.img_views_depth.iter())
                 .enumerate()
                 {
                     let fb_attachments = [
                         img_view,
-                        depth_view,
                     ];
 
                     let fb_info = vk::FramebufferCreateInfo {
@@ -1058,6 +957,24 @@ impl VulkanRenderer {
         }
     } 
 
+    fn destroy_all_textures(&mut self) {
+        let Some(allocator) = self.allocator.as_ref() else {
+            return;
+        };
+
+        for slot in &mut self.textures {
+            let Some(mut texture) = slot.take() else {
+                continue;
+            };
+
+            unsafe {
+                self.logical_device.destroy_sampler(texture.sampler, None);
+                self.logical_device.destroy_image_view(texture.view, None);
+                allocator.destroy_image(texture.image, &mut texture.alloc);
+            }
+        }
+    }
+
     fn destroy_swapchain_resources(&mut self) {
         unsafe {
             for fb in self.frameloop.fbs.drain(..) {
@@ -1068,21 +985,6 @@ impl VulkanRenderer {
                 self.logical_device.destroy_image_view(view, None);
             }
 
-            for view in self.swapchain.img_views_depth.drain(..) {
-                self.logical_device.destroy_image_view(view, None);
-            }
-
-            for (image, mut alloc) in self
-                .swapchain
-                    .depth_images
-                    .drain(..)
-                    .zip(self.swapchain.depth_image_allocs.drain(..))
-                    {
-                        let Some(allocator) = self.allocator.as_ref() else {
-                            return;
-                        };
-                        allocator.destroy_image(image, &mut alloc);
-                    }
 
             if self.swapchain.handle != vk::SwapchainKHR::null() {
                 self.swapchain_dev.destroy_swapchain(self.swapchain.handle, None);
@@ -1127,6 +1029,8 @@ impl VulkanRenderer {
     }
 
     fn destroy_all_pipelines(&mut self) {
+        self.texture_descriptor_cache.clear();
+
         unsafe {
             for slot in &mut self.pipelines {
                 let Some(pipeline) = slot.take() else {
@@ -1282,7 +1186,6 @@ impl VulkanRenderer {
         Self::create_swapchain(&instance, 
             &mut swapchain, 
             &swapchain_dev, 
-            &allocator, 
             &surface, 
             &surface_inst, 
             &logical_device, 
@@ -1290,7 +1193,8 @@ impl VulkanRenderer {
             width,
             height,
             graphics_queue_family_idx,
-            present_queue_family_idx)?;
+            present_queue_family_idx,
+            true)?;
 
         let mut frameloop = Frameloop::default();
 
@@ -1328,11 +1232,19 @@ impl VulkanRenderer {
             clear_color: [0.0, 0.0, 0.0, 1.0],
 
             buffers: initial_buffers, 
+            textures: Vec::new(), 
             pipelines: Vec::new(),
 
             staging_ring,
 
-            upload_ctx
+            upload_ctx,
+            current_pipeline: None,
+            current_vbos: [None; MAX_VBOS],
+            current_ibo: None,
+            current_textures: [None; MAX_TEXTURE_SLOTS],
+
+            frame_phase: FramePhase::Idle,
+            texture_descriptor_cache: HashMap::new()
         })
     }
 
@@ -1371,6 +1283,13 @@ impl VulkanRenderer {
         }
 
         usage
+    }
+
+    fn vk_texture_format(format: TextureFormat) -> vk::Format {
+        match format {
+            TextureFormat::Rgba8 => vk::Format::R8G8B8A8_UNORM,
+            TextureFormat::Alpha8 => vk::Format::R8_UNORM,
+        }
     }
 
     fn create_vk_buffer_raw(
@@ -1746,6 +1665,7 @@ impl VulkanRenderer {
 
         self.skip_render = false;
         self.swapchain.image_idx = 0;
+        self.staging_ring.head = 0;
 
         let frame = &mut self.frameloop.frames[self.frameloop.frame_idx];
 
@@ -1804,7 +1724,6 @@ impl VulkanRenderer {
             )?;
         }
 
-
         let begin_info = vk::CommandBufferBeginInfo {
             flags: vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
             ..Default::default()
@@ -1814,29 +1733,31 @@ impl VulkanRenderer {
             self.logical_device.begin_command_buffer(frame.cmd_buf, &begin_info)?;
         }
 
+        self.frame_phase = FramePhase::RecordingUploads;
+
         Ok(())
     }
 
-    pub fn end_frame(&mut self) -> anyhow::Result<()> {
+    fn begin_render_pass(&mut self) -> anyhow::Result<()> {
         if self.skip_render {
             return Ok(());
         }
 
+        if self.frame_phase != FramePhase::RecordingUploads {
+            anyhow::bail!(
+                "begin_render_pass called in invalid frame phase: {:?}",
+                self.frame_phase
+            );
+        }
+
         let frame_idx = self.frameloop.frame_idx;
         let image_idx = self.swapchain.image_idx;
-
-        let frame = &mut self.frameloop.frames[frame_idx];
+        let frame = &self.frameloop.frames[frame_idx];
 
         let clear_values = [
             vk::ClearValue {
                 color: vk::ClearColorValue {
                     float32: self.clear_color,
-                },
-            },
-            vk::ClearValue {
-                depth_stencil: vk::ClearDepthStencilValue {
-                    depth: 1.0,
-                    stencil: 0,
                 },
             },
         ];
@@ -1861,15 +1782,43 @@ impl VulkanRenderer {
                 &render_pass_begin,
                 vk::SubpassContents::INLINE,
             );
-
-            self.logical_device.cmd_end_render_pass(frame.cmd_buf);
         }
 
+        self.frame_phase = FramePhase::InRenderPass;
+
+        self.current_pipeline = None;
+        self.current_vbos = [None; MAX_VBOS];
+        self.current_ibo = None;
+        self.current_textures = [None; MAX_TEXTURE_SLOTS];
+
+        Ok(())
+    }
+
+    pub fn end_frame(&mut self) -> anyhow::Result<()> {
+        if self.skip_render {
+            return Ok(());
+        }
+
+        if self.frame_phase == FramePhase::RecordingUploads {
+            self.begin_render_pass()?;
+        }
+
+        if self.frame_phase != FramePhase::InRenderPass {
+            anyhow::bail!("end_frame called without active render pass");
+        }
+
+
+        let frame_idx = self.frameloop.frame_idx;
+        let image_idx = self.swapchain.image_idx;
+
+        let frame = &mut self.frameloop.frames[frame_idx];
+
         unsafe {
+            self.logical_device.cmd_end_render_pass(frame.cmd_buf);
             self.logical_device.end_command_buffer(frame.cmd_buf)?;
         }
 
-        let wait_stage = vk::PipelineStageFlags::ALL_COMMANDS;
+        let wait_stage = vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT;
 
         let wait_semaphores = [
             frame.image_available,
@@ -1953,6 +1902,8 @@ impl VulkanRenderer {
         self.frameloop.frame_idx =
             (self.frameloop.frame_idx + 1) % FRAME_COUNT;
 
+        self.frame_phase = FramePhase::Idle;
+
         Ok(())
     }
     pub fn clear_color(&mut self, color: Color) {
@@ -1965,17 +1916,38 @@ impl VulkanRenderer {
     }
 
 
-    fn create_shader_module(
+    fn ensure_render_pass_started(&mut self) -> anyhow::Result<()> {
+        match self.frame_phase {
+            FramePhase::InRenderPass => Ok(()),
+            FramePhase::RecordingUploads => self.begin_render_pass(),
+            FramePhase::Idle => {
+                anyhow::bail!("render command called outside begin_frame/end_frame")
+            }
+        }
+    }
+
+    fn create_shader_module_from_bytes(
         &self,
-        filepath: &str,
+        bytes: &[u8],
     ) -> anyhow::Result<vk::ShaderModule> {
-        let mut file = File::open(filepath)?;
-        let code = ash::util::read_spv(&mut file)
-            .context("failed to read SPIR-V shader")?;
+        if bytes.len() % 4 != 0 {
+            anyhow::bail!("SPIR-V bytecode length is not a multiple of 4");
+        }
+
+        let mut words = Vec::with_capacity(bytes.len() / 4);
+
+        for chunk in bytes.chunks_exact(4) {
+            words.push(u32::from_le_bytes([
+                    chunk[0],
+                    chunk[1],
+                    chunk[2],
+                    chunk[3],
+            ]));
+        }
 
         let create_info = vk::ShaderModuleCreateInfo {
-            code_size: code.len() * std::mem::size_of::<u32>(),
-            p_code: code.as_ptr(),
+            code_size: bytes.len(),
+            p_code: words.as_ptr(),
             ..Default::default()
         };
 
@@ -2048,9 +2020,20 @@ impl VulkanRenderer {
         }
     }
 
-    pub fn create_pipeline(&mut self, desc: PipelineDesc<'_>) -> anyhow::Result<PipelineHandle> {
-        let vert_module = self.create_shader_module("compiled_shaders/vert.spv")?;
-        let frag_module = self.create_shader_module("compiled_shaders/frag.spv")?;
+    pub fn create_pipeline(&mut self, desc: PipelineDesc) -> anyhow::Result<PipelineHandle> {
+        let (vertex_spv, fragment_spv) = match desc.shader {
+            BuiltinShaderPipeline::UiQuadAtlas => (
+                include_bytes!(concat!(env!("OUT_DIR"), "/vert.spv")).as_slice(),
+                include_bytes!(concat!(env!("OUT_DIR"), "/frag.spv")).as_slice(),
+            ),
+            BuiltinShaderPipeline::UiQuadDedicated => (
+                include_bytes!(concat!(env!("OUT_DIR"), "/vert.spv")).as_slice(),
+                include_bytes!(concat!(env!("OUT_DIR"), "/frag_dedicated.spv")).as_slice(),
+            ),
+        }; 
+        let vert_module = self.create_shader_module_from_bytes(vertex_spv)?;
+        let frag_module = self.create_shader_module_from_bytes(fragment_spv)?;
+
 
         let shader_stages: [vk::PipelineShaderStageCreateInfo; 2] = [
             vk::PipelineShaderStageCreateInfo {
@@ -2121,13 +2104,6 @@ impl VulkanRenderer {
             ..Default::default()
         };
 
-        let depth_state = vk::PipelineDepthStencilStateCreateInfo {
-            depth_test_enable: vk::FALSE,
-            depth_write_enable: vk::FALSE,
-            depth_bounds_test_enable: vk::FALSE,
-            stencil_test_enable: vk::FALSE,
-            ..Default::default()
-        };
 
         let bindings = desc
             .vert_bindings
@@ -2177,6 +2153,8 @@ impl VulkanRenderer {
             Vec::new()
         };
 
+        let max_cached_textures = 1024u32;
+
         let mut desc_layout_bindings    = Vec::new();
         let mut desc_pool_sizes         = Vec::new();
 
@@ -2206,7 +2184,7 @@ impl VulkanRenderer {
             desc_pool_sizes.push(
                 vk::DescriptorPoolSize {
                     ty: vk_type, 
-                    descriptor_count: self.swapchain.images.len() as u32,
+                    descriptor_count: max_cached_textures * self.swapchain.images.len() as u32,
             }
 
             );
@@ -2241,7 +2219,7 @@ impl VulkanRenderer {
 
         let pool_info = vk::DescriptorPoolCreateInfo {
             flags: DescriptorPoolCreateFlags::empty(),
-            max_sets: self.swapchain.images.len() as u32,
+            max_sets: max_cached_textures *  self.swapchain.images.len() as u32,
             pool_size_count: desc_pool_sizes.len() as u32,
             p_pool_sizes: desc_pool_sizes.as_ptr(),
             ..Default::default()
@@ -2275,7 +2253,6 @@ impl VulkanRenderer {
             p_rasterization_state: &raster_state,
             p_dynamic_state: &dynamic_state,
             p_viewport_state: &viewport_state,
-            p_depth_stencil_state: &depth_state,
             layout: pipeline_layout,
             render_pass: self.frameloop.crnt_pass,
             ..Default::default()
@@ -2302,8 +2279,15 @@ impl VulkanRenderer {
         let raw = pipelines[0];
         let handle = PipelineHandle(self.pipelines.len() as u32);
 
-        self.pipelines.push(Some(VulkanPipeline { raw, layout: pipeline_layout, desc_layout,
-            desc_pool, descriptor_sets: desc_sets}));
+        self.pipelines.push(Some(VulkanPipeline {
+            raw,
+            layout: pipeline_layout,
+            desc_layout: desc_layout,
+            desc_pool,
+            descriptor_sets: desc_sets, 
+            push_constant_size: pc_size,
+            push_constant_stage_flags: stage_flags,
+        }));
 
         tracing::info!(
             "Created Vulkan graphics pipeline (vertex bindings: {}, vertex attributes: {})",
@@ -2349,6 +2333,326 @@ impl VulkanRenderer {
         }
     }
 
+    pub fn create_texture_array(
+        &mut self,
+        desc: TextureArrayDesc,
+    ) -> anyhow::Result<TextureHandle> {
+        if desc.width == 0 || desc.height == 0 || desc.layers == 0 {
+            anyhow::bail!(
+                "invalid texture array size: {}x{} layers={}",
+                desc.width,
+                desc.height,
+                desc.layers,
+            );
+        }
+
+        let vk_format = Self::vk_texture_format(desc.format);
+
+        let image_info = vk::ImageCreateInfo {
+            image_type: vk::ImageType::TYPE_2D,
+            format: vk_format,
+
+            extent: vk::Extent3D {
+                width: desc.width,
+                height: desc.height,
+                depth: 1,
+            },
+
+            mip_levels: 1,
+            array_layers: desc.layers,
+
+            samples: vk::SampleCountFlags::TYPE_1,
+            tiling: vk::ImageTiling::OPTIMAL,
+
+            usage: vk::ImageUsageFlags::SAMPLED
+                | vk::ImageUsageFlags::TRANSFER_DST,
+
+                sharing_mode: vk::SharingMode::EXCLUSIVE,
+                initial_layout: vk::ImageLayout::UNDEFINED,
+
+                ..Default::default()
+        };
+
+        let alloc_info = vk_mem::AllocationCreateInfo {
+            usage: vk_mem::MemoryUsage::AutoPreferDevice,
+            preferred_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            ..Default::default()
+        };
+
+        let allocator = self
+            .allocator
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vulkan allocator already destroyed"))?;
+
+        let (image, alloc) = unsafe {
+            allocator.create_image(&image_info, &alloc_info)?
+        };
+
+        let view_info = vk::ImageViewCreateInfo {
+            image,
+            view_type: vk::ImageViewType::TYPE_2D_ARRAY,
+            format: vk_format,
+
+            subresource_range: vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: desc.layers,
+            },
+
+            ..Default::default()
+        };
+
+        let view = match unsafe {
+            self.logical_device.create_image_view(&view_info, None)
+        } {
+            Ok(view) => view,
+            Err(err) => {
+                unsafe {
+                    let allocator = self.allocator.as_ref().unwrap();
+                    let mut alloc = alloc;
+                    allocator.destroy_image(image, &mut alloc);
+                }
+
+                return Err(err.into());
+            }
+        };
+
+        let sampler_info = vk::SamplerCreateInfo {
+            mag_filter: vk::Filter::LINEAR,
+            min_filter: vk::Filter::LINEAR,
+
+            mipmap_mode: vk::SamplerMipmapMode::LINEAR,
+
+            address_mode_u: vk::SamplerAddressMode::CLAMP_TO_EDGE,
+            address_mode_v: vk::SamplerAddressMode::CLAMP_TO_EDGE,
+            address_mode_w: vk::SamplerAddressMode::CLAMP_TO_EDGE,
+
+            min_lod: 0.0,
+            max_lod: 0.0,
+            mip_lod_bias: 0.0,
+
+            anisotropy_enable: vk::FALSE,
+            max_anisotropy: 1.0,
+
+            border_color: vk::BorderColor::INT_OPAQUE_BLACK,
+            unnormalized_coordinates: vk::FALSE,
+
+            ..Default::default()
+        };
+
+        let sampler = match unsafe {
+            self.logical_device.create_sampler(&sampler_info, None)
+        } {
+            Ok(sampler) => sampler,
+            Err(err) => {
+                unsafe {
+                    self.logical_device.destroy_image_view(view, None);
+
+                    let allocator = self.allocator.as_ref().unwrap();
+                    let mut alloc = alloc;
+                    allocator.destroy_image(image, &mut alloc);
+                }
+
+                return Err(err.into());
+            }
+        };
+
+        if let Err(err) = 
+            self.transition_image_layout_immediate(
+                image,
+                vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: desc.layers,
+                },
+            )
+        {
+            unsafe {
+                self.logical_device.destroy_sampler(sampler, None);
+                self.logical_device.destroy_image_view(view, None);
+
+                let allocator = self.allocator.as_ref().unwrap();
+                let mut alloc = alloc;
+                allocator.destroy_image(image, &mut alloc);
+            }
+
+            return Err(err);
+        }
+
+        let handle = TextureHandle(self.textures.len() as u32);
+
+        self.textures.push(Some(VulkanTexture {
+            image,
+            alloc,
+            view,
+            sampler,
+
+            width: desc.width,
+            height: desc.height,
+            layers: desc.layers,
+
+            format: desc.format,
+            vk_format,
+            kind: VulkanTextureKind::Texture2DArray,
+
+            layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        }));
+
+        tracing::info!(
+            "Created Vulkan texture array {:?}: {}x{} layers={} format={:?}",
+            image,
+            desc.width,
+            desc.height,
+            desc.layers,
+            desc.format,
+        );
+
+        Ok(handle)
+    }
+
+    fn transition_image_layout_immediate(
+        &mut self,
+        image: vk::Image,
+        old_layout: vk::ImageLayout,
+        new_layout: vk::ImageLayout,
+        subresource_range: vk::ImageSubresourceRange,
+    ) -> anyhow::Result<()> {
+        let device = &self.logical_device;
+
+        unsafe  {
+            device.wait_for_fences(&[self.upload_ctx.fence], true, u64::MAX)?;
+            device.reset_fences(&[self.upload_ctx.fence])?;
+
+            device.reset_command_pool(
+                self.upload_ctx.cmd_pool,
+                vk::CommandPoolResetFlags::empty(),
+            )?;
+        }
+
+        let begin_info = vk::CommandBufferBeginInfo {
+            flags: vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
+            ..Default::default()
+        };
+
+        unsafe  {
+            device.begin_command_buffer(self.upload_ctx.cmd_buf, &begin_info)?;
+        }
+
+        let (src_stage, src_access, dst_stage, dst_access) =
+            Self::image_layout_barrier_masks(old_layout, new_layout)?;
+
+        let barrier = vk::ImageMemoryBarrier {
+            old_layout,
+            new_layout,
+
+            src_access_mask: src_access,
+            dst_access_mask: dst_access,
+
+            src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+            dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+
+            image,
+            subresource_range,
+
+            ..Default::default()
+        };
+
+        unsafe {
+            device.cmd_pipeline_barrier(
+                self.upload_ctx.cmd_buf,
+                src_stage,
+                dst_stage,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[barrier],
+            );
+
+            device.end_command_buffer(self.upload_ctx.cmd_buf)?;
+        }
+
+        let cmd_bufs = [self.upload_ctx.cmd_buf];
+
+        let submit = vk::SubmitInfo {
+            command_buffer_count: cmd_bufs.len() as u32,
+            p_command_buffers: cmd_bufs.as_ptr(),
+            ..Default::default()
+        };
+
+        unsafe {
+            device.queue_submit(self.graphics_queue, &[submit], self.upload_ctx.fence)?;
+
+            device.wait_for_fences(&[self.upload_ctx.fence], true, u64::MAX)?;
+        }
+
+        Ok(())
+    }
+
+    fn image_layout_barrier_masks(
+        old_layout: vk::ImageLayout,
+        new_layout: vk::ImageLayout,
+    ) -> anyhow::Result<(
+    vk::PipelineStageFlags,
+    vk::AccessFlags,
+    vk::PipelineStageFlags,
+    vk::AccessFlags,
+    )> {
+        match (old_layout, new_layout) {
+            (
+                vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            ) => Ok((
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::AccessFlags::empty(),
+                vk::PipelineStageFlags::TRANSFER,
+                vk::AccessFlags::TRANSFER_WRITE,
+            )),
+
+            (
+                vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            ) => Ok((
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::AccessFlags::empty(),
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::AccessFlags::SHADER_READ,
+            )),
+
+            (
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            ) => Ok((
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::AccessFlags::SHADER_READ,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::AccessFlags::TRANSFER_WRITE,
+            )),
+
+            (
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            ) => Ok((
+                vk::PipelineStageFlags::TRANSFER,
+                vk::AccessFlags::TRANSFER_WRITE,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::AccessFlags::SHADER_READ,
+            )),
+
+            _ => {
+                anyhow::bail!(
+                    "unsupported image layout transition: {:?} -> {:?}",
+                    old_layout,
+                    new_layout,
+                )
+            }
+        }
+    }
 
     pub fn write_buffer(
         &mut self,
@@ -2357,6 +2661,10 @@ impl VulkanRenderer {
         offset: usize,
         data: &[u8],
     ) -> anyhow::Result<()> {
+        if self.frame_phase == FramePhase::InRenderPass {
+            anyhow::bail!("texture upload called after render pass started");
+        }
+
         if data.is_empty() {
             return Ok(());
         }
@@ -2385,8 +2693,65 @@ impl VulkanRenderer {
         if is_mapped {
             self.write_mapped_buffer(handle, offset, data)
         } else {
+            if self.frame_phase == FramePhase::InRenderPass {
+                anyhow::bail!(
+                    "device local write_buffer called after render pass started" 
+                );
+            }
             self.transfer_to_device_local_buffer(handle, offset, data)
         }
+    }
+
+    fn texture_format_size(format: TextureFormat) -> usize {
+        match format {
+            TextureFormat::Rgba8 => 4,
+            TextureFormat::Alpha8=> 1,
+        }
+    }
+
+    fn cmd_transition_image_layout(
+        &self,
+        cmd_buf: vk::CommandBuffer,
+        image: vk::Image,
+        old_layout: vk::ImageLayout,
+        new_layout: vk::ImageLayout,
+        subresource_range: vk::ImageSubresourceRange,
+    ) -> anyhow::Result<()> {
+        if old_layout == new_layout {
+            return Ok(());
+        }
+
+        let (src_stage, src_access, dst_stage, dst_access) =
+            Self::image_layout_barrier_masks(old_layout, new_layout)?;
+
+        let barrier = vk::ImageMemoryBarrier {
+            old_layout,
+            new_layout,
+
+            src_access_mask: src_access,
+            dst_access_mask: dst_access,
+
+            src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+            dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+
+            image,
+            subresource_range,
+
+            ..Default::default()
+        };
+
+        unsafe {self.logical_device.cmd_pipeline_barrier(
+            cmd_buf,
+            src_stage,
+            dst_stage,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[barrier],
+        );
+        }
+
+        Ok(())
     }
 
     fn write_mapped_buffer(
@@ -2512,8 +2877,1061 @@ impl VulkanRenderer {
 
         Ok(())
     }
+    pub fn set_pipeline(&mut self, handle: PipelineHandle) -> anyhow::Result<()> {
+        self.ensure_render_pass_started()?;
+
+        if self.current_pipeline == Some(handle) {
+            return Ok(());
+        }
+
+        let cmd_buf = self.current_cmd_buf();
+
+        let raw = self.get_vk_pipeline(handle)?.raw;
+
+        unsafe {
+            self.logical_device.cmd_bind_pipeline(
+                cmd_buf,
+                vk::PipelineBindPoint::GRAPHICS,
+                raw,
+            );
+
+            let viewport = vk::Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: self.swapchain.extent.width as f32,
+                height: self.swapchain.extent.height as f32,
+                min_depth: 0.0,
+                max_depth: 0.0,
+            };
+
+            let scissor = vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent: self.swapchain.extent,
+            };
+
+            self.logical_device.cmd_set_viewport(cmd_buf, 0, &[viewport]);
+            self.logical_device.cmd_set_scissor(cmd_buf, 0, &[scissor]);
+        }
+
+        self.current_pipeline = Some(handle);
+
+        Ok(())
+    }
+
+    pub fn set_vertex_buffer(
+        &mut self,
+        handle: BufferHandle,
+        binding: u32,
+    ) -> anyhow::Result<()> {
+        self.ensure_render_pass_started()?;
+
+        let binding_usize = binding as usize;
+
+        if binding_usize >= MAX_VBOS {
+            anyhow::bail!("vertex buffer binding {} exceeds MAX_VBOS {}", binding, MAX_VBOS);
+        }
+
+        if self.current_vbos[binding_usize] == Some(handle) {
+            return Ok(());
+        }
+
+        let buffer = self.get_vk_buffer(handle)?;
+
+        if buffer.target != BufferTarget::Vertex {
+            anyhow::bail!("trying to bind non-vertex buffer as vertex buffer");
+        }
+
+        let raw = buffer.raw;
+        let offset = 0_u64;
+        let cmd_buf = self.current_cmd_buf();
+
+        unsafe {
+            self.logical_device
+                .cmd_bind_vertex_buffers(cmd_buf, binding, &[raw], &[offset]);
+        }
+
+        self.current_vbos[binding_usize] = Some(handle);
+
+        Ok(())
+    }
+
+    pub fn set_index_buffer(&mut self, handle: BufferHandle) -> anyhow::Result<()> {
+        self.ensure_render_pass_started()?;
+
+        if self.current_ibo == Some(handle) {
+            return Ok(());
+        }
+
+        let buffer = self.get_vk_buffer(handle)?;
+
+        if buffer.target != BufferTarget::Index {
+            anyhow::bail!("trying to bind non-index buffer as index buffer");
+        }
+
+        let raw = buffer.raw;
+        let cmd_buf = self.current_cmd_buf();
+
+        unsafe {
+            self.logical_device.cmd_bind_index_buffer(
+                cmd_buf,
+                raw,
+                0,
+                vk::IndexType::UINT32,
+            );
+        }
+
+        self.current_ibo = Some(handle);
+
+        Ok(())
+    }
+
+    pub fn set_texture(
+        &mut self,
+        slot: u32,
+        texture: TextureHandle,
+    ) -> anyhow::Result<()> {
+        self.ensure_render_pass_started()?;
+
+        if slot as usize >= MAX_TEXTURE_SLOTS {
+            anyhow::bail!(
+                "texture slot {} exceeds MAX_TEXTURE_SLOTS {}",
+                slot,
+                MAX_TEXTURE_SLOTS,
+            );
+        }
+
+        let pipeline_handle = self
+            .current_pipeline
+            .ok_or_else(|| anyhow::anyhow!("set_texture called before set_pipeline"))?;
+
+        if self.current_textures[slot as usize] == Some(texture) {
+            return Ok(());
+        }
+
+        let image_idx = self.swapchain.image_idx;
+        let cmd_buf = self.current_cmd_buf();
+
+        let pipeline_layout = {
+            let pipeline = self.get_vk_pipeline(pipeline_handle)?;
+            pipeline.layout
+        };
+
+        let descriptor_set = {
+            let sets = self.get_or_create_texture_descriptor_sets(
+                pipeline_handle,
+                texture,
+                slot,
+            )?;
+
+            *sets
+                .get(image_idx)
+                .ok_or_else(|| anyhow::anyhow!("missing descriptor set for image {}", image_idx))?
+        };
+
+         unsafe {
+            self.logical_device.cmd_bind_descriptor_sets(
+                cmd_buf,
+                vk::PipelineBindPoint::GRAPHICS,
+                pipeline_layout,
+                0,
+                &[descriptor_set],
+                &[],
+            );
+        }
+
+        self.current_textures[slot as usize] = Some(texture);
+
+        Ok(())
+    }
+
+    pub fn set_uniform_2f(
+        &mut self,
+        pipeline_handle: PipelineHandle,
+        _name: &str,
+        x: f32,
+        y: f32,
+    ) -> anyhow::Result<()> {
+        self.ensure_render_pass_started()?;
+
+        let current = self
+            .current_pipeline
+            .ok_or_else(|| anyhow::anyhow!("set_uniform_2f called before set_pipeline"))?;
+
+        if current != pipeline_handle {
+            anyhow::bail!(
+                "set_uniform_2f called for pipeline {:?}, but current pipeline is {:?}",
+                pipeline_handle,
+                current,
+            );
+        }
+
+        let cmd_buf = self.current_cmd_buf();
+
+        let (layout, stage_flags, push_constant_size) = {
+            let pipeline = self.get_vk_pipeline(pipeline_handle)?;
+            (
+                pipeline.layout,
+                pipeline.push_constant_stage_flags,
+                pipeline.push_constant_size,
+            )
+        };
+
+        if push_constant_size < 8 {
+            anyhow::bail!(
+                "pipeline {:?} has no room for vec2 push constant",
+                pipeline_handle,
+            );
+        }
+
+        let data = [x, y];
+
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                data.as_ptr() as *const u8,
+                std::mem::size_of_val(&data),
+            )
+        };
+
+        unsafe {
+            self.logical_device.cmd_push_constants(
+                cmd_buf,
+                layout,
+                stage_flags,
+                0,
+                bytes,
+            );
+        }
+
+        Ok(())
+    }
+
+    pub fn draw_indexed_instanced(
+        &mut self,
+        draw: DrawIndexedInstanced,
+    ) -> anyhow::Result<()> {
+        self.ensure_render_pass_started()?;
+
+        if self.current_pipeline.is_none() {
+            anyhow::bail!("draw_indexed_instanced called without a pipeline bound");
+        }
+
+        if self.current_ibo.is_none() {
+            anyhow::bail!("draw_indexed_instanced called without an index buffer bound");
+        }
+
+        let cmd_buf = self.current_cmd_buf();
+
+        unsafe {
+            self.logical_device.cmd_draw_indexed(
+                cmd_buf,
+                draw.index_count,
+                draw.inst_count,
+                draw.index_offset,
+                draw.vertex_offset,
+                draw.inst_offset,
+            );
+        }
+
+        Ok(())
+    }
+
+    pub fn create_texture(
+        &mut self,
+        desc: TextureDesc,
+        data: Option<&[u8]>,
+    ) -> anyhow::Result<TextureHandle> {
+        if desc.width == 0 || desc.height == 0 {
+            anyhow::bail!(
+                "invalid texture size: {}x{}",
+                desc.width,
+                desc.height,
+            );
+        }
+
+        let vk_format = Self::vk_texture_format(desc.format);
+
+        let image_info = vk::ImageCreateInfo {
+            image_type: vk::ImageType::TYPE_2D,
+            format: vk_format,
+
+            extent: vk::Extent3D {
+                width: desc.width,
+                height: desc.height,
+                depth: 1,
+            },
+
+            mip_levels: 1,
+            array_layers: 1,
+
+            samples: vk::SampleCountFlags::TYPE_1,
+            tiling: vk::ImageTiling::OPTIMAL,
+
+            usage: vk::ImageUsageFlags::SAMPLED
+                | vk::ImageUsageFlags::TRANSFER_DST,
+
+                sharing_mode: vk::SharingMode::EXCLUSIVE,
+                initial_layout: vk::ImageLayout::UNDEFINED,
+
+                ..Default::default()
+        };
+
+        let alloc_info = vk_mem::AllocationCreateInfo {
+            usage: vk_mem::MemoryUsage::AutoPreferDevice,
+            preferred_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            ..Default::default()
+        };
+
+        let allocator = self
+            .allocator
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vulkan allocator already destroyed"))?;
+
+        let (image, alloc) = unsafe {
+            allocator.create_image(&image_info, &alloc_info)?
+        };
+
+        let view_info = vk::ImageViewCreateInfo {
+            image,
+            view_type: vk::ImageViewType::TYPE_2D,
+            format: vk_format,
+
+            components: vk::ComponentMapping {
+                r: vk::ComponentSwizzle::IDENTITY,
+                g: vk::ComponentSwizzle::IDENTITY,
+                b: vk::ComponentSwizzle::IDENTITY,
+                a: vk::ComponentSwizzle::IDENTITY,
+            },
+
+            subresource_range: vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            },
+
+            ..Default::default()
+        };
+
+        let view = match unsafe {
+            self.logical_device.create_image_view(&view_info, None)
+        } {
+            Ok(view) => view,
+            Err(err) => {
+                unsafe {
+                    let allocator = self.allocator.as_ref().unwrap();
+                    let mut alloc = alloc;
+                    allocator.destroy_image(image, &mut alloc);
+                }
+
+                return Err(err.into());
+            }
+        };
+
+        let sampler_info = vk::SamplerCreateInfo {
+            mag_filter: vk::Filter::LINEAR,
+            min_filter: vk::Filter::LINEAR,
+
+            mipmap_mode: vk::SamplerMipmapMode::LINEAR,
+
+            address_mode_u: vk::SamplerAddressMode::CLAMP_TO_EDGE,
+            address_mode_v: vk::SamplerAddressMode::CLAMP_TO_EDGE,
+            address_mode_w: vk::SamplerAddressMode::CLAMP_TO_EDGE,
+
+            min_lod: 0.0,
+            max_lod: 0.0,
+            mip_lod_bias: 0.0,
+
+            anisotropy_enable: vk::FALSE,
+            max_anisotropy: 1.0,
+
+            border_color: vk::BorderColor::INT_OPAQUE_BLACK,
+            unnormalized_coordinates: vk::FALSE,
+
+            ..Default::default()
+        };
+
+        let sampler = match unsafe {
+            self.logical_device.create_sampler(&sampler_info, None)
+        } {
+            Ok(sampler) => sampler,
+            Err(err) => {
+                unsafe {
+                    self.logical_device.destroy_image_view(view, None);
+
+                    let allocator = self.allocator.as_ref().unwrap();
+                    let mut alloc = alloc;
+                    allocator.destroy_image(image, &mut alloc);
+                }
+
+                return Err(err.into());
+            }
+        };
+
+        let handle = TextureHandle(self.textures.len() as u32);
+
+        let expected_size =
+            desc.width as usize
+            * desc.height as usize
+            * Self::texture_format_size(desc.format);
+
+        if expected_size as vk::DeviceSize > self.staging_ring.cap {
+            self.destroy_texture(handle)?;
+            anyhow::bail!(
+                "texture upload too large for staging ring: texture={}x{} bytes={} staging_cap={}",
+                desc.width,
+                desc.height,
+                expected_size,
+                self.staging_ring.cap,
+            );
+        }
+        if desc.width > self.phys_dev_limits.max_image_dimension2_d
+            || desc.height > self.phys_dev_limits.max_image_dimension2_d
+        {
+            anyhow::bail!(
+                "texture too large for Vulkan device: {}x{}, max 2D dimension is {}",
+                desc.width,
+                desc.height,
+                self.phys_dev_limits.max_image_dimension2_d,
+            );
+        }
+
+        self.textures.push(Some(VulkanTexture {
+            image,
+            alloc,
+            view,
+            sampler,
+
+            width: desc.width,
+            height: desc.height,
+            layers: 1,
+
+            format: desc.format,
+            vk_format,
+            kind: VulkanTextureKind::Texture2D,
+
+            layout: vk::ImageLayout::UNDEFINED,
+        }));
+
+        if let Some(data) = data {
+            let expected_size =
+                desc.width as usize
+                * desc.height as usize
+                * Self::texture_format_size(desc.format);
+
+            if data.len() < expected_size {
+                self.destroy_texture(handle)?;
+                anyhow::bail!(
+                    "not enough texture data: got {} bytes, need {} bytes",
+                    data.len(),
+                    expected_size,
+                );
+            }
+
+            self.write_texture(
+                handle,
+                0,
+                0,
+                desc.width,
+                desc.height,
+                &data[..expected_size],
+            )?;
+        }
+
+        tracing::info!(
+            "Created Vulkan texture {:?}: {}x{} format={:?}",
+            image,
+            desc.width,
+            desc.height,
+            desc.format,
+        );
+
+        Ok(handle)
+    }
+
+    fn texture_upload_cmd_buf(&self) -> vk::CommandBuffer {
+        match self.frame_phase {
+            FramePhase::RecordingUploads => {
+                self.frameloop.frames[self.frameloop.frame_idx].cmd_buf
+            }
+
+            FramePhase::Idle => {
+                self.upload_ctx.cmd_buf
+            }
+
+            FramePhase::InRenderPass => {
+                self.frameloop.frames[self.frameloop.frame_idx].cmd_buf
+            }
+        }
+    }
+
+    fn begin_immediate_upload_if_needed(&mut self) -> anyhow::Result<bool> {
+        if self.frame_phase == FramePhase::RecordingUploads {
+            return Ok(false);
+        }
+
+        if self.frame_phase == FramePhase::InRenderPass {
+            anyhow::bail!("cannot upload texture while render pass is active");
+        }
+
+        let device = &self.logical_device;
+
+        unsafe {
+            device.wait_for_fences(&[self.upload_ctx.fence], true, u64::MAX)?;
+            device.reset_fences(&[self.upload_ctx.fence])?;
+
+            device.reset_command_pool(
+                self.upload_ctx.cmd_pool,
+                vk::CommandPoolResetFlags::empty(),
+            )?;
+
+            let begin_info = vk::CommandBufferBeginInfo {
+                flags: vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
+                ..Default::default()
+            };
+
+            device.begin_command_buffer(self.upload_ctx.cmd_buf, &begin_info)?;
+        }
+
+        Ok(true)
+    }
+
+    fn end_immediate_upload_if_needed(&mut self, immediate: bool) -> anyhow::Result<()> {
+        if !immediate {
+            return Ok(());
+        }
+
+        let device = &self.logical_device;
+
+        unsafe {
+            device.end_command_buffer(self.upload_ctx.cmd_buf)?;
+
+            let cmd_bufs = [self.upload_ctx.cmd_buf];
+
+            let submit = vk::SubmitInfo {
+                command_buffer_count: cmd_bufs.len() as u32,
+                p_command_buffers: cmd_bufs.as_ptr(),
+                ..Default::default()
+            };
+
+            device.queue_submit(
+                self.graphics_queue,
+                &[submit],
+                self.upload_ctx.fence,
+            )?;
+
+            device.wait_for_fences(&[self.upload_ctx.fence], true, u64::MAX)?;
+        }
+
+        Ok(())
+    }
+
+    fn write_texture_recorded(
+        &mut self,
+        texture: TextureHandle,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+    ) -> anyhow::Result<()> {
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+
+        let pixel_size = {
+            let tex = self
+                .textures
+                .get(texture.0 as usize)
+                .and_then(|slot| slot.as_ref())
+                .ok_or_else(|| anyhow::anyhow!("invalid texture handle {:?}", texture))?;
+
+            if tex.kind != VulkanTextureKind::Texture2D {
+                anyhow::bail!("texture {:?} is not a 2D texture", texture);
+            }
+
+            if x.checked_add(width).is_none_or(|v| v > tex.width)
+                || y.checked_add(height).is_none_or(|v| v > tex.height)
+            {
+                anyhow::bail!(
+                    "texture write out of bounds: write=({}, {}) {}x{}, texture={}x{}",
+                    x,
+                    y,
+                    width,
+                    height,
+                    tex.width,
+                    tex.height,
+                );
+            }
+
+            Self::texture_format_size(tex.format)
+        };
+
+        let expected_size = width as usize
+            * height as usize
+            * pixel_size;
+
+        if pixels.len() < expected_size {
+            anyhow::bail!(
+                "not enough pixel data: got {} bytes, need {} bytes",
+                pixels.len(),
+                expected_size,
+            );
+        }
+
+        let size = expected_size as vk::DeviceSize;
+
+        let alignment = self
+            .phys_dev_limits
+            .optimal_buffer_copy_offset_alignment
+            .max(1);
+
+        let staging_offset = self.staging_ring_alloc(size, alignment)?;
+
+        let staging_handle = self.staging_ring.buf;
+
+        let (staging_raw, staging_mapped) = {
+            let staging = self
+                .buffers
+                .get(staging_handle.0 as usize)
+                .and_then(|slot| slot.as_ref())
+                .ok_or_else(|| anyhow::anyhow!("invalid staging buffer handle"))?;
+
+            let mapped = staging
+                .mapped
+                .ok_or_else(|| anyhow::anyhow!("staging buffer is not mapped"))?;
+
+            (staging.raw, mapped)
+        };
+
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                pixels.as_ptr(),
+                (staging_mapped as *mut u8).add(staging_offset as usize),
+                expected_size,
+            );
+        }
+
+        let (image, old_layout) = {
+            let tex = self
+                .textures
+                .get(texture.0 as usize)
+                .and_then(|slot| slot.as_ref())
+                .ok_or_else(|| anyhow::anyhow!("invalid texture handle {:?}", texture))?;
+
+            (tex.image, tex.layout)
+        };
+
+        let cmd_buf = self.texture_upload_cmd_buf();
+
+        unsafe {
+            self.cmd_transition_image_layout(
+                cmd_buf,
+                image,
+                old_layout,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },
+            )?;
+
+            let region = vk::BufferImageCopy {
+                buffer_offset: staging_offset,
+                buffer_row_length: 0,
+                buffer_image_height: 0,
+
+                image_subresource: vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    mip_level: 0,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },
+
+                image_offset: vk::Offset3D {
+                    x: x as i32,
+                    y: y as i32,
+                    z: 0,
+                },
+
+                image_extent: vk::Extent3D {
+                    width,
+                    height,
+                    depth: 1,
+                },
+            };
+
+            self.logical_device.cmd_copy_buffer_to_image(
+                cmd_buf,
+                staging_raw,
+                image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[region],
+            );
+
+            self.cmd_transition_image_layout(
+                cmd_buf,
+                image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },
+            )?;
+        }
+
+        let tex = self
+            .textures
+            .get_mut(texture.0 as usize)
+            .and_then(|slot| slot.as_mut())
+            .ok_or_else(|| anyhow::anyhow!("invalid texture handle {:?}", texture))?;
+
+        tex.layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
+
+        Ok(())
+
+    }
+
+    pub fn write_texture(
+        &mut self,
+        texture: TextureHandle,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        data: &[u8],
+    ) -> anyhow::Result<()> {
+        if self.frame_phase == FramePhase::InRenderPass {
+            anyhow::bail!("texture array upload called after render pass started");
+        }
+
+        let immediate = self.begin_immediate_upload_if_needed()?;
+
+        let result = self.write_texture_recorded(texture, x, y, width, height, data);
+
+        if let Err(err) = result {
+            let _ = self.end_immediate_upload_if_needed(immediate);
+            return Err(err);
+        }
+
+        self.end_immediate_upload_if_needed(immediate)?;
+
+        Ok(())
+    }
+
+    fn destroy_texture(&mut self, handle: TextureHandle) -> anyhow::Result<()> {
+        let mut texture = self
+            .textures
+            .get_mut(handle.0 as usize)
+            .and_then(|slot| slot.take())
+            .ok_or_else(|| anyhow::anyhow!("invalid texture handle {:?}", handle))?;
+
+        let allocator = self
+            .allocator
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vulkan allocator already destroyed"))?;
+
+        unsafe {
+            self.logical_device.destroy_sampler(texture.sampler, None);
+            self.logical_device.destroy_image_view(texture.view, None);
+            allocator.destroy_image(texture.image, &mut texture.alloc);
+        }
+
+        Ok(())
+    }
+
+    fn write_texture_array_layer_recorded(
+        &mut self,
+        texture: TextureHandle,
+        x: u32,
+        y: u32,
+        layer: u32,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+    ) -> anyhow::Result<()> {
+
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+
+        let pixel_size = {
+            let tex = self
+                .textures
+                .get(texture.0 as usize)
+                .and_then(|slot| slot.as_ref())
+                .ok_or_else(|| anyhow::anyhow!("invalid texture handle {:?}", texture))?;
+
+            if tex.kind != VulkanTextureKind::Texture2DArray {
+                anyhow::bail!("texture {:?} is not a texture array", texture);
+            }
+
+            if layer >= tex.layers {
+                anyhow::bail!(
+                    "texture array layer out of bounds: layer={} layers={}",
+                    layer,
+                    tex.layers,
+                );
+            }
+
+            if x.checked_add(width).is_none_or(|v| v > tex.width)
+                || y.checked_add(height).is_none_or(|v| v > tex.height)
+            {
+                anyhow::bail!(
+                    "texture write out of bounds: write=({}, {}) {}x{}, texture={}x{}",
+                    x,
+                    y,
+                    width,
+                    height,
+                    tex.width,
+                    tex.height,
+                );
+            }
+
+            Self::texture_format_size(tex.format)
+        };
+
+        let expected_size = width as usize
+            * height as usize
+            * pixel_size;
+
+        if pixels.len() < expected_size {
+            anyhow::bail!(
+                "not enough pixel data: got {} bytes, need {} bytes",
+                pixels.len(),
+                expected_size,
+            );
+        }
+
+        let size = expected_size as vk::DeviceSize;
+
+        let alignment = self
+            .phys_dev_limits
+            .optimal_buffer_copy_offset_alignment
+            .max(1);
+
+        let staging_offset = self.staging_ring_alloc(size, alignment)?;
+
+        let staging_handle = self.staging_ring.buf;
+
+        let (staging_raw, staging_mapped) = {
+            let staging = self
+                .buffers
+                .get(staging_handle.0 as usize)
+                .and_then(|slot| slot.as_ref())
+                .ok_or_else(|| anyhow::anyhow!("invalid staging buffer handle"))?;
+
+            let mapped = staging
+                .mapped
+                .ok_or_else(|| anyhow::anyhow!("staging buffer is not mapped"))?;
+
+            (staging.raw, mapped)
+        };
+
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                pixels.as_ptr(),
+                (staging_mapped as *mut u8).add(staging_offset as usize),
+                expected_size,
+            );
+        }
+
+        let (image, old_layout) = {
+            let tex = self
+                .textures
+                .get(texture.0 as usize)
+                .and_then(|slot| slot.as_ref())
+                .ok_or_else(|| anyhow::anyhow!("invalid texture handle {:?}", texture))?;
+
+            (tex.image, tex.layout)
+        };
+
+        let cmd_buf = self.texture_upload_cmd_buf();
+
+        unsafe {
+            self.cmd_transition_image_layout(
+                cmd_buf,
+                image,
+                old_layout,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: layer,
+                    layer_count: 1,
+                },
+            )?;
+
+            let region = vk::BufferImageCopy {
+                buffer_offset: staging_offset,
+                buffer_row_length: 0,
+                buffer_image_height: 0,
+
+                image_subresource: vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    mip_level: 0,
+                    base_array_layer: layer,
+                    layer_count: 1,
+                },
+
+                image_offset: vk::Offset3D {
+                    x: x as i32,
+                    y: y as i32,
+                    z: 0,
+                },
+
+                image_extent: vk::Extent3D {
+                    width,
+                    height,
+                    depth: 1,
+                },
+            };
+
+            self.logical_device.cmd_copy_buffer_to_image(
+                cmd_buf,
+                staging_raw,
+                image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[region],
+            );
+
+            self.cmd_transition_image_layout(
+                cmd_buf,
+                image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: layer,
+                    layer_count: 1,
+                },
+            )?;
+        }
+
+        let tex = self
+            .textures
+            .get_mut(texture.0 as usize)
+            .and_then(|slot| slot.as_mut())
+            .ok_or_else(|| anyhow::anyhow!("invalid texture handle {:?}", texture))?;
+
+        tex.layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
+
+        Ok(())
+    }
 
 
+    fn write_texture_array_layer(
+        &mut self,
+        texture: TextureHandle,
+        x: u32,
+        y: u32,
+        layer: u32,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+    ) -> anyhow::Result<()> {
+        if self.frame_phase == FramePhase::InRenderPass {
+            anyhow::bail!("texture array upload called after render pass started");
+        }
+
+        let immediate = self.begin_immediate_upload_if_needed()?;
+
+        let result = self.write_texture_array_layer_recorded(
+            texture, x, y, layer, width, height, pixels
+        );
+
+        if let Err(err) = result {
+            let _ = self.end_immediate_upload_if_needed(immediate);
+            return Err(err);
+        }
+
+        self.end_immediate_upload_if_needed(immediate)?;
+
+        Ok(())
+    }
+
+    fn get_or_create_texture_descriptor_sets(
+    &mut self,
+    pipeline_handle: PipelineHandle,
+    texture_handle: TextureHandle,
+    binding: u32,
+) -> anyhow::Result<&Vec<vk::DescriptorSet>> {
+    let key = TextureDescriptorKey {
+        pipeline: pipeline_handle,
+        texture: texture_handle,
+        binding,
+    };
+
+    if self.texture_descriptor_cache.contains_key(&key) {
+        return Ok(self.texture_descriptor_cache.get(&key).unwrap());
+    }
+
+    let set_count = self.swapchain.images.len();
+
+    let desc_layout = {
+        let pipeline = self.get_vk_pipeline(pipeline_handle)?;
+        pipeline.desc_layout
+    };
+
+    let desc_pool = {
+        let pipeline = self.get_vk_pipeline(pipeline_handle)?;
+        pipeline.desc_pool
+    };
+
+    let set_layouts = vec![desc_layout; set_count];
+
+    let alloc_info = vk::DescriptorSetAllocateInfo {
+        descriptor_pool: desc_pool,
+        descriptor_set_count: set_layouts.len() as u32,
+        p_set_layouts: set_layouts.as_ptr(),
+        ..Default::default()
+    };
+
+    let sets = unsafe {
+        self.logical_device.allocate_descriptor_sets(&alloc_info)?
+    };
+
+    let (view, sampler, layout) = {
+        let tex = self.get_vk_texture(texture_handle)?;
+        (tex.view, tex.sampler, tex.layout)
+    };
+
+    for &set in &sets {
+        let image_info = [vk::DescriptorImageInfo {
+            sampler,
+            image_view: view,
+            image_layout: layout,
+        }];
+
+        let write = [vk::WriteDescriptorSet {
+            dst_set: set,
+            dst_binding: binding,
+            dst_array_element: 0,
+            descriptor_count: 1,
+            descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+            p_image_info: image_info.as_ptr(),
+            ..Default::default()
+        }];
+
+        unsafe {
+            self.logical_device.update_descriptor_sets(&write, &[]);
+        }
+    }
+
+    self.texture_descriptor_cache.insert(key, sets);
+
+    Ok(self.texture_descriptor_cache.get(&key).unwrap())
+}
 }
 
 impl Drop for VulkanRenderer {
@@ -2526,6 +3944,7 @@ impl Drop for VulkanRenderer {
 
         self.destroy_all_pipelines();
 
+        self.destroy_all_textures();
         self.destroy_all_buffers();
 
         self.destroy_swapchain_resources();
@@ -2580,65 +3999,65 @@ impl GraphicsDevice for VulkanRenderer {
         VulkanRenderer::write_buffer(self, handle, binding, offset, data)
     }
 
-    fn create_pipeline(&mut self, desc: PipelineDesc<'_>) -> anyhow::Result<PipelineHandle> {
+    fn create_pipeline(&mut self, desc: PipelineDesc) -> anyhow::Result<PipelineHandle> {
         VulkanRenderer::create_pipeline(self, desc)
     }
 
-    fn set_pipeline(&mut self, _handle: PipelineHandle) -> anyhow::Result<()> {
-        anyhow::bail!("Vulkan set_pipeline not implemented yet")
+    fn set_pipeline(&mut self, handle: PipelineHandle) -> anyhow::Result<()> {
+        VulkanRenderer::set_pipeline(self, handle)
     }
 
-    fn set_vertex_buffer(&mut self, _handle: BufferHandle, _binding: u32) -> anyhow::Result<()> {
-        anyhow::bail!("Vulkan set_vertex_buffer not implemented yet")
+    fn set_vertex_buffer(&mut self, handle: BufferHandle, binding: u32) -> anyhow::Result<()> {
+        VulkanRenderer::set_vertex_buffer(self, handle, binding)
     }
 
-    fn set_index_buffer(&mut self, _handle: BufferHandle) -> anyhow::Result<()> {
-        anyhow::bail!("Vulkan set_index_buffer not implemented yet")
+    fn set_index_buffer(&mut self, handle: BufferHandle) -> anyhow::Result<()> {
+        VulkanRenderer::set_index_buffer(self, handle)
     }
 
     fn set_uniform_2f(
         &mut self,
-        _pipeline: PipelineHandle,
-        _name: &str,
-        _x: f32,
-        _y: f32,
+        pipeline: PipelineHandle,
+        name: &str,
+        x: f32,
+        y: f32,
     ) -> anyhow::Result<()> {
-        anyhow::bail!("Vulkan set_uniform_2f not implemented yet")
+        VulkanRenderer::set_uniform_2f(self, pipeline, name, x, y)
     }
 
     fn draw_indexed(&mut self, _draw: DrawIndexed) -> anyhow::Result<()> {
         anyhow::bail!("Vulkan draw_indexed not implemented yet")
     }
 
-    fn draw_indexed_instanced(&mut self, _draw: DrawIndexedInstanced) -> anyhow::Result<()> {
-        anyhow::bail!("Vulkan draw_indexed_instanced not implemented yet")
+    fn draw_indexed_instanced(
+        &mut self,
+        draw: DrawIndexedInstanced,
+    ) -> anyhow::Result<()> {
+        VulkanRenderer::draw_indexed_instanced(self, draw)
     }
 
     fn create_texture(
         &mut self,
-        _desc: TextureDesc,
-        _data: Option<&[u8]>,
+        desc: TextureDesc,
+        data: Option<&[u8]>,
     ) -> anyhow::Result<TextureHandle> {
-        anyhow::bail!("Vulkan create_texture not implemented yet")
+        VulkanRenderer::create_texture(self, desc, data)
     }
 
     fn write_texture(
         &mut self,
-        _texture: TextureHandle,
-        _x: u32,
-        _y: u32,
-        _width: u32,
-        _height: u32,
-        _data: &[u8]) -> anyhow::Result<()> {
-
-        anyhow::bail!("Vulkan write_texture not implemented yet")
+        texture: TextureHandle,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        data: &[u8]) -> anyhow::Result<()> {
+        VulkanRenderer::write_texture(self, texture, x, y, width, height, data)
     }
 
-    fn set_texture(&mut self,
-        _slot: u32,
-        _texture: TextureHandle)
-        -> anyhow::Result<()> {
-            anyhow::bail!("Vulkan set_texture not implemented yet")
+
+    fn set_texture(&mut self, slot: u32, texture: TextureHandle) -> anyhow::Result<()> {
+        VulkanRenderer::set_texture(self, slot, texture)
     }
 
     fn set_uniform_1i(
@@ -2659,23 +4078,25 @@ impl GraphicsDevice for VulkanRenderer {
 
     fn create_texture_array(
         &mut self,
-        _desc: TextureArrayDesc,
+        desc: TextureArrayDesc,
     ) -> anyhow::Result<TextureHandle> {
-        anyhow::bail!("Vulkan create_texture_array not implemented yet")
+        VulkanRenderer::create_texture_array(self, desc)
     }
 
     fn write_texture_array_layer(
         &mut self,
-        _texture: TextureHandle,
-        _x: u32,
-        _y: u32,
-        _layer: u32,
-        _width: u32,
-        _height: u32,
-        _pixels: &[u8],
+        texture: TextureHandle,
+        x: u32,
+        y: u32,
+        layer: u32,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
     ) -> anyhow::Result<()> {
-        anyhow::bail!("Vulkan write_texture_array_layer not implemented yet")
+        VulkanRenderer::write_texture_array_layer(self, 
+            texture, x, y, layer, width, height, pixels)
     }
+
     fn texture_get_kind(
         &mut self,
         _texture: TextureHandle,

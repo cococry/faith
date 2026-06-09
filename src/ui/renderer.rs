@@ -1,14 +1,13 @@
 use crate::Color;
 
 use crate::graphics::{
-    BufferDesc, BufferHandle, BufferTarget, BufferUsage, GraphicsDevice, ImageData, PipelineDesc, PipelineHandle, TextureDesc, TextureFormat, TextureHandle, VertexStepMode
+    BufferDesc, BufferHandle, BufferTarget, BufferUsage, BuiltinShaderPipeline, GraphicsDevice, ImageData, PipelineDesc, PipelineHandle, TextureDesc, TextureFormat, TextureHandle, VertexStepMode
 };
 
 use crate::graphics::device::{
     DrawIndexedInstanced, TextureArrayDesc, UniformBinding, UniformBindingShaderStage, UniformBindingType, VertexAttribute, VertexBufferBindingLayout, VertexFormat
 };
 
-use crate::ui::quad::{UI_QUAD_FRAGMENT_SHADER, UI_QUAD_FRAGMENT_SHADER_DEDICATED, UI_QUAD_VERTEX_SHADER};
 use crate::ui::{
     QuadInstance,
     QuadVertex,
@@ -52,8 +51,8 @@ pub enum ImageStorage {
 /// array or in a dedicated GPU texture.
 #[derive(Debug, Clone, Copy)]
 pub struct Image {
-    storage: ImageStorage,
-    size: [u32; 2],
+    pub storage: ImageStorage,
+    pub size: [u32; 2],
 }
 
 /// Represents one layer in the image atlas 
@@ -240,11 +239,11 @@ impl UIRenderer {
 
         ];
 
+
         // Create base pipeline which is using the 
         // texture array to sample.
         let pipeline = gpu.create_pipeline(PipelineDesc{
-            vertex_source: UI_QUAD_VERTEX_SHADER,
-            fragment_source: UI_QUAD_FRAGMENT_SHADER,
+            shader: BuiltinShaderPipeline::UiQuadAtlas,
             vert_bindings: quad_layouts.clone(),
             uniform_bindings: uniform_bindings.clone(),
         })?;
@@ -280,8 +279,7 @@ impl UIRenderer {
         // individual textures in batched draw calls 
         // to sample.
         let pipeline_dedicated = gpu.create_pipeline(PipelineDesc{
-            vertex_source: UI_QUAD_VERTEX_SHADER,
-            fragment_source: UI_QUAD_FRAGMENT_SHADER_DEDICATED,
+            shader: BuiltinShaderPipeline::UiQuadDedicated,
             vert_bindings: quad_layouts,
             uniform_bindings,
         })?;
@@ -499,9 +497,11 @@ impl UIRenderer {
         &mut self,
         x: f32,
         y: f32,
+        w: f32, 
+        h: f32,
         image: Image
     ) -> anyhow::Result<()> {
-        self.image_tined(x, y, image, Color::rgba(1.0, 1.0, 1.0, 1.0))
+        self.image_tined(x, y, w, h, image, Color::rgba(1.0, 1.0, 1.0, 1.0))
     }
 
     /// Submits a tinted image to be rendered 
@@ -513,6 +513,8 @@ impl UIRenderer {
         &mut self,
         x: f32,
         y: f32,
+        w: f32, 
+        h: f32,
         image: Image,
         color: Color
     ) -> anyhow::Result<()> {
@@ -520,7 +522,7 @@ impl UIRenderer {
             ImageStorage::Dedicated { texture_handle } => { 
                 self.raw_quad_dedicated(
                     texture_handle,
-                    [x, y, image.size[0] as f32, image.size[1] as f32],
+                    [x, y, w, h],
                     [0.0, 0.0, 1.0, 1.0],
                     color,
                     [0.0, 0.0, 0.0, 0.0],
@@ -530,7 +532,7 @@ impl UIRenderer {
             }
             ImageStorage::Atlas { layer, uv_min, uv_max } => { 
                 self.raw_quad_atlas(
-                    [x, y, image.size[0] as f32, image.size[1] as f32],
+                    [x, y, w, h],
                     [
                     uv_min[0],
                     uv_min[1],
@@ -671,7 +673,6 @@ impl UIRenderer {
                     },
                     Some(&data.pixels),
                 )?;
-                gpu.texture_gen_mipmap(texture_handle)?;
                 Ok(Image { storage: ImageStorage::Dedicated {
                     texture_handle
                 }, size: [data.width, data.height] })
@@ -683,8 +684,6 @@ impl UIRenderer {
                     self.allocate_image_rect(data.width, data.height, padding)?;
 
                 self.upload_pixels_to_atlas(x, y, data.width, data.height, layer, &data.pixels, gpu)?;
-
-                gpu.texture_gen_mipmap(self.ui_texture_array)?;
 
                 Ok(Image {
                     storage: ImageStorage::Atlas {
