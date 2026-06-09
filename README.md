@@ -36,6 +36,17 @@ As faith is written in Rust, use cargo to build:
 git clone https://github.com/cococry/faith
 cd faith
 cargo build --release
-install -Dm755 target/release/faith ~/.cargo/bin/faith
+```
+
+Run it directly:
+```console
+./target/release/faith
+```
+
+Or install it into your Cargo binary directory:
+```console
+cargo install --path .
 faith
 ```
+
+Make sure `~/.cargo/bin` is in your `PATH`.
