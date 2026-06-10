@@ -15,8 +15,7 @@ and shaped glyphs.
 The user interface is rendered through an optimized backend abstraction 
 over Vulkan and OpenGL, with native X11 and Wayland windowing support.
 
-
-## Features as of now
+## Current features 
 
 - X11/Wayland windowing backend
 - Vulkan rendering backend
