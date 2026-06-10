@@ -86,3 +86,23 @@ Before opening a pull request, make sure that:
 - Clippy warnings are fixed or intentionally allowed with a clear reason.
 - Behavior changes are covered by tests where practical.
 - The pull request description explains what changed and why.
+
+## Pull Request Commit Messages
+
+Preferred format:
+
+```text
+type: short description
+```
+
+Valid types:
+
+```text 
+feat - new feature
+fix - bug fix
+docs - documentation only
+test - tests only
+refactor - code cleanup without behavior change
+style - formatting only
+ci - CI/workflow changes
+```
