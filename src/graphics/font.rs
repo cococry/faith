@@ -62,16 +62,16 @@ pub struct Font {
     #[allow(dead_code)]
     pub size: u32,
 
-    // Selected strike size for bitmap-strike
-    // fonts. This is equal to the size field
-    // for almost all fonts except Emoji fonts.
+    /// Selected strike size for bitmap-strike
+    /// fonts. This is equal to the size field
+    /// for almost all fonts except Emoji fonts.
     #[allow(dead_code)]
     pub raster_size: u32,
 
-    // Scale factor from selected raster
-    // size to the requested font size.
-    // This is 1.0 for almost all fonts
-    // except Emoji fonts.
+    /// Scale factor from selected raster
+    /// size to the requested font size.
+    /// This is 1.0 for almost all fonts
+    /// except Emoji fonts.
     #[allow(dead_code)]
     pub scale: f32,
 

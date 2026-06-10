@@ -105,7 +105,7 @@ struct TextLayoutKey {
     font_handle: FontHandle,
     text: String,
 
-    // Store quantized width so float hashing is not needed.
+    // Note: Quantized width so float hashing is not needed.
     max_width_px: u32,
 }
 
@@ -293,6 +293,9 @@ impl TextRenderer {
                 }
                 Some(old_script) if script != old_script && !self.is_neutral_script(script) => {
                     if run_off < idx {
+                        // If the script changed and is not a neutral
+                        // script, insert a new itemized run for the
+                        // current sub-section of text
                         runs.push(ItemizedRun {
                             font_handle,
                             text: text[run_off..idx].to_owned(),
@@ -327,18 +330,27 @@ impl TextRenderer {
         original_font: FontHandle,
         text: &str,
     ) -> anyhow::Result<Vec<ItemizedRun>> {
+        // Bidi info for text string, containing
+        // paragraphs which contain visual text
+        // runs. This function splits visual text
+        // runs by script to itemize the text
+        // into runs.
         let bidi = BidiInfo::new(text, None);
-        let mut runs = Vec::new();
 
+        let mut runs = Vec::new();
         for paragraph in &bidi.paragraphs {
             let range = paragraph.range.clone();
 
             let (_, visual_runs) = bidi.visual_runs(paragraph, range.clone());
 
             for run in visual_runs {
+                if run.is_empty() {
+                    continue;
+                }
                 let run_text = &text[run.clone()];
                 let lvl = bidi.levels[run.start];
 
+                // run.start is the byte offset into the original string
                 let mut split = self.split_by_script(run_text, run.start, lvl, original_font)?;
 
                 // split_by_script walks the bidi run in logical
@@ -492,6 +504,10 @@ impl TextRenderer {
                 // is a byte offset within the run's text.
                 let range = self.cluster_to_grapheme_range(&run.text, glyph.cluster);
 
+                // if the cluster has a valid grapheme range
+                // but has a .notdef/0 glyph index in the
+                // shaped glyphs, the glyph and it's
+                // grapheme range is missing.
                 if range.start < range.end {
                     missing_ranges.push(range);
                 }
@@ -503,10 +519,11 @@ impl TextRenderer {
         // incorrectly, while adjacent ranges
         // are merged to maintain shaping context.
         //
-        // HarfBuzz needs to be able to see whole
-        // arabic words at once in order to generate
-        // correct glyphs, thus we merge adjacent
-        // fallback ranges.
+        // For example, HarfBuzz needs to be able
+        // to see whole arabic words at once
+        // to generate correct glyphs. Thus
+        // we merge adjacent fallback ranges, which
+        // are then shaped at once.
         let missing_ranges = self.merge_ranges(missing_ranges);
 
         let mut cursor = 0;
@@ -518,7 +535,9 @@ impl TextRenderer {
                 let non_missing_text = run.text[cursor..missing.start].to_owned();
 
                 // we reshape the non-missing text with
-                // the run's font
+                // the run's font. NOTE: We could potentially
+                // try to get the non-missing glyph range
+                // from the alrady shaped glyphs.
                 repaired.push(self.reshape_text_run_with_font(
                     &non_missing_text,
                     &run,
@@ -531,7 +550,7 @@ impl TextRenderer {
 
             // Check loaded fallback fonts
             // wheter one of them supports the
-            // missing  text range.
+            // missing text range.
             let fallback = self.fallback_for_text_cached(
                 run.font_handle,
                 &missing_text,
@@ -697,7 +716,7 @@ impl TextRenderer {
         gpu: &mut G,
         ui: &mut UIRenderer,
     ) -> anyhow::Result<()> {
-        // Use UIRenderer to allocate a region
+        // Uses UIRenderer to allocate a region
         // for the glyph in the texture array
         let (layer, x, y, atlas_w, atlas_h) =
             ui.allocate_image_rect(glyph.width, glyph.height, 1)?;
