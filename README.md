@@ -49,7 +49,7 @@ cargo install --path .
 faith
 ```
 
-Make sure `~/.cargo/bin` is in your `PATH`.
+Make sure `~/.cargo/bin` is in your `PATH` env variable.
 
 ## Contributing to faith 
 
