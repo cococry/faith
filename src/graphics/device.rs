@@ -69,6 +69,11 @@ pub struct VertexBufferBindingLayout {
     pub attrs: Vec<VertexAttribute>,
 }
 
+/// The data type of a uniform.
+///
+/// Describes the data type of a uniform binding,
+/// corresponding to the binding's data type in
+/// the shader.
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub enum UniformBindingType {
     #[default]
@@ -76,6 +81,10 @@ pub enum UniformBindingType {
     Vec2,
 }
 
+/// A shader stage in which a uniform is read.
+///
+/// Describes a shader stage in which a uniform
+/// will be read in the shader pipeline.
 #[derive(Debug, Clone, Copy, Default)]
 pub enum UniformBindingShaderStage {
     #[default]
@@ -85,13 +94,23 @@ pub enum UniformBindingShaderStage {
 
 #[derive(Default, Clone)]
 pub struct UniformBinding {
+    /// The binding for UniformBindingType::Sampler2dArray
+    /// uniforms
     pub binding: i32,
     pub name: String,
     pub ty: UniformBindingType,
     pub stage: UniformBindingShaderStage,
+    /// Uloaded for uniforms with float type data.
+    /// UniformBindingType::Vec2 uploads
+    /// `f_data[0]` and `f_data[1]`.
     pub f_data: [f32; 4],
 }
 
+/// Describes a builtin shader pipeline
+///
+/// This enum is used in PipelineDesc to
+/// specify pre-defined, builtin shader
+/// pipelines for a graphics pipeline
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BuiltinShaderPipeline {
     UiQuadAtlas,
@@ -130,6 +149,7 @@ pub struct TextureDesc {
     pub format: TextureFormat,
 }
 
+/// Arguments for GraphicsDevice::write_texture_array_layer
 pub struct TextureArrayWrite {
     pub texture: TextureHandle,
     pub x: u32,

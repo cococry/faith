@@ -83,6 +83,7 @@ Before opening a pull request, make sure that:
 
 - `./scripts/check.sh` passes locally.
 - The code is formatted.
+- The code is documented and commented (more info [here](#documenting-code)) 
 - Clippy warnings are fixed or intentionally allowed with a clear reason.
 - Behavior changes are covered by tests where practical.
 - The pull request description explains what changed and why.
@@ -106,3 +107,80 @@ refactor - code cleanup without behavior change
 style - formatting only
 ci - CI/workflow changes
 ```
+
+## Documenting Code 
+
+Any struct declaration, enum declaration and function definition 
+that will be used directly by or are inside files in `ui/`, `main.rs`, or `app/` <- (eventually) 
+must be documented with doc comments. 
+
+Struct fields must only be specifically documented when their purpose is not obvious. 
+
+Doc comments for internal APIs, structs, enums, or function implementations that are never directly interfaced with by the aforementioned files are not necessary.
+
+Implementation comments, meaning comments inside functions should 
+generally be provided if the code-flow is not obvious.  
+
+### Examples
+
+**Implementation comments:**
+
+```rust
+fn merge_ranges(&self, mut ranges: Vec<std::ops::Range<usize>>) -> Vec<std::ops::Range<usize>> {
+    ranges.sort_by_key(|range| range.start);
+
+    let mut merged: Vec<std::ops::Range<usize>> = Vec::new();
+
+    for range in ranges {
+        if range.start >= range.end {
+            continue;
+        }
+
+        if let Some(last) = merged.last_mut() {
+            // This merges duplicate grapheme
+            // ranges and also adjacent ranges.
+            // Adjacent merging is done because
+            // for most scripts like Arabic,
+            // fallback-glyphs should be shaped
+            // as a connected word.
+            if range.start <= last.end {
+                last.end = last.end.max(range.end);
+                continue;
+            }
+        }
+
+        merged.push(range);
+    }
+
+    merged
+}
+```
+Comments are only provided to explain non-obvious parts of the code.
+
+**Struct doc comments:**
+
+```rust
+/// Represents a color using red, green, blue, and alpha components.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Color {
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub a: f32,
+}
+```
+Self-explanatory struct fields are not documented.
+
+**Enum doc comments:**
+
+```rust
+/// Expected update frequency of a GPU buffer.
+#[derive(Debug, Clone, Copy)]
+pub enum BufferUsage {
+    Static,
+    Dynamic,
+    Staging,
+}
+```
+The purpose of the enum is briefly explained.
+Fields are only documented when not obvious. 
