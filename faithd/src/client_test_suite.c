@@ -1,20 +1,19 @@
 #include "client/client.h"
+#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <unistd.h>
-#include <poll.h>
 
-int main(void)
-{
+int main(void) {
   faith_client_config_t cfg = {
-    .insecure_skip_verify = 1,
-    .ca_file = NULL,
-    .server_name = NULL,
-    .host = "127.0.0.1",
-    .port = 4433,
+      .insecure_skip_verify = 1,
+      .ca_file = NULL,
+      .server_name = NULL,
+      .host = "127.0.0.1",
+      .port = 4433,
   };
 
-  faith_client_t* client = faith_client_create(&cfg);
+  faith_client_t *client = faith_client_create(&cfg);
   if (!client) {
     fprintf(stderr, "error: faith_client_create() failed.\n");
     return 1;
@@ -26,8 +25,8 @@ int main(void)
 
   for (;;) {
     struct pollfd pfd = {
-      .fd = event_fd,
-      .events = POLLIN,
+        .fd = event_fd,
+        .events = POLLIN,
     };
 
     if (poll(&pfd, 1, -1) < 0) {
@@ -41,10 +40,8 @@ int main(void)
     faith_event_t ev;
     while (faith_client_next_event(client, &ev) == FAITH_OK) {
       fprintf(stderr, "Got event type=%s value0=%llu value1=%llu message=%s\n",
-              faith_event_name(ev.type),
-              (unsigned long long)ev.value0,
-              (unsigned long long)ev.value1,
-              ev.message);
+              faith_event_name(ev.type), (unsigned long long)ev.value0,
+              (unsigned long long)ev.value1, ev.message);
     }
   }
 
