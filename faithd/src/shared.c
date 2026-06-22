@@ -267,4 +267,22 @@ const char* faith_status_code_name(faith_status_code_t code) {
   }
 }
 
+const char* faith_event_name(faith_event_type_t ev) {
+  switch (ev) {
+#define X(name, value) case name: return #name;
+    FAITH_EVENT_TYPES(X)
+#undef X
+    default:
+      return "FAITH_EVENT_UNKNOWN";
+  }
+}
 
+const char* faith_frame_msg_name(faith_frame_msg_type_t msg) {
+  switch (msg) {
+#define X(name, value) case name: return #name;
+    FAITH_MSG_TYPES(X)
+#undef X
+    default:
+      return "FAITH_MSG_UNKNOWN";
+  }
+}
