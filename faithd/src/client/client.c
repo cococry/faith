@@ -91,8 +91,7 @@ static int faith_client_is_running(faith_client_t* client) {
   return running;
 }
 
-static int faith_init_client_sock(const char* host, int port)
-{
+static int faith_init_client_sock(const char* host, int port) {
   int sockfd = -1;
   struct sockaddr_in serveraddr;
 
@@ -247,14 +246,20 @@ static void faith_client_run_connected(faith_client_t *client, SSL *ssl) {
     uint64_t sent_at_ms = faith_now_ms();
     uint64_t nonce;
     if (RAND_bytes((unsigned char *)&nonce, sizeof(nonce)) != 1) {
-      nob_log(ERROR, "Failed to generate random bytes with OpenSSL RAND_bytes()\n"); 
+      nob_log(ERROR, "Failed to generate random bytes with OpenSSL RAND_bytes()"); 
       break;
     }
+   
+    nob_log(INFO, "[client]: Sending PING to server..."); 
 
     if (faith_client_send_ping_ssl(ssl, nonce, sent_at_ms) != FAITH_OK) {
       faith_push_client_event(client, FAITH_EVENT_DISCONNECTED, 0, 0, "Failed to send ping");
       break;
     }
+
+    nob_log(INFO, "[client]: Sent PING to server."); 
+
+    nob_log(INFO, "[client] Waiting for server PONG response ...");
 
     faith_frame_t frame;
     if (faith_read_frame_ssl(ssl, &frame) != FAITH_OK) {
@@ -266,6 +271,7 @@ static void faith_client_run_connected(faith_client_t *client, SSL *ssl) {
       uint64_t pong_nonce;
       uint64_t server_time_ms;
 
+      nob_log(INFO, "[client] Got server PONG response.");
       if (faith_decode_pong(frame.payload, frame.payload_size, &pong_nonce, &server_time_ms) == FAITH_OK &&
           pong_nonce == nonce) {
         uint64_t now = faith_now_ms();
@@ -273,8 +279,11 @@ static void faith_client_run_connected(faith_client_t *client, SSL *ssl) {
       }
     }
 
+    nob_log(INFO, "[client] Frame successful.");
+
     faith_frame_free(&frame);
 
+    // 10 seconds after ping/pong
     faith_sleep_ms(10000);
   }
 }
@@ -296,87 +305,81 @@ static void* faith_client_thread_routine(void* arg) {
       continue;
     }
 
+    pthread_mutex_lock(&client->lock);
     client->sockfd = fd;
+    pthread_mutex_unlock(&client->lock);
 
-    SSL_CTX* ctx = faith_client_create_ssl_ctx(client);
+    SSL_CTX* ctx = NULL;
+    SSL* ssl = NULL;
+
+    ctx = faith_client_create_ssl_ctx(client);
     if (!ctx) {
-      close(fd);
-      client->sockfd = -1;
-
       faith_push_client_event(client, FAITH_EVENT_ERROR, 0, 0, "TLS context failed");
-      faith_sleep_ms(backoff_ms);
-      backoff_ms = faith_next_backoff_ms(backoff_ms);
-      continue;
+      goto fail;
     }
 
-    SSL* ssl = SSL_new(ctx);
+    ssl = SSL_new(ctx);
     if (ssl == NULL) {
-      ERR_print_errors_fp(stderr);
-      SSL_CTX_free(ctx);
-
-      close(fd);
-      client->sockfd = -1;
-      continue;
+      nob_log(ERROR, "Failed to create SSL object for client"); 
+      goto fail;
     }
 
     if (SSL_set_fd(ssl, fd) != 1) {
-      ERR_print_errors_fp(stderr);
-      SSL_free(ssl);
-      SSL_CTX_free(ctx);
-
-      close(fd);
-      client->sockfd = -1;
-      continue;
+      nob_log(ERROR, "Failed to set FD of SSL connection for client"); 
+      goto fail;
     }
 
     if (!client->insecure_skip_verify && client->server_name[0] != '\0') {
       if (SSL_set_tlsext_host_name(ssl, client->server_name) != 1) {
-        ERR_print_errors_fp(stderr);
-        SSL_free(ssl);
-        SSL_CTX_free(ctx);
-
-        close(fd);
-        client->sockfd = -1;
-        continue;
+        nob_log(ERROR, "Failed to set TLS hostname to '%s'", client->server_name); 
+        goto fail;
       }
 
       if (SSL_set1_host(ssl, client->server_name) != 1) {
-        ERR_print_errors_fp(stderr);
-        SSL_free(ssl);
-        SSL_CTX_free(ctx);
-
-        close(fd);
-        client->sockfd = -1;
-        continue;
+        nob_log(ERROR, "Failed to set TLS hostname to '%s'", client->server_name); 
+        goto fail;
       }
     }
 
     if (SSL_connect(ssl) <= 0) {
       nob_log(ERROR, "TLS handshake failed");
-      ERR_print_errors_fp(stderr);
-      SSL_free(ssl);
-      SSL_CTX_free(ctx);
-
-      close(fd);
-      client->sockfd = -1;
-      continue;
+      goto fail;
     }
+    backoff_ms = 250;
 
     _FH_CHECK(faith_push_client_event(client, FAITH_EVENT_CONNECTED, 0, 0, NULL));
+    
 
     faith_client_run_connected(client, ssl);
 
-    SSL_shutdown(ssl);
-    SSL_free(ssl);
-    SSL_CTX_free(ctx);
-
-    close(fd);
-    client->sockfd = -1;
-
     _FH_CHECK(faith_push_client_event(client, FAITH_EVENT_DISCONNECTED, 0, 0, "connection closed"));
 
-    faith_sleep_ms(backoff_ms);
-    backoff_ms = faith_next_backoff_ms(backoff_ms);
+fail:
+    ERR_print_errors_fp(stderr);
+
+    if (ssl) {
+      SSL_shutdown(ssl);
+      SSL_free(ssl);
+      ssl = NULL;
+    }
+
+    if (ctx) {
+      SSL_CTX_free(ctx);
+      ctx = NULL;
+    }
+
+    close(fd);
+
+    pthread_mutex_lock(&client->lock);
+    client->sockfd = -1;
+    pthread_mutex_unlock(&client->lock);
+
+    if (faith_client_is_running(client)) {
+      faith_sleep_ms(backoff_ms);
+      backoff_ms = faith_next_backoff_ms(backoff_ms);
+    }
+
+    continue;
   }
 
   return NULL;
@@ -422,6 +425,8 @@ faith_client_t* faith_client_create(const faith_client_config_t* cfg) {
 void faith_client_destroy(faith_client_t* client) {
   if (!client)
     return;
+  
+  faith_client_stop(client);
 
   if (client->sockfd >= 0) {
     close(client->sockfd);
@@ -434,7 +439,9 @@ void faith_client_destroy(faith_client_t* client) {
   }
 
   pthread_mutex_destroy(&client->lock);
+
   free(client);
+  client = NULL;
 }
 
 faith_status_code_t faith_client_start(faith_client_t* client) {
@@ -469,9 +476,11 @@ faith_status_code_t faith_client_stop(faith_client_t* client) {
   client->running = 0;
   pthread_mutex_unlock(&client->lock);
 
-  if (was_running) { 
-    // unblock SSL/socket reads
-    shutdown(client->sockfd, SHUT_RDWR);
+  if (was_running) {
+    if (client->sockfd >= 0) {
+      shutdown(client->sockfd, SHUT_RDWR);
+    }
+
     pthread_join(client->thread, NULL);
   }
 

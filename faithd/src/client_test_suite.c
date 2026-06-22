@@ -40,8 +40,8 @@ int main(void)
 
     faith_event_t ev;
     while (faith_client_next_event(client, &ev) == FAITH_OK) {
-      fprintf(stderr, "Got event type=%u value0=%llu value1=%llu message=%s\n",
-              ev.type,
+      fprintf(stderr, "Got event type=%s value0=%llu value1=%llu message=%s\n",
+              faith_event_name(ev.type),
               (unsigned long long)ev.value0,
               (unsigned long long)ev.value1,
               ev.message);
