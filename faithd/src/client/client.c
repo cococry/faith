@@ -1,57 +1,59 @@
 #include "client.h"
 #include <arpa/inet.h>
 #include <assert.h>
+#include <errno.h>
 #include <netinet/in.h>
 #include <openssl/err.h>
+#include <openssl/rand.h>
 #include <openssl/ssl.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/eventfd.h>
+#include <sys/socket.h>
+#include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
-#include <sys/socket.h>
-#include <sys/eventfd.h>
-#include <sys/time.h>
-#include <errno.h>
-#include <openssl/rand.h>
 
 #define NOB_IMPLEMENTATION
 #define NOB_STRIP_PREFIX
-#include "../../nob.h" 
+#include "../../nob.h"
 
-#define MAX_QUEUED_EVENTS 512 
+#define MAX_QUEUED_EVENTS 512
 
 struct faith_client {
-  char            host[256];
-  uint16_t        port;
+  char     host[256];
+  uint16_t port;
 
-  char            server_name[256];
-  char            ca_file[512];
-  int             insecure_skip_verify;
+  char server_name[256];
+  char ca_file[512];
+  int  insecure_skip_verify;
 
-  int             running;
-  pthread_t       thread;
+  int       running;
+  pthread_t thread;
 
-  int             sockfd;
-  int             event_fd;
+  int sockfd;
+  int event_fd;
 
   pthread_mutex_t lock;
 
-  faith_event_t   ev_queue[MAX_QUEUED_EVENTS];
-  uint16_t        ev_queue_front;
-  uint16_t        ev_queue_back;
-  uint16_t        ev_queue_len;
+  faith_event_t ev_queue[MAX_QUEUED_EVENTS];
+  uint16_t      ev_queue_front;
+  uint16_t      ev_queue_back;
+  uint16_t      ev_queue_len;
 };
 
-static faith_status_code_t faith_push_client_event(faith_client_t* client, faith_event_type_t type, 
-    uint64_t value0, uint64_t value1, const char* message) {
-  if(!client) return FAITH_ERR_INVALID;
+static faith_status_code_t
+faith_push_client_event(faith_client_t *client, faith_event_type_t type,
+                        uint64_t value0, uint64_t value1, const char *message) {
+  if (!client)
+    return FAITH_ERR_INVALID;
 
   pthread_mutex_lock(&client->lock);
 
-  /* Enqueue event */ 
+  /* Enqueue event */
 
   if (client->ev_queue_len == MAX_QUEUED_EVENTS) {
     pthread_mutex_unlock(&client->lock);
@@ -63,7 +65,7 @@ static faith_status_code_t faith_push_client_event(faith_client_t* client, faith
   ev.value0 = value0;
   ev.value1 = value1;
   ev.type = type;
-  if(message != NULL) {
+  if (message != NULL) {
     snprintf(ev.message, sizeof(ev.message), "%s", message);
   } else {
     ev.message[0] = '\0';
@@ -74,14 +76,17 @@ static faith_status_code_t faith_push_client_event(faith_client_t* client, faith
   client->ev_queue_len++;
 
   uint64_t one = 1;
-  (void)write(client->event_fd, &one, sizeof(one));
+  ssize_t  wr = write(client->event_fd, &one, sizeof(one));
+  if (wr < 0 && errno != EAGAIN) {
+    nob_log(ERROR, "eventfd write failed: %s", strerror(errno));
+  }
 
   pthread_mutex_unlock(&client->lock);
 
   return FAITH_OK;
 }
 
-static int faith_client_is_running(faith_client_t* client) {
+static int faith_client_is_running(faith_client_t *client) {
   int running;
 
   pthread_mutex_lock(&client->lock);
@@ -91,8 +96,8 @@ static int faith_client_is_running(faith_client_t* client) {
   return running;
 }
 
-static int faith_init_client_sock(const char* host, int port) {
-  int sockfd = -1;
+static int faith_init_client_sock(const char *host, int port) {
+  int                sockfd = -1;
   struct sockaddr_in serveraddr;
 
   sockfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -111,7 +116,7 @@ static int faith_init_client_sock(const char* host, int port) {
     return -1;
   }
 
-  if (connect(sockfd, (struct sockaddr* )&serveraddr, sizeof(serveraddr)) < 0) {
+  if (connect(sockfd, (struct sockaddr *)&serveraddr, sizeof(serveraddr)) < 0) {
     nob_log(ERROR, "Connection to server failed: %s", strerror(errno));
     close(sockfd);
     return -1;
@@ -128,7 +133,8 @@ static void faith_sleep_ms(unsigned ms) {
   ts.tv_sec = ms / 1000;
   ts.tv_nsec = (long)(ms % 1000) * 1000000L;
 
-  while (nanosleep(&ts, &ts) < 0 && errno == EINTR);
+  while (nanosleep(&ts, &ts) < 0 && errno == EINTR)
+    ;
 }
 
 static uint32_t faith_next_backoff_ms(uint32_t current) {
@@ -146,8 +152,8 @@ static uint32_t faith_next_backoff_ms(uint32_t current) {
   return current;
 }
 
-static SSL_CTX* faith_client_create_ssl_ctx(faith_client_t* client) {
-  SSL_CTX* ctx = NULL;
+static SSL_CTX *faith_client_create_ssl_ctx(faith_client_t *client) {
+  SSL_CTX *ctx = NULL;
 
   ctx = SSL_CTX_new(TLS_client_method());
   if (ctx == NULL) {
@@ -193,16 +199,16 @@ static SSL_CTX* faith_client_create_ssl_ctx(faith_client_t* client) {
   return ctx;
 }
 
-static faith_status_code_t faith_encode_ping(
-    uint8_t* out_buf, size_t* out_size, 
-    size_t buf_cap_in_bytes,
-    uint64_t nonce, uint64_t sent_at_ms
-    ) {
-  if(!out_buf) return FAITH_ERR_INVALID;
+static faith_status_code_t faith_encode_ping(uint8_t *out_buf, size_t *out_size,
+                                             size_t   buf_cap_in_bytes,
+                                             uint64_t nonce,
+                                             uint64_t sent_at_ms) {
+  if (!out_buf)
+    return FAITH_ERR_INVALID;
 
-  const size_t ping_size =  sizeof(uint64_t) * 2;
+  const size_t ping_size = sizeof(uint64_t) * 2;
 
-  if (buf_cap_in_bytes < ping_size) 
+  if (buf_cap_in_bytes < ping_size)
     return FAITH_ERR_OVERFLOW;
 
   _FH_CHECK_RETURN(faith_write_u64_be(out_buf, nonce));
@@ -213,32 +219,55 @@ static faith_status_code_t faith_encode_ping(
   return FAITH_OK;
 }
 
-static faith_status_code_t faith_decode_pong(const uint8_t* payload, size_t payload_size, uint64_t* pong_nonce, uint64_t* server_time_ms) {
-  const size_t pong_size =  sizeof(uint64_t) * 2;
+static faith_status_code_t faith_decode_pong(const uint8_t *payload,
+                                             size_t         payload_size,
+                                             uint64_t      *pong_nonce,
+                                             uint64_t      *server_time_ms) {
+  const size_t pong_size = sizeof(uint64_t) * 2;
 
   if (payload == NULL || pong_nonce == NULL || server_time_ms == NULL)
     return FAITH_ERR_INVALID;
 
-  if (payload_size != pong_size) 
+  if (payload_size != pong_size)
     return FAITH_ERR_BAD_FRAME;
 
-  *pong_nonce = faith_read_u64_be(payload); 
-  *server_time_ms = faith_read_u64_be(payload + sizeof(uint64_t)); 
+  *pong_nonce = faith_read_u64_be(payload);
+  *server_time_ms = faith_read_u64_be(payload + sizeof(uint64_t));
 
   return FAITH_OK;
-} 
+}
 
-static faith_status_code_t faith_client_send_ping_ssl(SSL* ssl, uint64_t nonce, uint64_t sent_at_ms) {
+static faith_status_code_t faith_client_send_ping_ssl(SSL *ssl, uint64_t nonce,
+                                                      uint64_t sent_at_ms) {
+
+  if (!ssl)
+    return FAITH_ERR_INVALID;
+
   const size_t buf_cap_in_bytes = sizeof(uint64_t) * 2;
-  uint8_t payload[buf_cap_in_bytes];
+  uint8_t     *payload = malloc(buf_cap_in_bytes);
+  if (!payload)
+    return FAITH_ERR_NOMEM;
+
   size_t payload_size = 0;
 
-  _FH_CHECK_RETURN(faith_encode_ping(payload, &payload_size, buf_cap_in_bytes,
-        nonce, sent_at_ms)); 
+  {
+    _FH_CHECK(faith_encode_ping(payload, &payload_size, buf_cap_in_bytes, nonce,
+                                sent_at_ms));
+    if (_fh_rc != FAITH_OK) {
+      free(payload);
+      return _fh_rc;
+    }
+  }
 
-  NOB_ASSERT(payload_size == buf_cap_in_bytes);
+  _FH_CHECK(faith_write_frame_ssl(ssl, FAITH_MSG_PING, payload, payload_size));
 
-  return faith_write_frame_ssl(ssl, FAITH_MSG_PING, payload, payload_size);
+  if (_fh_rc != FAITH_OK) {
+    free(payload);
+    return _fh_rc;
+  }
+
+  free(payload);
+  return FAITH_OK;
 }
 
 static void faith_client_run_connected(faith_client_t *client, SSL *ssl) {
@@ -246,24 +275,27 @@ static void faith_client_run_connected(faith_client_t *client, SSL *ssl) {
     uint64_t sent_at_ms = faith_now_ms();
     uint64_t nonce;
     if (RAND_bytes((unsigned char *)&nonce, sizeof(nonce)) != 1) {
-      nob_log(ERROR, "Failed to generate random bytes with OpenSSL RAND_bytes()"); 
+      nob_log(ERROR,
+              "Failed to generate random bytes with OpenSSL RAND_bytes()");
       break;
     }
-   
-    nob_log(INFO, "[client]: Sending PING to server..."); 
+
+    nob_log(INFO, "[client]: Sending PING to server...");
 
     if (faith_client_send_ping_ssl(ssl, nonce, sent_at_ms) != FAITH_OK) {
-      faith_push_client_event(client, FAITH_EVENT_DISCONNECTED, 0, 0, "Failed to send ping");
+      faith_push_client_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
+                              "Failed to send ping");
       break;
     }
 
-    nob_log(INFO, "[client]: Sent PING to server."); 
+    nob_log(INFO, "[client]: Sent PING to server.");
 
     nob_log(INFO, "[client] Waiting for server PONG response ...");
 
     faith_frame_t frame;
     if (faith_read_frame_ssl(ssl, &frame) != FAITH_OK) {
-      faith_push_client_event(client, FAITH_EVENT_DISCONNECTED, 0, 0, "Failed to read server frame");
+      faith_push_client_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
+                              "Failed to read server frame");
       break;
     }
 
@@ -272,10 +304,12 @@ static void faith_client_run_connected(faith_client_t *client, SSL *ssl) {
       uint64_t server_time_ms;
 
       nob_log(INFO, "[client] Got server PONG response.");
-      if (faith_decode_pong(frame.payload, frame.payload_size, &pong_nonce, &server_time_ms) == FAITH_OK &&
+      if (faith_decode_pong(frame.payload, frame.payload_size, &pong_nonce,
+                            &server_time_ms) == FAITH_OK &&
           pong_nonce == nonce) {
         uint64_t now = faith_now_ms();
-        faith_push_client_event(client, FAITH_EVENT_PONG, now - sent_at_ms, server_time_ms, NULL);
+        faith_push_client_event(client, FAITH_EVENT_PONG, now - sent_at_ms,
+                                server_time_ms, NULL);
       }
     }
 
@@ -288,18 +322,57 @@ static void faith_client_run_connected(faith_client_t *client, SSL *ssl) {
   }
 }
 
-static void* faith_client_thread_routine(void* arg) {
-  faith_client_t* client = arg;
+static faith_status_code_t faith_client_send_hello(SSL            *ssl,
+                                                   faith_client_t *client) {
+  if (!client)
+    return FAITH_ERR_INVALID;
+
+  faith_envelope_t env = {0};
+  env.type = FAITH_ENVELOPE_HELLO;
+
+  // Only header is needed for le hello, no body size
+  const size_t buf_cap_in_bytes = FAITH_ENVL_HEADER_SIZE;
+
+  uint8_t *payload = malloc(buf_cap_in_bytes);
+  if (!payload)
+    return FAITH_ERR_NOMEM;
+
+  size_t payload_size = 0;
+
+  {
+    _FH_CHECK((
+        faith_encode_envelope(payload, &payload_size, buf_cap_in_bytes, &env)));
+    if (_fh_rc != FAITH_OK) {
+      free(payload);
+      return _fh_rc;
+    }
+  }
+
+  _FH_CHECK(faith_write_frame_ssl(ssl, FAITH_MSG_ENVL, payload, payload_size));
+
+  if (_fh_rc != FAITH_OK) {
+    free(payload);
+    return _fh_rc;
+  }
+
+  free(payload);
+  return FAITH_OK;
+}
+
+static void *faith_client_thread_routine(void *arg) {
+  faith_client_t *client = arg;
 
   uint32_t backoff_ms = 250;
 
   while (faith_client_is_running(client)) {
-    _FH_CHECK(faith_push_client_event(client, FAITH_EVENT_CONNECTING, 0, 0, NULL));
+    _FH_CHECK(
+        faith_push_client_event(client, FAITH_EVENT_CONNECTING, 0, 0, NULL));
 
     int fd = faith_init_client_sock(client->host, client->port);
 
     if (fd < 0) {
-      faith_push_client_event(client, FAITH_EVENT_DISCONNECTED, 0, 0, "Connect failed");
+      faith_push_client_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
+                              "Connect failed");
       faith_sleep_ms(backoff_ms);
       backoff_ms = faith_next_backoff_ms(backoff_ms);
       continue;
@@ -309,34 +382,37 @@ static void* faith_client_thread_routine(void* arg) {
     client->sockfd = fd;
     pthread_mutex_unlock(&client->lock);
 
-    SSL_CTX* ctx = NULL;
-    SSL* ssl = NULL;
+    SSL_CTX *ctx = NULL;
+    SSL     *ssl = NULL;
 
     ctx = faith_client_create_ssl_ctx(client);
     if (!ctx) {
-      faith_push_client_event(client, FAITH_EVENT_ERROR, 0, 0, "TLS context failed");
+      faith_push_client_event(client, FAITH_EVENT_ERROR, 0, 0,
+                              "TLS context failed");
       goto fail;
     }
 
     ssl = SSL_new(ctx);
     if (ssl == NULL) {
-      nob_log(ERROR, "Failed to create SSL object for client"); 
+      nob_log(ERROR, "Failed to create SSL object for client");
       goto fail;
     }
 
     if (SSL_set_fd(ssl, fd) != 1) {
-      nob_log(ERROR, "Failed to set FD of SSL connection for client"); 
+      nob_log(ERROR, "Failed to set FD of SSL connection for client");
       goto fail;
     }
 
     if (!client->insecure_skip_verify && client->server_name[0] != '\0') {
       if (SSL_set_tlsext_host_name(ssl, client->server_name) != 1) {
-        nob_log(ERROR, "Failed to set TLS hostname to '%s'", client->server_name); 
+        nob_log(ERROR, "Failed to set TLS hostname to '%s'",
+                client->server_name);
         goto fail;
       }
 
       if (SSL_set1_host(ssl, client->server_name) != 1) {
-        nob_log(ERROR, "Failed to set TLS hostname to '%s'", client->server_name); 
+        nob_log(ERROR, "Failed to set TLS hostname to '%s'",
+                client->server_name);
         goto fail;
       }
     }
@@ -347,14 +423,25 @@ static void* faith_client_thread_routine(void* arg) {
     }
     backoff_ms = 250;
 
-    _FH_CHECK(faith_push_client_event(client, FAITH_EVENT_CONNECTED, 0, 0, NULL));
-    
+    {
+      _FH_CHECK(
+          faith_push_client_event(client, FAITH_EVENT_CONNECTED, 0, 0, NULL));
+    }
 
+    nob_log(INFO, "Sending HELLO...");
+    {
+      _FH_CHECK(faith_client_send_hello(ssl, client));
+      if (_fh_rc == FAITH_OK)
+        nob_log(INFO, "Sent HELLO.");
+    }
     faith_client_run_connected(client, ssl);
 
-    _FH_CHECK(faith_push_client_event(client, FAITH_EVENT_DISCONNECTED, 0, 0, "connection closed"));
+    {
+      _FH_CHECK(faith_push_client_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
+                                        "connection closed"));
+    }
 
-fail:
+  fail:
     ERR_print_errors_fp(stderr);
 
     if (ssl) {
@@ -385,11 +472,11 @@ fail:
   return NULL;
 }
 
-faith_client_t* faith_client_create(const faith_client_config_t* cfg) {
+faith_client_t *faith_client_create(const faith_client_config_t *cfg) {
   if (!cfg || !cfg->host)
     return NULL;
 
-  faith_client_t* client = calloc(1, sizeof(*client));
+  faith_client_t *client = calloc(1, sizeof(*client));
   if (!client)
     return NULL;
 
@@ -400,7 +487,8 @@ faith_client_t* faith_client_create(const faith_client_config_t* cfg) {
   client->port = cfg->port;
 
   if (cfg->server_name)
-    snprintf(client->server_name, sizeof(client->server_name), "%s", cfg->server_name);
+    snprintf(client->server_name, sizeof(client->server_name), "%s",
+             cfg->server_name);
 
   if (cfg->ca_file)
     snprintf(client->ca_file, sizeof(client->ca_file), "%s", cfg->ca_file);
@@ -422,10 +510,10 @@ faith_client_t* faith_client_create(const faith_client_config_t* cfg) {
   return client;
 }
 
-void faith_client_destroy(faith_client_t* client) {
+void faith_client_destroy(faith_client_t *client) {
   if (!client)
     return;
-  
+
   faith_client_stop(client);
 
   if (client->sockfd >= 0) {
@@ -444,8 +532,9 @@ void faith_client_destroy(faith_client_t* client) {
   client = NULL;
 }
 
-faith_status_code_t faith_client_start(faith_client_t* client) {
-  if(!client) return FAITH_ERR_INVALID;
+faith_status_code_t faith_client_start(faith_client_t *client) {
+  if (!client)
+    return FAITH_ERR_INVALID;
 
   pthread_mutex_lock(&client->lock);
 
@@ -456,8 +545,8 @@ faith_status_code_t faith_client_start(faith_client_t* client) {
 
   client->running = 1;
 
-  if(pthread_create(&client->thread, NULL,  
-        faith_client_thread_routine, client) != 0) {
+  if (pthread_create(&client->thread, NULL, faith_client_thread_routine,
+                     client) != 0) {
 
     client->running = 0;
     pthread_mutex_unlock(&client->lock);
@@ -465,11 +554,12 @@ faith_status_code_t faith_client_start(faith_client_t* client) {
   }
   pthread_mutex_unlock(&client->lock);
 
-  return FAITH_OK; 
+  return FAITH_OK;
 }
 
-faith_status_code_t faith_client_stop(faith_client_t* client) {
-  if (!client) return FAITH_ERR_INVALID;
+faith_status_code_t faith_client_stop(faith_client_t *client) {
+  if (!client)
+    return FAITH_ERR_INVALID;
 
   pthread_mutex_lock(&client->lock);
   int was_running = client->running;
@@ -487,16 +577,16 @@ faith_status_code_t faith_client_stop(faith_client_t* client) {
   return FAITH_OK;
 }
 
-int faith_client_event_fd(faith_client_t* client) {
-  return client->event_fd;
-}
+int faith_client_event_fd(faith_client_t *client) { return client->event_fd; }
 
-faith_status_code_t faith_client_next_event(faith_client_t* client, faith_event_t* out) {
-  if(!client || !out) return FAITH_ERR_INVALID;
+faith_status_code_t faith_client_next_event(faith_client_t *client,
+                                            faith_event_t  *out) {
+  if (!client || !out)
+    return FAITH_ERR_INVALID;
 
   pthread_mutex_lock(&client->lock);
 
-  if(client->ev_queue_len == 0) {
+  if (client->ev_queue_len == 0) {
     pthread_mutex_unlock(&client->lock);
     return FAITH_ERR_UNDERFLOW;
   }
@@ -509,4 +599,3 @@ faith_status_code_t faith_client_next_event(faith_client_t* client, faith_event_
   pthread_mutex_unlock(&client->lock);
   return FAITH_OK;
 }
-
