@@ -88,6 +88,9 @@ Before opening a pull request, make sure that:
 - Behavior changes are covered by tests where practical.
 - The pull request description explains what changed and why.
 
+**If your contribution changes parts of `faithd/`**:
+- Make sure you ran `scripts/format.sh` before submitting your PR
+
 ## Pull Request Commit Messages
 
 Preferred format:
