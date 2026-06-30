@@ -1,5 +1,9 @@
 # faith
 
+
+> [!WARNING]
+> Faith is in active pre-alpha developement and is, from a user's point of view, currently unusable for it's purpose.
+> This will change soon however™.
 <img align="left" style="width:200px" src="https://github.com/cococry/faith/blob/main/assets/logo.png" width="200px">
 
 **faith is an instant messenger optimized for security, 
@@ -17,6 +21,7 @@ over Vulkan and OpenGL, with native X11 and Wayland windowing support.
 
 ## Current features 
 
+**UI related:**
 - X11/Wayland windowing backend
 - Vulkan rendering backend
 - Modern OpenGL rendering backend
@@ -26,6 +31,15 @@ over Vulkan and OpenGL, with native X11 and Wayland windowing support.
 - Ligatures and text shaping with HarfBuzz
 - Multidirectional text paragraphs
 - Paragraph layouting engine
+
+**Network related:**
+- Concurrent server written in C
+- Scalable to many clients with `epoll()` mechanics
+- TCP transport secured with TLS via OpenSSL
+- Basic binary protocol over wire
+- In-memory table of online clients
+- Support for multiple devices per client
+- Foundation for client-to-client message routing
 
 ## Build & Run
 
