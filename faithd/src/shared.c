@@ -3,9 +3,6 @@
 #include <openssl/ssl.h>
 #include <string.h>
 
-#define NOB_STRIP_PREFIX
-#include "../nob.h"
-
 inline uint16_t faith_version_pack(uint8_t major, uint8_t minor,
                                    uint8_t patch) {
   return ((uint16_t)(major & 0x1f) << 11) | ((uint16_t)(minor & 0x1f) << 6) |
@@ -24,8 +21,8 @@ inline uint8_t faith_version_patch(uint16_t v) { return (uint8_t)(v & 0x3f); }
 
 const char *faith_strerror(int code) { return strerror(code); }
 
-faith_status_code_t faith_ssl_write_bytes(SSL *ssl, const uint8_t *buf,
-                                          size_t size) {
+faith_status_code_t faith_write_bytes_sync(SSL *ssl, const uint8_t *buf,
+                                           size_t size) {
   if (!ssl || !buf)
     return FAITH_ERR_INVALID;
 
@@ -54,7 +51,7 @@ faith_status_code_t faith_ssl_write_bytes(SSL *ssl, const uint8_t *buf,
   return FAITH_OK;
 }
 
-faith_status_code_t faith_ssl_read_bytes(SSL *ssl, uint8_t *buf, size_t size) {
+faith_status_code_t faith_read_bytes_sync(SSL *ssl, uint8_t *buf, size_t size) {
   if (!ssl || !buf)
     return FAITH_ERR_INVALID;
 
@@ -91,7 +88,7 @@ void faith_frame_free(faith_frame_t *f) {
   memset(f, 0, sizeof(*f));
 }
 
-faith_status_code_t faith_read_frame_ssl(SSL *ssl, faith_frame_t *out) {
+faith_status_code_t faith_read_frame_sync(SSL *ssl, faith_frame_t *out) {
   if (!ssl || !out)
     return FAITH_ERR_INVALID;
 
@@ -100,7 +97,7 @@ faith_status_code_t faith_read_frame_ssl(SSL *ssl, faith_frame_t *out) {
 
   memset(out, 0, sizeof(*out));
 
-  _FH_CHECK_RETURN(faith_ssl_read_bytes(ssl, len_buf, sizeof(len_buf)));
+  _FH_CHECK_RETURN(faith_read_bytes_sync(ssl, len_buf, sizeof(len_buf)));
 
   uint32_t frame_size = faith_read_u32_be(len_buf);
 
@@ -110,7 +107,7 @@ faith_status_code_t faith_read_frame_ssl(SSL *ssl, faith_frame_t *out) {
   if (frame_size > FAITH_MAX_FRAME_LEN)
     return FAITH_ERR_FRAME_TOO_LARGE;
 
-  _FH_CHECK_RETURN(faith_ssl_read_bytes(ssl, hdr_buf, sizeof(hdr_buf)));
+  _FH_CHECK_RETURN(faith_read_bytes_sync(ssl, hdr_buf, sizeof(hdr_buf)));
 
   out->frame_size = frame_size;
   out->proto_ver = faith_read_u16_be(hdr_buf);
@@ -129,7 +126,7 @@ faith_status_code_t faith_read_frame_ssl(SSL *ssl, faith_frame_t *out) {
       return FAITH_ERR_NOMEM;
 
     faith_status_code_t rc =
-        faith_ssl_read_bytes(ssl, out->payload, out->payload_size);
+        faith_read_bytes_sync(ssl, out->payload, out->payload_size);
 
     if (rc != FAITH_OK) {
       faith_frame_free(out);
@@ -140,55 +137,98 @@ faith_status_code_t faith_read_frame_ssl(SSL *ssl, faith_frame_t *out) {
   return FAITH_OK;
 }
 
-faith_status_code_t faith_write_frame_ssl(SSL *ssl, faith_frame_msg_type_t type,
-                                          const uint8_t *payload,
-                                          size_t         payload_size) {
-
+faith_status_code_t faith_write_frame_sync(SSL                   *ssl,
+                                           faith_frame_msg_type_t type,
+                                           const uint8_t         *payload,
+                                           size_t payload_size) {
   if (!ssl)
     return FAITH_ERR_INVALID;
+
+  uint8_t *data = NULL;
+  size_t   data_size = 0;
+
+  faith_status_code_t rc =
+      faith_encode_frame(type, payload, payload_size, &data, &data_size);
+
+  if (rc != FAITH_OK)
+    return rc;
+
+  rc = faith_write_bytes_sync(ssl, data, data_size);
+
+  free(data);
+
+  if (rc != FAITH_OK) {
+    nob_log(ERROR, "faith_ssl_write_bytes failed: %s (%d)",
+            faith_status_code_name(rc), (int)rc);
+    return rc;
+  }
+
+  return FAITH_OK;
+}
+
+faith_status_code_t faith_encode_frame(faith_frame_msg_type_t type,
+                                       const uint8_t         *payload,
+                                       size_t payload_size, uint8_t **out_data,
+                                       size_t *out_size) {
+  if (!out_data || !out_size)
+    return FAITH_ERR_INVALID;
+
+  *out_data = NULL;
+  *out_size = 0;
+
+  if (payload_size > 0 && !payload)
+    return FAITH_ERR_INVALID;
+
+  if (payload_size > FAITH_MAX_PAYLOAD_SIZE)
+    return FAITH_ERR_FRAME_TOO_LARGE;
 
   const size_t header_size_bytes = sizeof(uint32_t) + /* frame size */
                                    sizeof(uint16_t) + /* proto version */
                                    sizeof(uint16_t);  /* msg type */
 
-  if (payload_size > FAITH_MAX_PAYLOAD_SIZE)
+  if (payload_size > SIZE_MAX - header_size_bytes)
     return FAITH_ERR_FRAME_TOO_LARGE;
 
-  // Frame size specifies the size of the frame data
-  // in bytes excluding the frame size itself (4 bytes).
-  uint32_t frame_size = sizeof(uint16_t) + sizeof(uint16_t) + payload_size;
+  size_t frame_size_size_t = sizeof(uint16_t) + sizeof(uint16_t) + payload_size;
 
-  if (frame_size > FAITH_MAX_FRAME_LEN)
+  if (frame_size_size_t > UINT32_MAX)
     return FAITH_ERR_FRAME_TOO_LARGE;
 
-  const size_t data_size = header_size_bytes + payload_size;
-  uint8_t     *data = malloc(data_size);
+  if (frame_size_size_t > FAITH_MAX_FRAME_LEN)
+    return FAITH_ERR_FRAME_TOO_LARGE;
+
+  size_t data_size = header_size_bytes + payload_size;
+
+  uint8_t *data = malloc(data_size);
   if (!data)
     return FAITH_ERR_NOMEM;
 
-  // Write header
-  _FH_CHECK_RETURN(faith_write_u32_be(data, frame_size));
-  _FH_CHECK_RETURN(
-      faith_write_u16_be(data + sizeof(uint32_t), FAITH_PROTO_VERSION));
-  _FH_CHECK_RETURN(faith_write_u16_be(
-      data + sizeof(uint32_t) + sizeof(uint16_t), (uint16_t)type));
+  faith_status_code_t rc = FAITH_OK;
 
-  if (payload_size > 0 && payload == NULL) {
-    free(data);
-    return FAITH_ERR_INVALID;
-  }
+  rc = faith_write_u32_be(data, (uint32_t)frame_size_size_t);
+  if (rc != FAITH_OK)
+    goto fail;
 
-  // Insert payload data
-  if (payload_size > 0 && payload != NULL) {
+  rc = faith_write_u16_be(data + sizeof(uint32_t), FAITH_PROTO_VERSION);
+  if (rc != FAITH_OK)
+    goto fail;
+
+  rc = faith_write_u16_be(data + sizeof(uint32_t) + sizeof(uint16_t),
+                          (uint16_t)type);
+  if (rc != FAITH_OK)
+    goto fail;
+
+  if (payload_size > 0)
     memcpy(data + header_size_bytes, payload, payload_size);
-  }
 
-  // Write data with SSL
-  _FH_CHECK_RETURN(faith_ssl_write_bytes(ssl, data, data_size));
-
-  free(data);
+  *out_data = data;
+  *out_size = data_size;
 
   return FAITH_OK;
+
+fail:
+  free(data);
+  return rc;
 }
 
 uint64_t faith_now_ms() {
@@ -342,3 +382,53 @@ faith_status_code_t faith_encode_envelope(uint8_t *out_buf, size_t *out_size,
 
   return FAITH_OK;
 }
+
+void faith_log_handler(Nob_Log_Level level,
+    const char *fmt,
+    va_list args) {
+  if (level < nob_minimal_log_level) return;
+
+  const char *level_name = NULL;
+
+  switch (level) {
+    case NOB_INFO:
+      level_name = "INFO";
+      break;
+    case NOB_WARNING:
+      level_name = "WARNING";
+      break;
+    case NOB_ERROR:
+      level_name = "ERROR";
+      break;
+    case NOB_NO_LOGS:
+      return;
+    default:
+      NOB_UNREACHABLE("Nob_Log_Level");
+  }
+
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+
+  time_t now = tv.tv_sec;
+  struct tm tm_utc;
+
+#if defined(_WIN32)
+  gmtime_s(&tm_utc, &now);
+#else
+  gmtime_r(&now, &tm_utc);
+#endif
+
+  char timestamp[32];
+
+  strftime(timestamp, sizeof(timestamp),
+      "%Y-%m-%dT%H:%M:%S", &tm_utc);
+
+  fprintf(stderr, "%s.%03ldZ [%s] ",
+      timestamp,
+      tv.tv_usec / 1000,
+      level_name);
+
+  vfprintf(stderr, fmt, args);
+  fprintf(stderr, "\n");
+}
+

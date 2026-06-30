@@ -15,9 +15,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdatomic.h>
-#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,9 +25,6 @@
 #include <unistd.h>
 
 #define NOB_IMPLEMENTATION
-#define NOB_STRIP_PREFIX
-#include "../nob.h"
-
 #include "shared.h"
 
 #define PORT       4433
@@ -37,29 +34,27 @@ struct server_cfg_t {
   int verbose_logging;
 };
 
-struct server_state_t {
-  int      listenfd;
-  int      epoll_fd;
-  SSL_CTX *ssl_ctx;
-
-  atomic_uint_fast64_t next_client_id;
-
-  struct server_cfg_t cfg;
+struct routing_state_t {
+  void *active_routes;
 };
 
-enum client_state_t { CLIENT_HANDSHAKE, CLIENT_OPEN, CLIENT_CLOSING };
+#define CLIENT_STATES(X)                                                       \
+  X(CLIENT_HANDSHAKE, 0)                                                       \
+  X(CLIENT_OPEN, 1)                                                            \
+  X(CLIENT_CLOSING, 2)                                                         \
+  X(CLIENT_WAIT_FOR_HELLO_ACK, 3)
 
-enum read_frame_result_t {
-  READ_FRAME_OK,
-  READ_FRAME_GOT_BYTES,
-  READ_FRAME_WANT_READ,
-  READ_FRAME_WANT_WRITE,
-  READ_FRAME_CLOSED,
-  READ_FRAME_ERROR
+enum client_state_t {
+#define X(name, value) name = value,
+  CLIENT_STATES(X)
+#undef X
 };
 
 struct client_conn_t {
-  uint64_t            id;
+  // connection id
+  uint64_t            conn_id;
+  uint64_t            client_id;
+  uint64_t            sess_id;
   int                 fd;
   SSL                *ssl;
   enum client_state_t state;
@@ -74,6 +69,32 @@ struct client_conn_t {
   size_t   in_size;
   size_t   in_cap;
   size_t   in_off;
+
+  struct client_conn_t *next;
+  struct client_conn_t *prev;
+
+  int authorized;
+};
+
+struct server_state_t {
+  int      listenfd;
+  int      epoll_fd;
+  SSL_CTX *ssl_ctx;
+
+  atomic_uint_fast64_t  next_client_id;
+  struct client_conn_t *clients;
+
+  struct server_cfg_t    cfg;
+  struct routing_state_t rt;
+};
+
+enum read_frame_result_t {
+  READ_FRAME_OK,
+  READ_FRAME_GOT_BYTES,
+  READ_FRAME_WANT_READ,
+  READ_FRAME_WANT_WRITE,
+  READ_FRAME_CLOSED,
+  READ_FRAME_ERROR
 };
 
 static volatile sig_atomic_t shutdown_requested = 0;
@@ -94,20 +115,82 @@ static int set_nonblocking(int fd) {
   return 0;
 }
 
-static faith_status_code_t close_client(int                   epoll_fd,
-                                        struct client_conn_t *cl) {
-  if (!cl)
-    return FAITH_ERR_INVALID;
+static const char *client_state_name(enum client_state_t state) {
+  switch (state) {
+#define X(name, value)                                                         \
+  case name:                                                                   \
+    return #name;
+    CLIENT_STATES(X)
+#undef X
+  default:
+    return "FAITH_EVENT_UNKNOWN";
+  }
+}
 
-  epoll_ctl(epoll_fd, EPOLL_CTL_DEL, cl->fd, NULL);
+static void set_client_state(struct server_state_t *s, struct client_conn_t *cl,
+                             enum client_state_t state) {
+  if (!cl)
+    return;
+  cl->state = state;
+
+  if (s->cfg.verbose_logging) {
+    nob_log(INFO, "[client=%" PRIu64 " fd=%i]: Client changed state to %s",
+            cl->conn_id, cl->fd, client_state_name(state));
+  }
+}
+
+static void server_add_client(struct server_state_t *s,
+                              struct client_conn_t  *cl) {
+  if (!s || !cl)
+    return;
+
+  cl->prev = NULL;
+  cl->next = s->clients;
+
+  if (s->clients) {
+    s->clients->prev = cl;
+  }
+  s->clients = cl;
+}
+
+static void server_remove_client(struct server_state_t *s,
+                                 struct client_conn_t  *cl) {
+  if (!s || !cl)
+    return;
+
+  if (cl->prev) {
+    cl->prev->next = cl->next;
+  } else {
+    s->clients = cl->next;
+  }
+
+  if (cl->next) {
+    cl->next->prev = cl->prev;
+  }
+  cl->next = NULL;
+  cl->prev = NULL;
+}
+
+static void close_client(struct server_state_t *s, struct client_conn_t *cl) {
+  if (!cl)
+    return;
+
+  /* Unlink client from linked list of clients */
+  server_remove_client(s, cl);
+
+  epoll_ctl(s->epoll_fd, EPOLL_CTL_DEL, cl->fd, NULL);
 
   if (cl->ssl) {
     SSL_set_shutdown(cl->ssl, SSL_SENT_SHUTDOWN | SSL_RECEIVED_SHUTDOWN);
     SSL_free(cl->ssl);
+    cl->ssl = NULL;
   }
 
-  if (cl->fd >= 0)
+  int log_fd = cl->fd;
+  if (cl->fd >= 0) {
     close(cl->fd);
+    cl->fd = -1;
+  }
 
   if (cl->out_buf != NULL) {
     free(cl->out_buf);
@@ -119,11 +202,10 @@ static faith_status_code_t close_client(int                   epoll_fd,
     cl->in_buf = NULL;
   }
 
-  nob_log(INFO, "[client=%" PRIu64 " fd=%i]: Closed client", cl->id, cl->fd);
+  nob_log(INFO, "[client=%" PRIu64 " fd=%i]: Closed client", cl->conn_id,
+          log_fd);
 
   free(cl);
-
-  return FAITH_OK;
 }
 
 static int modify_client_ev_mask(int epoll_fd, struct client_conn_t *cl,
@@ -142,6 +224,12 @@ static int modify_client_ev_mask(int epoll_fd, struct client_conn_t *cl,
   cl->evs_mask_want = mask;
 
   return epoll_ctl(epoll_fd, EPOLL_CTL_MOD, cl->fd, &ev);
+}
+
+static void routing_destroy(struct routing_state_t *rt) {
+  if (!rt)
+    return;
+  // map64_destroy(rt->online_clients);
 }
 
 void server_destroy(struct server_state_t *s) {
@@ -168,6 +256,12 @@ void server_destroy(struct server_state_t *s) {
     SSL_CTX_free(s->ssl_ctx);
     s->ssl_ctx = NULL;
   }
+
+  while (s->clients) {
+    close_client(s, s->clients);
+  }
+
+  routing_destroy(&s->rt);
 
   nob_log(INFO, "Destroyed server context.");
 }
@@ -255,8 +349,8 @@ static faith_status_code_t enqueue_input_bytes(struct client_conn_t *cl,
   if (cfg->verbose_logging) {
     nob_log(INFO,
             "[client=%" PRIu64
-            " fd=%i] Trying to enqueue %li incoming bytes...",
-            cl->id, cl->fd, n_bytes);
+            " fd=%i] Trying to enqueue %zu incoming bytes...",
+            cl->conn_id, cl->fd, n_bytes);
   }
 
   if (n_bytes == 0) {
@@ -264,7 +358,7 @@ static faith_status_code_t enqueue_input_bytes(struct client_conn_t *cl,
       nob_log(WARNING,
               "[client=%" PRIu64
               " fd=%i] Tried to enqueue zero length input bytes",
-              cl->id, cl->fd);
+              cl->conn_id, cl->fd);
     }
     return FAITH_OK;
   }
@@ -298,7 +392,7 @@ static faith_status_code_t enqueue_input_bytes(struct client_conn_t *cl,
     nob_log(INFO,
             "[client=%" PRIu64
             " fd=%i] Successfully enqueued %li incoming bytes...",
-            cl->id, cl->fd, n_bytes);
+            cl->conn_id, cl->fd, n_bytes);
   }
 
   return FAITH_OK;
@@ -347,44 +441,47 @@ static faith_status_code_t encode_pong(uint8_t *out_buf, size_t *out_size,
   return FAITH_OK;
 }
 
-static faith_status_code_t server_send_pong_ssl(struct client_conn_t *cl,
-                                                uint64_t              nonce,
-                                                uint64_t sent_at_ms) {
-  uint8_t payload[sizeof(uint64_t) * 2];
-  size_t  payload_size = 0;
+static faith_status_code_t
+server_send_over_wire(struct client_conn_t *cl, const uint8_t *payload,
+                      size_t payload_size, faith_frame_msg_type_t msg_type,
+                      int epoll_fd) {
+  if (!cl)
+    return FAITH_ERR_INVALID;
 
-  _FH_CHECK_RETURN(
-      encode_pong(payload, &payload_size, sizeof(payload), nonce, sent_at_ms));
+  uint8_t *wire_data = NULL;
+  size_t   wire_size = 0;
 
-  NOB_ASSERT(payload_size == sizeof(payload));
+  faith_status_code_t rc = faith_encode_frame(msg_type, payload, payload_size,
+                                              &wire_data, &wire_size);
 
-  size_t   wire_size = FAITH_HEADER_SIZE + payload_size;
-  uint8_t *wire_data = malloc(wire_size);
-  if (!wire_data)
-    return FAITH_ERR_NOMEM;
+  if (rc != FAITH_OK)
+    return rc;
 
-  size_t frame_size = sizeof(uint16_t) + sizeof(uint16_t) + payload_size;
-  faith_write_u32_be(wire_data, frame_size);
-  faith_write_u16_be(wire_data + sizeof(uint32_t), FAITH_PROTO_VERSION);
-  faith_write_u16_be(wire_data + sizeof(uint32_t) + sizeof(uint16_t),
-                     FAITH_MSG_PONG);
-
-  memcpy(wire_data + FAITH_HEADER_SIZE, payload, payload_size);
-
-  faith_status_code_t fc = enqueue_output_bytes(cl, wire_data, wire_size);
-
-  if (fc != FAITH_OK) {
-    nob_log(ERROR, "enqueue_output_bytes()) failed: %s (%d)",
-            faith_status_code_name(fc), (int)fc);
-  }
+  rc = enqueue_output_bytes(cl, wire_data, wire_size);
 
   free(wire_data);
 
-  return fc;
+  if (rc != FAITH_OK) {
+    nob_log(ERROR, "enqueue_output_bytes failed: %s (%d)",
+            faith_status_code_name(rc), (int)rc);
+    return rc;
+  }
+
+  if (modify_client_ev_mask(epoll_fd, cl,
+                            EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLERR |
+                                EPOLLHUP) < 0) {
+    nob_log(ERROR, "failed to enable EPOLLOUT: %s", strerror(errno));
+    return FAITH_ERR_IO;
+  }
+
+  nob_log(INFO, "[client=%" PRIu64 " fd=%d] queued frame: %s (%zu bytes)",
+          cl->conn_id, cl->fd, faith_frame_msg_name(msg_type), wire_size);
+
+  return FAITH_OK;
 }
 
-static faith_status_code_t server_send_pong(struct client_conn_t *cl,
-                                            faith_frame_t *frame, int epfd) {
+static faith_status_code_t
+server_send_pong(struct client_conn_t *cl, faith_frame_t *frame, int epoll_fd) {
   uint64_t nonce;
   uint64_t client_sent_at_ms;
 
@@ -395,18 +492,44 @@ static faith_status_code_t server_send_pong(struct client_conn_t *cl,
                                &client_sent_at_ms));
 
   nob_log(INFO,
-          "[client=%" PRIu64
-          " fd=%i] server got PING: nonce=%lu, client_sent_at_ms=%lu",
-          cl->id, cl->fd, nonce, client_sent_at_ms);
+          "[client=%" PRIu64 " fd=%i] server got PING: nonce=%" PRIu64
+          ", client_sent_at_ms=%lu",
+          cl->conn_id, cl->fd, nonce, client_sent_at_ms);
+
+  /* Send PONG over wire protocol */
 
   uint64_t server_sent_at_ms = faith_now_ms();
 
-  _FH_CHECK_RETURN(server_send_pong_ssl(cl, nonce, server_sent_at_ms));
+  size_t   buf_cap_in_bytes = sizeof(uint64_t) * 2;
+  uint8_t *payload = malloc(buf_cap_in_bytes);
+  if (!payload)
+    return FAITH_ERR_NOMEM;
 
-  if (modify_client_ev_mask(epfd, cl,
+  size_t payload_size = 0;
+
+  {
+    _FH_CHECK(encode_pong(payload, &payload_size, buf_cap_in_bytes, nonce,
+                          server_sent_at_ms));
+    if (_fh_rc != FAITH_OK) {
+      free(payload);
+      return _fh_rc;
+    }
+  }
+
+  {
+    _FH_CHECK(server_send_over_wire(cl, payload, payload_size, FAITH_MSG_PONG,
+                                    epoll_fd));
+    if (_fh_rc != FAITH_OK) {
+      free(payload);
+      return _fh_rc;
+    }
+  }
+
+  if (modify_client_ev_mask(epoll_fd, cl,
                             EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLERR |
                                 EPOLLHUP) < 0) {
     nob_log(ERROR, "modify_client_ev_mask failed: %s", strerror(errno));
+    free(payload);
     return FAITH_ERR_IO;
   }
 
@@ -414,13 +537,91 @@ static faith_status_code_t server_send_pong(struct client_conn_t *cl,
       INFO,
       "[client=%" PRIu64
       " fd=%i] Server sent PONG to client. nonce=%lu, server_sent_at_ms=%lu",
-      cl->id, cl->fd, nonce, server_sent_at_ms);
+      cl->conn_id, cl->fd, nonce, server_sent_at_ms);
+
+  free(payload);
 
   return FAITH_OK;
 }
-static faith_status_code_t server_handle_envl(struct client_conn_t *cl,
-                                              faith_frame_t *frame, int epfd) {
-  (void)epfd;
+
+static faith_status_code_t server_send_envelope(struct client_conn_t   *cl,
+                                                const faith_envelope_t *envl,
+                                                int epoll_fd) {
+  if (!cl || !envl)
+    return FAITH_ERR_INVALID;
+
+  size_t   cap = FAITH_ENVL_HEADER_SIZE + envl->body_size;
+  uint8_t *payload = malloc(cap);
+  if (!payload)
+    return FAITH_ERR_NOMEM;
+
+  size_t payload_size = 0;
+
+  faith_status_code_t rc =
+      faith_encode_envelope(payload, &payload_size, cap, envl);
+
+  if (rc == FAITH_OK) {
+    rc = server_send_over_wire(cl, payload, payload_size, FAITH_MSG_ENVL,
+                               epoll_fd);
+  }
+
+  nob_log(
+      INFO,
+      "[client=%" PRIu64 " fd=%i] Server sent envelope: type=%s body_size=%u",
+      cl->conn_id, cl->fd, faith_envelope_name(envl->type), envl->body_size);
+
+  free(payload);
+  return rc;
+}
+
+static faith_status_code_t server_handle_hello(struct server_state_t  *s,
+                                               struct client_conn_t   *cl,
+                                               const faith_envelope_t *hello,
+                                               int epoll_fd) {
+
+  if (!cl || !hello)
+    return FAITH_ERR_INVALID;
+  if (hello->type != FAITH_ENVELOPE_HELLO)
+    return FAITH_ERR_INVALID;
+
+  if (cl->state != CLIENT_WAIT_FOR_HELLO_ACK) {
+    nob_log(ERROR,
+            "[client=%" PRIu64 " fd=%i] Server got invalid HELLO from client.",
+            cl->conn_id, cl->fd);
+    return FAITH_ERR_INVALID;
+  }
+
+  if (cl->authorized != 1) {
+    return FAITH_ERR_UNAUTHORIZED;
+  }
+
+  if (hello->sender_id == 0) {
+    return FAITH_ERR_INVALID;
+  }
+
+  /* Send HELLO_OK evelope back to client */
+  faith_envelope_t hello_ok = {0};
+  hello_ok.type = FAITH_ENVELOPE_HELLO_OK;
+  hello_ok.recipient_id = hello->sender_id;
+
+  cl->client_id = hello->sender_id;
+
+  _FH_CHECK_RETURN(server_send_envelope(cl, &hello_ok, epoll_fd));
+
+  set_client_state(s, cl, CLIENT_OPEN);
+
+  nob_log(INFO,
+          "[client=%" PRIu64
+          " fd=%i] Server accepted HELLO (client id: %" PRIu64 ")",
+          cl->conn_id, cl->fd, cl->client_id);
+
+  return FAITH_OK;
+}
+
+static faith_status_code_t server_handle_envl(struct server_state_t *s,
+                                              struct client_conn_t  *cl,
+                                              faith_frame_t         *frame,
+                                              int                    epoll_fd) {
 
   if (!frame || !cl)
     return FAITH_ERR_INVALID;
@@ -429,39 +630,65 @@ static faith_status_code_t server_handle_envl(struct client_conn_t *cl,
 
   _FH_CHECK_RETURN(decode_envl(frame->payload, frame->payload_size, &envl));
 
+  nob_log(INFO,
+          "[client=%" PRIu64
+          " fd=%i] Server got envelope: type=%s body_size=%u",
+          cl->conn_id, cl->fd, faith_envelope_name(envl.type), envl.body_size);
+
+  faith_status_code_t rc = FAITH_OK;
+  if (cl->state != CLIENT_OPEN && envl.type != FAITH_ENVELOPE_HELLO) {
+    nob_log(ERROR,
+            "[client=%" PRIu64 " fd=%i] Client is not acknowledged yet. Will "
+            "not handle envelope (%s).",
+            cl->conn_id, cl->fd, faith_envelope_name(envl.type));
+
+    rc = FAITH_ERR_IO;
+    goto defer;
+  }
+
   switch (envl.type) {
   case FAITH_ENVELOPE_HELLO: {
-    nob_log(INFO, "[client=%" PRIu64 " fd=%i] Server got HELLO!", cl->id,
-            cl->fd);
+    _FH_CHECK(server_handle_hello(s, cl, &envl, epoll_fd));
+    rc = _fh_rc;
     break;
   }
   default:
     break;
   }
 
+defer:
   if (envl.body != NULL)
     free(envl.body);
 
-  return FAITH_OK;
+  return rc;
 }
 
-static faith_status_code_t handle_frame(struct client_conn_t *cl,
+static faith_status_code_t handle_frame(struct server_state_t *s,
+                                        struct client_conn_t  *cl,
                                         faith_frame_t *frame, int epfd) {
   if (!cl)
     return FAITH_ERR_INVALID;
 
   nob_log(INFO,
-          "[client=%" PRIu64 " fd=%i] Server got msg_type=%s payload_size=%zu",
-          cl->id, cl->fd, faith_frame_msg_name(frame->msg_type),
+          "[client=%" PRIu64
+          " fd=%i] Server got frame: msg_type=%s payload_size=%zu",
+          cl->conn_id, cl->fd, faith_frame_msg_name(frame->msg_type),
           frame->payload_size);
+
+  if (cl->state != CLIENT_OPEN && frame->msg_type != FAITH_MSG_ENVL) {
+    nob_log(ERROR,
+            "[client=%" PRIu64
+            " fd=%i] Client is not acknowledged yet. Rejecting frame (type=%s)",
+            cl->conn_id, cl->fd, faith_frame_msg_name(frame->msg_type));
+    return FAITH_ERR_IO;
+  }
 
   switch (frame->msg_type) {
   case FAITH_MSG_PING:
     _FH_CHECK_RETURN(server_send_pong(cl, frame, epfd));
     break;
   case FAITH_MSG_ENVL:
-    nob_log(INFO, "GOT ENVELOPE!");
-    _FH_CHECK_RETURN(server_handle_envl(cl, frame, epfd));
+    _FH_CHECK_RETURN(server_handle_envl(s, cl, frame, epfd));
     break;
   default:
     return FAITH_ERR_BAD_FRAME;
@@ -504,22 +731,18 @@ read_more_ssl_bytes(struct client_conn_t *cl, const struct server_cfg_t *cfg) {
 
 static faith_status_code_t
 try_parse_frame_from_buffer(const uint8_t *buf, size_t size,
-                            faith_frame_t *frame, size_t *consumed_out,
-                            const struct server_cfg_t *cfg) {
+                            faith_frame_t *frame, size_t *consumed_out) {
   if (!frame || !consumed_out)
     return FAITH_ERR_INVALID;
 
   if (!buf) {
     if (size == 0) {
-      nob_log(WARNING, "No frame data read, frame size is zero.");
       return FAITH_ERR_INCOMPLETE;
     }
     return FAITH_ERR_INVALID;
   }
 
   if (size < FAITH_HEADER_SIZE) {
-    if (cfg->verbose_logging)
-      nob_log(INFO, "Frame is incomplete, only %li bytes long.", size);
     return FAITH_ERR_INCOMPLETE;
   }
 
@@ -573,11 +796,11 @@ try_read_one_frame(struct client_conn_t *cl, faith_frame_t *frame,
     if (cfg->verbose_logging) {
       nob_log(INFO,
               "[client=%" PRIu64 " fd=%i] Trying to parse frame buffer...",
-              cl->id, cl->fd);
+              cl->conn_id, cl->fd);
     }
 
     faith_status_code_t rc = try_parse_frame_from_buffer(
-        cl->in_buf, cl->in_size, frame, &consumed, cfg);
+        cl->in_buf, cl->in_size, frame, &consumed);
 
     if (rc == FAITH_OK) {
 
@@ -586,7 +809,7 @@ try_read_one_frame(struct client_conn_t *cl, faith_frame_t *frame,
             INFO,
             "[client=%" PRIu64
             " fd=%i] Successfully parsed full frame from buffer (%li bytes)",
-            cl->id, cl->fd, consumed);
+            cl->conn_id, cl->fd, consumed);
       }
 
       size_t remaining = cl->in_size - consumed;
@@ -606,7 +829,7 @@ try_read_one_frame(struct client_conn_t *cl, faith_frame_t *frame,
         nob_log(INFO,
                 "[client=%" PRIu64
                 " fd=%i] Frame incomplete, reading more bytes...",
-                cl->id, cl->fd);
+                cl->conn_id, cl->fd);
       }
       enum read_frame_result_t rr = read_more_ssl_bytes(cl, cfg);
 
@@ -615,7 +838,7 @@ try_read_one_frame(struct client_conn_t *cl, faith_frame_t *frame,
           nob_log(INFO,
                   "[client=%" PRIu64
                   " fd=%i] Got new bytes, parsing frame again...",
-                  cl->id, cl->fd);
+                  cl->conn_id, cl->fd);
         }
         continue;
       }
@@ -625,7 +848,7 @@ try_read_one_frame(struct client_conn_t *cl, faith_frame_t *frame,
           nob_log(INFO,
                   "[client=%" PRIu64
                   " fd=%i] SSL_read needs to wait for socket to be readable",
-                  cl->id, cl->fd);
+                  cl->conn_id, cl->fd);
         }
         return rr;
       }
@@ -635,7 +858,7 @@ try_read_one_frame(struct client_conn_t *cl, faith_frame_t *frame,
           nob_log(INFO,
                   "[client=%" PRIu64
                   " fd=%i] SSL_read needs to wait for socket to be writable",
-                  cl->id, cl->fd);
+                  cl->conn_id, cl->fd);
         }
         return rr;
       }
@@ -644,47 +867,52 @@ try_read_one_frame(struct client_conn_t *cl, faith_frame_t *frame,
         nob_log(INFO,
                 "[client=%" PRIu64
                 " fd=%i] Connection closed while reading incomplete frame.",
-                cl->id, cl->fd);
+                cl->conn_id, cl->fd);
         return rr;
       }
 
       nob_log(ERROR,
               "[client=%" PRIu64
               " fd=%i] Error while reading incomplete frame.",
-              cl->id, cl->fd);
+              cl->conn_id, cl->fd);
 
       return rr;
     }
 
-    nob_log(ERROR, "[client=%" PRIu64 " fd=%i] Failed to read frame", cl->id,
-            cl->fd);
+    nob_log(ERROR, "[client=%" PRIu64 " fd=%i] Failed to read frame",
+            cl->conn_id, cl->fd);
 
     return READ_FRAME_ERROR;
   }
 }
 
-static int drive_client_read(int epfd, struct client_conn_t *cl,
+static int drive_client_read(struct server_state_t *s, struct client_conn_t *cl,
                              const struct server_cfg_t *cfg) {
   for (;;) {
     faith_frame_t frame;
 
     if (cfg->verbose_logging) {
       nob_log(INFO, "[client=%" PRIu64 " fd=%i]: HANDLING NEW CLIENT FRAME.",
-              cl->id, cl->fd);
+              cl->conn_id, cl->fd);
     }
     enum read_frame_result_t rr = try_read_one_frame(cl, &frame, cfg);
 
     if (rr == READ_FRAME_OK) {
-      int ok = handle_frame(cl, &frame, epfd);
-      faith_frame_free(&frame);
+      /* Handle protocol frame */
+      {
+        _FH_CHECK(handle_frame(s, cl, &frame, s->epoll_fd));
+        if (_fh_rc) {
 
-      if (ok < 0)
-        return -1;
+          faith_frame_free(&frame);
+          return -1;
+        }
+      }
+      faith_frame_free(&frame);
 
       if (cfg->verbose_logging) {
         nob_log(INFO,
                 "[client=%" PRIu64 " fd=%i]: SUCCESS HANDLING CLIENT FRAME.",
-                cl->id, cl->fd);
+                cl->conn_id, cl->fd);
       }
 
       if (cl->out_buf && cl->out_off < cl->out_size) {
@@ -700,14 +928,14 @@ static int drive_client_read(int epfd, struct client_conn_t *cl,
         mask |= EPOLLOUT;
       }
 
-      if (modify_client_ev_mask(epfd, cl, mask) < 0) {
+      if (modify_client_ev_mask(s->epoll_fd, cl, mask) < 0) {
         return -1;
       }
       return 0;
     }
 
     if (rr == READ_FRAME_WANT_WRITE) {
-      if (modify_client_ev_mask(epfd, cl,
+      if (modify_client_ev_mask(s->epoll_fd, cl,
                                 EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLERR |
                                     EPOLLHUP) < 0) {
         nob_log(ERROR, "modify_client_ev_mask failed: %s", strerror(errno));
@@ -720,7 +948,7 @@ static int drive_client_read(int epfd, struct client_conn_t *cl,
       return -1;
 
     nob_log(ERROR, "[client=%" PRIu64 " fd=%i]: Failed to read client frame.",
-            cl->id, cl->fd);
+            cl->conn_id, cl->fd);
 
     return -1;
   }
@@ -743,6 +971,7 @@ static void accept_clients(struct server_state_t *s) {
       return;
     }
 
+    // TODO: Arena allocator
     struct client_conn_t *cl = calloc(1, sizeof(*cl));
     if (!cl) {
       nob_log(WARNING, "failed to allocate memory with calloc() for pending "
@@ -750,21 +979,27 @@ static void accept_clients(struct server_state_t *s) {
       close(client_fd);
       continue;
     }
-    cl->id = atomic_fetch_add(&s->next_client_id, 1);
 
-    nob_log(INFO, "accepted new client id=%" PRIu64 " fd=%i", cl->id,
+    cl->conn_id = atomic_fetch_add(&s->next_client_id, 1);
+
+    nob_log(INFO, "accepted new client id=%" PRIu64 " fd=%i", cl->conn_id,
             client_fd);
 
     cl->fd = client_fd;
-    cl->state = CLIENT_HANDSHAKE;
+    set_client_state(s, cl, CLIENT_HANDSHAKE);
+
+    /* Add client to linked list of clients */
+    server_add_client(s, cl);
+
+    // TODO: temporary
+    cl->authorized = 1;
 
     // create SSL object for client
     cl->ssl = SSL_new(s->ssl_ctx);
     if (!cl->ssl) {
       nob_log(ERROR, "SSL_new() failed for client connection (FD: %i)",
               client_fd);
-      close(client_fd);
-      free(cl);
+      close_client(s, cl);
       continue;
     }
 
@@ -782,23 +1017,23 @@ static void accept_clients(struct server_state_t *s) {
     if (epoll_ctl(s->epoll_fd, EPOLL_CTL_ADD, client_fd, &ev) < 0) {
       nob_log(ERROR, "epoll_ctl() failed for client (FD: %i): %s", client_fd,
               strerror(errno));
-      close_client(s->epoll_fd, cl);
+      close_client(s, cl);
       continue;
     }
   }
 }
 
-static faith_status_code_t drive_tls_handshake(int                   epoll_fd,
-                                               struct client_conn_t *cl) {
+static faith_status_code_t drive_tls_handshake(struct server_state_t *s,
+                                               struct client_conn_t  *cl) {
   int rc = SSL_accept(cl->ssl);
 
   uint32_t base_mask = EPOLLRDHUP | EPOLLERR | EPOLLHUP;
 
   if (rc == 1) {
-    cl->state = CLIENT_OPEN;
+    set_client_state(s, cl, CLIENT_WAIT_FOR_HELLO_ACK);
     base_mask |= EPOLLIN;
 
-    if (modify_client_ev_mask(epoll_fd, cl, base_mask) < 0) {
+    if (modify_client_ev_mask(s->epoll_fd, cl, base_mask) < 0) {
       nob_log(ERROR, "modify_client_ev_mask failed: %s", strerror(errno));
       return FAITH_ERR_IO;
     }
@@ -811,7 +1046,7 @@ static faith_status_code_t drive_tls_handshake(int                   epoll_fd,
   if (err == SSL_ERROR_WANT_READ) {
     base_mask |= EPOLLIN;
 
-    if (modify_client_ev_mask(epoll_fd, cl, base_mask) < 0) {
+    if (modify_client_ev_mask(s->epoll_fd, cl, base_mask) < 0) {
       nob_log(ERROR, "modify_client_ev_mask failed: %s", strerror(errno));
       return FAITH_ERR_IO;
     }
@@ -822,7 +1057,7 @@ static faith_status_code_t drive_tls_handshake(int                   epoll_fd,
   if (err == SSL_ERROR_WANT_WRITE) {
     base_mask |= EPOLLOUT;
 
-    if (modify_client_ev_mask(epoll_fd, cl, base_mask) < 0) {
+    if (modify_client_ev_mask(s->epoll_fd, cl, base_mask) < 0) {
       nob_log(ERROR, "modify_client_ev_mask failed: %s", strerror(errno));
       return FAITH_ERR_IO;
     }
@@ -846,8 +1081,13 @@ static faith_status_code_t flush_client_output(int                   epoll_fd,
 
   while (cl->out_off < cl->out_size) {
     size_t remaining = cl->out_size - cl->out_off;
+    /* becaused this is passed as int to SSL, we need to clamp to integer
+     * range */
+    int clamped = remaining > INT_MAX ? INT_MAX : (int)remaining;
 
-    int nwrite = SSL_write(cl->ssl, cl->out_buf + cl->out_off, (int)remaining);
+    int nwrite = SSL_write(cl->ssl, cl->out_buf + cl->out_off, clamped);
+    nob_log(INFO, "[client=%" PRIu64 " fd=%i]: wrote %i bytes over the wire.",
+            cl->conn_id, cl->fd, nwrite);
 
     if (nwrite > 0) {
       cl->out_off += (size_t)nwrite;
@@ -913,18 +1153,18 @@ int loop(struct server_state_t *s) {
       struct client_conn_t *c = events[i].data.ptr;
 
       if (revents & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
-        close_client(s->epoll_fd, c);
+        close_client(s, c);
         continue;
       }
 
       int dead = 0;
 
       if (c->state == CLIENT_HANDSHAKE) {
-        if (drive_tls_handshake(s->epoll_fd, c) < 0)
+        if (drive_tls_handshake(s, c) < 0)
           dead = 1;
-      } else if (c->state == CLIENT_OPEN) {
-        if ((revents & EPOLLIN) &&
-            drive_client_read(s->epoll_fd, c, &s->cfg) < 0)
+      } else if (c->state == CLIENT_OPEN ||
+                 c->state == CLIENT_WAIT_FOR_HELLO_ACK) {
+        if ((revents & EPOLLIN) && drive_client_read(s, c, &s->cfg) < 0)
           dead = 1;
 
         if (!dead && (revents & EPOLLOUT) &&
@@ -933,7 +1173,7 @@ int loop(struct server_state_t *s) {
       }
 
       if (dead)
-        close_client(s->epoll_fd, c);
+        close_client(s, c);
     }
   }
 
@@ -1005,7 +1245,7 @@ static int init_listen_sock(void) {
   if (set_nonblocking(listenfd) < 0) {
     nob_log(ERROR, "failed to set socket to O_NONBLOCK");
     close(listenfd);
-    return 1;
+    return -1;
   }
 
   nob_log(INFO, "Socket successfully created");
@@ -1117,10 +1357,51 @@ static int parse_args(int argc, char **argv, struct server_state_t *s) {
   return 0;
 }
 
+static int routing_init(struct routing_state_t *rt) {
+  if (!rt)
+    return 1;
+
+  // rt->online_clients = map64_init();
+
+  return 0;
+}
+
+static int server_init(struct server_state_t *s) {
+  if (!s)
+    return 1;
+
+  if (install_signal_handlers() != 0)
+    exit(1);
+
+  if (init_ssl(&s->ssl_ctx) != 0) {
+    server_destroy(s);
+    return 1;
+  }
+
+  if ((s->listenfd = init_listen_sock()) < 0) {
+    server_destroy(s);
+    return 1;
+  }
+
+  if ((s->epoll_fd = init_epoll_fd(s->listenfd)) < 0) {
+    server_destroy(s);
+    return 1;
+  }
+
+  if (routing_init(&s->rt) != 0) {
+    server_destroy(s);
+    return 1;
+  }
+
+  return 0;
+}
+
 int main(int argc, char **argv) {
   SSL_library_init();
   SSL_load_error_strings();
   OpenSSL_add_ssl_algorithms();
+
+  nob_set_log_handler(faith_log_handler);
 
   struct server_state_t s = {.listenfd = -1,
                              .epoll_fd = -1,
@@ -1129,30 +1410,30 @@ int main(int argc, char **argv) {
                              .cfg = {0}};
 
   int arg_rc = parse_args(argc, argv, &s);
+
+  // User only wanted to print help message
   if (arg_rc == 2) {
     return 0;
   }
+
   if (arg_rc != 0) {
     return 1;
   }
 
-  if (install_signal_handlers() != 0)
-    exit(1);
-  if (init_ssl(&s.ssl_ctx) != 0) {
-    server_destroy(&s);
-    exit(1);
-  }
-  if ((s.listenfd = init_listen_sock()) < 0) {
-    server_destroy(&s);
-    exit(1);
+  /* Init */
+  int init_rc;
+
+  init_rc = server_init(&s);
+
+  if (init_rc != 0) {
+    exit(init_rc);
   }
 
-  if ((s.epoll_fd = init_epoll_fd(s.listenfd)) < 0) {
-    server_destroy(&s);
-    exit(1);
-  }
-
+  /* Main server loop */
   int rc = loop(&s);
+
+  /* Cleanup */
   server_destroy(&s);
+
   return rc;
 }

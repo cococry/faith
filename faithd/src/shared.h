@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <time.h>
 
+#include "../nob.h"
+
 #define FAITH_PROTO_VERSION    faith_version_pack(0, 0, 1)
 #define FAITH_MAX_FRAME_LEN    128
 #define FAITH_MAX_PAYLOAD_SIZE 128
@@ -57,7 +59,8 @@ typedef struct {
   X(FAITH_ERR_CLOSED, 9)                                                       \
   X(FAITH_ERR_UNSUPPORTED_VER, 10)                                             \
   X(FAITH_ERR_NOMEM, 11)                                                       \
-  X(FAITH_ERR_INCOMPLETE, 12)
+  X(FAITH_ERR_INCOMPLETE, 12)                                                  \
+  X(FAITH_ERR_UNAUTHORIZED, 13)
 
 typedef enum {
 #define X(name, value) name = value,
@@ -124,16 +127,22 @@ uint8_t  faith_version_patch(uint16_t v);
 
 const char *faith_strerror(int code);
 
-faith_status_code_t faith_ssl_write_bytes(SSL *ssl, const uint8_t *buf,
-                                          size_t size);
-faith_status_code_t faith_ssl_read_bytes(SSL *ssl, uint8_t *buf, size_t size);
+faith_status_code_t faith_write_bytes_sync(SSL *ssl, const uint8_t *buf,
+                                           size_t size);
+faith_status_code_t faith_read_bytes_sync(SSL *ssl, uint8_t *buf, size_t size);
 
 void faith_frame_free(faith_frame_t *f);
 
-faith_status_code_t faith_read_frame_ssl(SSL *ssl, faith_frame_t *out);
-faith_status_code_t faith_write_frame_ssl(SSL *ssl, faith_frame_msg_type_t type,
-                                          const uint8_t *payload,
-                                          size_t         payload_size);
+faith_status_code_t faith_read_frame_sync(SSL *ssl, faith_frame_t *out);
+faith_status_code_t faith_write_frame_sync(SSL                   *ssl,
+                                           faith_frame_msg_type_t type,
+                                           const uint8_t         *payload,
+                                           size_t                 payload_size);
+
+faith_status_code_t faith_encode_frame(faith_frame_msg_type_t type,
+                                       const uint8_t         *payload,
+                                       size_t payload_size, uint8_t **out_data,
+                                       size_t *out_size);
 
 uint64_t faith_now_ms(void);
 
@@ -153,3 +162,7 @@ const char *faith_envelope_name(faith_envelope_type_t env);
 faith_status_code_t faith_encode_envelope(uint8_t *out_buf, size_t *out_size,
                                           size_t buf_cap_in_bytes,
                                           const faith_envelope_t *env);
+
+void faith_log_handler(Nob_Log_Level level,
+    const char *fmt,
+    va_list args);

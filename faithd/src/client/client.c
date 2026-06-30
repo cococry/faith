@@ -43,6 +43,9 @@ struct faith_client {
   uint16_t      ev_queue_front;
   uint16_t      ev_queue_back;
   uint16_t      ev_queue_len;
+
+  uint16_t proto_ver;
+  uint16_t client_id;
 };
 
 static faith_status_code_t
@@ -259,7 +262,7 @@ static faith_status_code_t faith_client_send_ping_ssl(SSL *ssl, uint64_t nonce,
     }
   }
 
-  _FH_CHECK(faith_write_frame_ssl(ssl, FAITH_MSG_PING, payload, payload_size));
+  _FH_CHECK(faith_write_frame_sync(ssl, FAITH_MSG_PING, payload, payload_size));
 
   if (_fh_rc != FAITH_OK) {
     free(payload);
@@ -293,17 +296,19 @@ static void faith_client_run_connected(faith_client_t *client, SSL *ssl) {
     nob_log(INFO, "[client] Waiting for server PONG response ...");
 
     faith_frame_t frame;
-    if (faith_read_frame_ssl(ssl, &frame) != FAITH_OK) {
+    if (faith_read_frame_sync(ssl, &frame) != FAITH_OK) {
       faith_push_client_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
                               "Failed to read server frame");
       break;
     }
 
+    nob_log(INFO, "[client] Got server response: %s",
+            faith_frame_msg_name(frame.msg_type));
+
     if (frame.msg_type == FAITH_MSG_PONG) {
       uint64_t pong_nonce;
       uint64_t server_time_ms;
 
-      nob_log(INFO, "[client] Got server PONG response.");
       if (faith_decode_pong(frame.payload, frame.payload_size, &pong_nonce,
                             &server_time_ms) == FAITH_OK &&
           pong_nonce == nonce) {
@@ -329,6 +334,7 @@ static faith_status_code_t faith_client_send_hello(SSL            *ssl,
 
   faith_envelope_t env = {0};
   env.type = FAITH_ENVELOPE_HELLO;
+  env.sender_id = client->client_id;
 
   // Only header is needed for le hello, no body size
   const size_t buf_cap_in_bytes = FAITH_ENVL_HEADER_SIZE;
@@ -348,7 +354,7 @@ static faith_status_code_t faith_client_send_hello(SSL            *ssl,
     }
   }
 
-  _FH_CHECK(faith_write_frame_ssl(ssl, FAITH_MSG_ENVL, payload, payload_size));
+  _FH_CHECK(faith_write_frame_sync(ssl, FAITH_MSG_ENVL, payload, payload_size));
 
   if (_fh_rc != FAITH_OK) {
     free(payload);
@@ -434,6 +440,19 @@ static void *faith_client_thread_routine(void *arg) {
       if (_fh_rc == FAITH_OK)
         nob_log(INFO, "Sent HELLO.");
     }
+
+    nob_log(INFO, "[client] Waiting for server HELLO_OK response ...");
+
+    faith_frame_t frame;
+    if (faith_read_frame_sync(ssl, &frame) != FAITH_OK) {
+      faith_push_client_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
+                              "Server rejected this client. Closing...");
+      break;
+    }
+
+    nob_log(INFO, "[client] Got server response: %s",
+            faith_frame_msg_name(frame.msg_type));
+
     faith_client_run_connected(client, ssl);
 
     {
@@ -479,6 +498,8 @@ faith_client_t *faith_client_create(const faith_client_config_t *cfg) {
   faith_client_t *client = calloc(1, sizeof(*client));
   if (!client)
     return NULL;
+  
+  nob_set_log_handler(faith_log_handler);
 
   client->sockfd = -1;
   client->event_fd = -1;
@@ -506,6 +527,9 @@ faith_client_t *faith_client_create(const faith_client_config_t *cfg) {
     free(client);
     return NULL;
   }
+
+  // TODO: temporary
+  client->client_id = cfg->client_id;
 
   return client;
 }
