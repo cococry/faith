@@ -45,7 +45,10 @@ struct faith_client {
   uint16_t      ev_queue_len;
 
   uint16_t proto_ver;
-  uint16_t client_id;
+
+  // TODO: temporary
+  client_id_t client_id;
+  device_id_t device_id;
 };
 
 static faith_status_code_t
@@ -332,14 +335,23 @@ static faith_status_code_t faith_client_send_hello(SSL            *ssl,
   if (!client)
     return FAITH_ERR_INVALID;
 
+  uint8_t body[sizeof(uint32_t)] = {0};
+
+  faith_status_code_t rc = faith_write_u32_be(body, client->device_id);
+  if (rc != FAITH_OK) {
+    return rc;
+  }
+
   faith_envelope_t env = {0};
   env.type = FAITH_ENVELOPE_HELLO;
   env.sender_id = client->client_id;
+  env.body = body;
+  env.body_size = sizeof(body);
 
-  // Only header is needed for le hello, no body size
-  const size_t buf_cap_in_bytes = FAITH_ENVL_HEADER_SIZE;
+  const size_t buf_cap_in_bytes = FAITH_ENVL_HEADER_SIZE + env.body_size;
 
   uint8_t *payload = malloc(buf_cap_in_bytes);
+
   if (!payload)
     return FAITH_ERR_NOMEM;
 
@@ -498,7 +510,7 @@ faith_client_t *faith_client_create(const faith_client_config_t *cfg) {
   faith_client_t *client = calloc(1, sizeof(*client));
   if (!client)
     return NULL;
-  
+
   nob_set_log_handler(faith_log_handler);
 
   client->sockfd = -1;
@@ -530,6 +542,7 @@ faith_client_t *faith_client_create(const faith_client_config_t *cfg) {
 
   // TODO: temporary
   client->client_id = cfg->client_id;
+  client->device_id = cfg->device_id;
 
   return client;
 }
