@@ -15,6 +15,10 @@ typedef struct {
   const char *ca_file;
   int         insecure_skip_verify;
 
+  uint16_t proto_ver;
+
+  // TODO: temporary
+  uint16_t client_id;
 } faith_client_config_t;
 
 typedef struct {

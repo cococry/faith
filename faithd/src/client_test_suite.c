@@ -4,18 +4,27 @@
 #include <stdio.h>
 #include <unistd.h>
 
-int main(void) {
+int main(int argc, char** argv) {
+
+  if(argc < 2) {
+    fprintf(stderr, "usage: %s [client-id]\n", argv[0]);
+    return EXIT_FAILURE;
+  }
+
+  uint16_t client_id = (uint16_t)atoi(argv[1]);
+
   faith_client_config_t cfg = {
       .insecure_skip_verify = 1,
       .ca_file = NULL,
       .server_name = NULL,
       .host = "127.0.0.1",
       .port = 4433,
+      .client_id = client_id,
   };
 
   faith_client_t *client = faith_client_create(&cfg);
   if (!client) {
-    fprintf(stderr, "error: faith_client_create() failed.\n");
+    nob_log(ERROR, "faith_client_create() failed.\n");
     return 1;
   }
 
@@ -39,7 +48,7 @@ int main(void) {
 
     faith_event_t ev;
     while (faith_client_next_event(client, &ev) == FAITH_OK) {
-      fprintf(stderr, "Got event type=%s value0=%llu value1=%llu message=%s\n",
+      nob_log(INFO, "Got event type=%s value0=%llu value1=%llu message=%s\n",
               faith_event_name(ev.type), (unsigned long long)ev.value0,
               (unsigned long long)ev.value1, ev.message);
     }
@@ -47,5 +56,5 @@ int main(void) {
 
   faith_client_stop(client);
   faith_client_destroy(client);
-  return 0;
+  return EXIT_SUCCESS;
 }
