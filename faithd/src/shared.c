@@ -383,33 +383,32 @@ faith_status_code_t faith_encode_envelope(uint8_t *out_buf, size_t *out_size,
   return FAITH_OK;
 }
 
-void faith_log_handler(Nob_Log_Level level,
-    const char *fmt,
-    va_list args) {
-  if (level < nob_minimal_log_level) return;
+void faith_log_handler(Nob_Log_Level level, const char *fmt, va_list args) {
+  if (level < nob_minimal_log_level)
+    return;
 
   const char *level_name = NULL;
 
   switch (level) {
-    case NOB_INFO:
-      level_name = "INFO";
-      break;
-    case NOB_WARNING:
-      level_name = "WARNING";
-      break;
-    case NOB_ERROR:
-      level_name = "ERROR";
-      break;
-    case NOB_NO_LOGS:
-      return;
-    default:
-      NOB_UNREACHABLE("Nob_Log_Level");
+  case NOB_INFO:
+    level_name = "INFO";
+    break;
+  case NOB_WARNING:
+    level_name = "WARNING";
+    break;
+  case NOB_ERROR:
+    level_name = "ERROR";
+    break;
+  case NOB_NO_LOGS:
+    return;
+  default:
+    NOB_UNREACHABLE("Nob_Log_Level");
   }
 
   struct timeval tv;
   gettimeofday(&tv, NULL);
 
-  time_t now = tv.tv_sec;
+  time_t    now = tv.tv_sec;
   struct tm tm_utc;
 
 #if defined(_WIN32)
@@ -420,15 +419,10 @@ void faith_log_handler(Nob_Log_Level level,
 
   char timestamp[32];
 
-  strftime(timestamp, sizeof(timestamp),
-      "%Y-%m-%dT%H:%M:%S", &tm_utc);
+  strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S", &tm_utc);
 
-  fprintf(stderr, "%s.%03ldZ [%s] ",
-      timestamp,
-      tv.tv_usec / 1000,
-      level_name);
+  fprintf(stderr, "%s.%03ldZ [%s] ", timestamp, tv.tv_usec / 1000, level_name);
 
   vfprintf(stderr, fmt, args);
   fprintf(stderr, "\n");
 }
-

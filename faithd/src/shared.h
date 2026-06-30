@@ -108,6 +108,7 @@ typedef enum {
 } faith_envelope_type_t;
 
 typedef uint32_t client_id_t;
+typedef uint32_t device_id_t;
 
 typedef struct {
   faith_envelope_type_t type;
@@ -163,6 +164,4 @@ faith_status_code_t faith_encode_envelope(uint8_t *out_buf, size_t *out_size,
                                           size_t buf_cap_in_bytes,
                                           const faith_envelope_t *env);
 
-void faith_log_handler(Nob_Log_Level level,
-    const char *fmt,
-    va_list args);
+void faith_log_handler(Nob_Log_Level level, const char *fmt, va_list args);

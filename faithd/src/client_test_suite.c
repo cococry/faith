@@ -4,14 +4,15 @@
 #include <stdio.h>
 #include <unistd.h>
 
-int main(int argc, char** argv) {
+int main(int argc, char **argv) {
 
-  if(argc < 2) {
-    fprintf(stderr, "usage: %s [client-id]\n", argv[0]);
+  if (argc < 3) {
+    fprintf(stderr, "usage: %s [client-id] [device-id]\n", argv[0]);
     return EXIT_FAILURE;
   }
 
   uint16_t client_id = (uint16_t)atoi(argv[1]);
+  uint16_t device_id = (uint16_t)atoi(argv[2]);
 
   faith_client_config_t cfg = {
       .insecure_skip_verify = 1,
@@ -20,6 +21,7 @@ int main(int argc, char** argv) {
       .host = "127.0.0.1",
       .port = 4433,
       .client_id = client_id,
+      .device_id = device_id,
   };
 
   faith_client_t *client = faith_client_create(&cfg);

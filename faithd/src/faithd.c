@@ -27,15 +27,14 @@
 #define NOB_IMPLEMENTATION
 #include "shared.h"
 
+#define STB_DS_IMPLEMENTATION
+#include "../third_party/stb_ds.h"
+
 #define PORT       4433
 #define MAX_EVENTS 1024
 
 struct server_cfg_t {
   int verbose_logging;
-};
-
-struct routing_state_t {
-  void *active_routes;
 };
 
 #define CLIENT_STATES(X)                                                       \
@@ -54,7 +53,7 @@ struct client_conn_t {
   // connection id
   uint64_t            conn_id;
   uint64_t            client_id;
-  uint64_t            sess_id;
+  uint64_t            device_id;
   int                 fd;
   SSL                *ssl;
   enum client_state_t state;
@@ -74,6 +73,26 @@ struct client_conn_t {
   struct client_conn_t *prev;
 
   int authorized;
+};
+
+struct client_session_data_t {
+  struct client_conn_t *conn;
+};
+
+struct client_route_device_t {
+  device_id_t                   key; /* device id */
+  struct client_session_data_t *value;
+};
+
+/* nested hashmap [auth id -> device id -> conn/sess data] */
+struct client_route_user_t {
+  client_id_t key; /* client/auth id */
+  struct client_route_device_t
+      *value; /* a hashmap of device id -> client conn/sess data*/
+};
+
+struct routing_state_t {
+  struct client_route_user_t *active_users;
 };
 
 struct server_state_t {
@@ -171,9 +190,83 @@ static void server_remove_client(struct server_state_t *s,
   cl->prev = NULL;
 }
 
-static void close_client(struct server_state_t *s, struct client_conn_t *cl) {
-  if (!cl)
+static faith_status_code_t
+routing_register_session(struct routing_state_t *rt, client_id_t auth_id,
+                         device_id_t                   device_id,
+                         struct client_session_data_t *sess) {
+  if (!rt || !sess)
+    return FAITH_ERR_INVALID;
+
+  if (auth_id == 0)
+    return FAITH_ERR_INVALID;
+
+  if (device_id == 0)
+    return FAITH_ERR_INVALID;
+
+  struct client_route_device_t *devmap = hmget(rt->active_users, auth_id);
+  hmput(devmap, device_id, sess);
+  hmput(rt->active_users, auth_id, devmap);
+
+  nob_log(
+      INFO,
+      "Registered session with auth_id=%i, device_id=%i (online clients: %zu)",
+      auth_id, device_id, hmlen(rt->active_users));
+
+  return FAITH_OK;
+}
+
+static faith_status_code_t
+routing_unregister_session(struct routing_state_t *rt, client_id_t auth_id,
+                           device_id_t device_id) {
+  if (!rt || auth_id == 0)
+    return FAITH_ERR_INVALID;
+
+  struct client_route_user_t *user = hmgetp_null(rt->active_users, auth_id);
+  if (!user)
+    return FAITH_ERR_INVALID;
+
+  struct client_route_device_t *devmap = user->value;
+
+  struct client_route_device_t *dev = hmgetp_null(devmap, device_id);
+  if (!dev)
+    return FAITH_ERR_INVALID;
+
+  /* dev->value is dynamically allocated struct client_session_data_t * */
+  free(dev->value);
+  dev->value = NULL;
+
+  hmdel(devmap, device_id);
+
+  if (hmlen(devmap) == 0) {
+    hmfree(devmap);
+    hmdel(rt->active_users, auth_id);
+  } else {
+    /* Write back in case stb_ds moved/updated the devmap pointer. */
+    hmput(rt->active_users, auth_id, devmap);
+  }
+
+  nob_log(INFO,
+          "Unregistered session with auth_id=%i, device_id=%i (online clients: "
+          "%zu)",
+          auth_id, device_id, hmlen(rt->active_users));
+
+  return FAITH_OK;
+}
+
+static void routing_destroy(struct routing_state_t *rt) {
+  if (!rt)
     return;
+
+  hmfree(rt->active_users);
+}
+
+static faith_status_code_t close_client(struct server_state_t *s,
+                                        struct client_conn_t  *cl) {
+  if (!cl)
+    return FAITH_ERR_INVALID;
+
+  _FH_CHECK_RETURN(
+      routing_unregister_session(&s->rt, cl->client_id, cl->device_id));
 
   /* Unlink client from linked list of clients */
   server_remove_client(s, cl);
@@ -206,6 +299,8 @@ static void close_client(struct server_state_t *s, struct client_conn_t *cl) {
           log_fd);
 
   free(cl);
+
+  return FAITH_OK;
 }
 
 static int modify_client_ev_mask(int epoll_fd, struct client_conn_t *cl,
@@ -224,12 +319,6 @@ static int modify_client_ev_mask(int epoll_fd, struct client_conn_t *cl,
   cl->evs_mask_want = mask;
 
   return epoll_ctl(epoll_fd, EPOLL_CTL_MOD, cl->fd, &ev);
-}
-
-static void routing_destroy(struct routing_state_t *rt) {
-  if (!rt)
-    return;
-  // map64_destroy(rt->online_clients);
 }
 
 void server_destroy(struct server_state_t *s) {
@@ -599,14 +688,28 @@ static faith_status_code_t server_handle_hello(struct server_state_t  *s,
     return FAITH_ERR_INVALID;
   }
 
+  if (hello->body_size != sizeof(uint32_t))
+    return FAITH_ERR_BAD_FRAME;
+
+  device_id_t device_id = faith_read_u32_be(hello->body);
+
   /* Send HELLO_OK evelope back to client */
   faith_envelope_t hello_ok = {0};
   hello_ok.type = FAITH_ENVELOPE_HELLO_OK;
   hello_ok.recipient_id = hello->sender_id;
 
   cl->client_id = hello->sender_id;
+  cl->device_id = device_id;
 
   _FH_CHECK_RETURN(server_send_envelope(cl, &hello_ok, epoll_fd));
+
+  /* allocate session data */
+  struct client_session_data_t *sess = calloc(1, sizeof(*sess));
+  sess->conn = cl;
+
+  /* register client session */
+  _FH_CHECK_RETURN(
+      routing_register_session(&s->rt, cl->client_id, cl->device_id, sess));
 
   set_client_state(s, cl, CLIENT_OPEN);
 
@@ -729,9 +832,10 @@ read_more_ssl_bytes(struct client_conn_t *cl, const struct server_cfg_t *cfg) {
   return READ_FRAME_ERROR;
 }
 
-static faith_status_code_t
-try_parse_frame_from_buffer(const uint8_t *buf, size_t size,
-                            faith_frame_t *frame, size_t *consumed_out) {
+static faith_status_code_t try_parse_frame_from_buffer(const uint8_t *buf,
+                                                       size_t         size,
+                                                       faith_frame_t *frame,
+                                                       size_t *consumed_out) {
   if (!frame || !consumed_out)
     return FAITH_ERR_INVALID;
 
@@ -799,8 +903,8 @@ try_read_one_frame(struct client_conn_t *cl, faith_frame_t *frame,
               cl->conn_id, cl->fd);
     }
 
-    faith_status_code_t rc = try_parse_frame_from_buffer(
-        cl->in_buf, cl->in_size, frame, &consumed);
+    faith_status_code_t rc =
+        try_parse_frame_from_buffer(cl->in_buf, cl->in_size, frame, &consumed);
 
     if (rc == FAITH_OK) {
 
@@ -999,7 +1103,7 @@ static void accept_clients(struct server_state_t *s) {
     if (!cl->ssl) {
       nob_log(ERROR, "SSL_new() failed for client connection (FD: %i)",
               client_fd);
-      close_client(s, cl);
+      _FH_CHECK(close_client(s, cl));
       continue;
     }
 
@@ -1017,7 +1121,7 @@ static void accept_clients(struct server_state_t *s) {
     if (epoll_ctl(s->epoll_fd, EPOLL_CTL_ADD, client_fd, &ev) < 0) {
       nob_log(ERROR, "epoll_ctl() failed for client (FD: %i): %s", client_fd,
               strerror(errno));
-      close_client(s, cl);
+      _FH_CHECK(close_client(s, cl));
       continue;
     }
   }
@@ -1153,7 +1257,7 @@ int loop(struct server_state_t *s) {
       struct client_conn_t *c = events[i].data.ptr;
 
       if (revents & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
-        close_client(s, c);
+        _FH_CHECK(close_client(s, c));
         continue;
       }
 
@@ -1172,8 +1276,9 @@ int loop(struct server_state_t *s) {
           dead = 1;
       }
 
-      if (dead)
-        close_client(s, c);
+      if (dead) {
+        _FH_CHECK(close_client(s, c));
+      }
     }
   }
 
