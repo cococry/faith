@@ -383,6 +383,60 @@ faith_status_code_t faith_encode_envelope(uint8_t *out_buf, size_t *out_size,
   return FAITH_OK;
 }
 
+faith_status_code_t faith_decode_envelope(const uint8_t    *payload,
+                                          size_t            payload_size,
+                                          faith_envelope_t *o_envl) {
+
+  if (!o_envl)
+    return FAITH_ERR_INVALID;
+
+  memset(o_envl, 0, sizeof(*o_envl));
+
+  if (!payload)
+    return payload_size == 0 ? FAITH_ERR_BAD_FRAME : FAITH_ERR_INVALID;
+
+  if (payload_size < FAITH_ENVL_HEADER_SIZE)
+    return FAITH_ERR_BAD_FRAME;
+
+  size_t offset = 0;
+  // Type (faith_envelope_type_t -> uint32_t)
+  uint32_t type = faith_read_u32_be(payload + offset);
+  offset += sizeof(uint32_t);
+  // Sender (client_id_t -> uint32_t)
+  uint32_t sender_id = faith_read_u32_be(payload + offset);
+  offset += sizeof(uint32_t);
+  // Recipient (client_id_t -> uint32_t)
+  uint32_t recipient_id = faith_read_u32_be(payload + offset);
+  offset += sizeof(uint32_t);
+  // Body Size (uint32_t)
+  uint32_t body_size = faith_read_u32_be(payload + offset);
+
+  offset += sizeof(uint32_t);
+
+  if (body_size > payload_size - offset)
+    return FAITH_ERR_BAD_FRAME;
+
+  if (body_size != payload_size - offset)
+    return FAITH_ERR_BAD_FRAME;
+
+  uint8_t *body = NULL;
+  if (body_size != 0) {
+    body = malloc(body_size);
+    if (!body)
+      return FAITH_ERR_NOMEM;
+
+    memcpy(body, payload + offset, body_size);
+  }
+
+  *o_envl = (faith_envelope_t){.body_size = body_size,
+                               .body = body,
+                               .recipient_id = recipient_id,
+                               .sender_id = sender_id,
+                               .type = type};
+
+  return FAITH_OK;
+}
+
 void faith_log_handler(Nob_Log_Level level, const char *fmt, va_list args) {
   if (level < nob_minimal_log_level)
     return;

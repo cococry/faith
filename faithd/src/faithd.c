@@ -355,60 +355,6 @@ void server_destroy(struct server_state_t *s) {
   nob_log(INFO, "Destroyed server context.");
 }
 
-static faith_status_code_t decode_envl(const uint8_t    *payload,
-                                       size_t            payload_size,
-                                       faith_envelope_t *o_envl) {
-
-  if (!o_envl)
-    return FAITH_ERR_INVALID;
-
-  memset(o_envl, 0, sizeof(*o_envl));
-
-  if (!payload)
-    return payload_size == 0 ? FAITH_ERR_BAD_FRAME : FAITH_ERR_INVALID;
-
-  if (payload_size < FAITH_ENVL_HEADER_SIZE)
-    return FAITH_ERR_BAD_FRAME;
-
-  size_t offset = 0;
-  // Type (faith_envelope_type_t -> uint32_t)
-  uint32_t type = faith_read_u32_be(payload + offset);
-  offset += sizeof(uint32_t);
-  // Sender (client_id_t -> uint32_t)
-  uint32_t sender_id = faith_read_u32_be(payload + offset);
-  offset += sizeof(uint32_t);
-  // Recipient (client_id_t -> uint32_t)
-  uint32_t recipient_id = faith_read_u32_be(payload + offset);
-  offset += sizeof(uint32_t);
-  // Body Size (uint32_t)
-  uint32_t body_size = faith_read_u32_be(payload + offset);
-
-  offset += sizeof(uint32_t);
-
-  if (body_size > payload_size - offset)
-    return FAITH_ERR_BAD_FRAME;
-
-  if (body_size != payload_size - offset)
-    return FAITH_ERR_BAD_FRAME;
-
-  uint8_t *body = NULL;
-  if (body_size != 0) {
-    body = malloc(body_size);
-    if (!body)
-      return FAITH_ERR_NOMEM;
-
-    memcpy(body, payload + offset, body_size);
-  }
-
-  *o_envl = (faith_envelope_t){.body_size = body_size,
-                               .body = body,
-                               .recipient_id = recipient_id,
-                               .sender_id = sender_id,
-                               .type = type};
-
-  return FAITH_OK;
-}
-
 static faith_status_code_t decode_ping(const uint8_t *payload,
                                        size_t         payload_size,
                                        uint64_t      *ping_nonce,
@@ -646,12 +592,16 @@ static faith_status_code_t server_send_envelope(struct client_conn_t   *cl,
 
   size_t payload_size = 0;
 
-  faith_status_code_t rc =
-      faith_encode_envelope(payload, &payload_size, cap, envl);
+  faith_status_code_t rc;
+  {
+    _FH_CHECK(faith_encode_envelope(payload, &payload_size, cap, envl));
+    rc = _fh_rc;
+  }
 
   if (rc == FAITH_OK) {
-    rc = server_send_over_wire(cl, payload, payload_size, FAITH_MSG_ENVL,
-                               epoll_fd);
+    _FH_CHECK(server_send_over_wire(cl, payload, payload_size, FAITH_MSG_ENVL,
+                               epoll_fd));
+    rc = _fh_rc;
   }
 
   nob_log(
@@ -731,7 +681,7 @@ static faith_status_code_t server_handle_envl(struct server_state_t *s,
 
   faith_envelope_t envl;
 
-  _FH_CHECK_RETURN(decode_envl(frame->payload, frame->payload_size, &envl));
+  _FH_CHECK_RETURN(faith_decode_envelope(frame->payload, frame->payload_size, &envl));
 
   nob_log(INFO,
           "[client=%" PRIu64
