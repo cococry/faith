@@ -29,13 +29,17 @@ typedef struct {
   char     message[256];
 } faith_event_t;
 
+faith_status_code_t faith_client_init_global(void);
+
 faith_client_t *faith_client_create(const faith_client_config_t *cfg);
 void            faith_client_destroy(faith_client_t *client);
 
 faith_status_code_t faith_client_start(faith_client_t *client);
 faith_status_code_t faith_client_stop(faith_client_t *client);
 
-faith_status_code_t faith_client_send_ping(faith_client_t *client);
+faith_status_code_t faith_client_send_messege(faith_client_t *client,
+                                              client_id_t     recipient_auth_id,
+                                              const char     *msg);
 
 int faith_client_event_fd(faith_client_t *client);
 

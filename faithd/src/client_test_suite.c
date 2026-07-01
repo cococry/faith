@@ -14,6 +14,8 @@ int main(int argc, char **argv) {
   uint16_t client_id = (uint16_t)atoi(argv[1]);
   uint16_t device_id = (uint16_t)atoi(argv[2]);
 
+  faith_client_init_global();
+
   faith_client_config_t cfg = {
       .insecure_skip_verify = 1,
       .ca_file = NULL,
