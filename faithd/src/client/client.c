@@ -7,6 +7,7 @@
 #include <openssl/rand.h>
 #include <openssl/ssl.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,6 +24,8 @@
 
 #define MAX_QUEUED_EVENTS 512
 
+static int g_log_enable_tracing = true;
+
 struct faith_client {
   char     host[256];
   uint16_t port;
@@ -38,6 +41,17 @@ struct faith_client {
   int event_fd;
 
   pthread_mutex_t lock;
+  pthread_mutex_t write_lock;
+  pthread_mutex_t ping_lock;
+
+  pthread_t reader_thread;
+  pthread_t pinger_thread;
+
+  uint64_t ping_nonce;
+  uint64_t ping_sent_at_ms;
+  int      ping_active;
+
+  atomic_bool connected;
 
   faith_event_t ev_queue[MAX_QUEUED_EVENTS];
   uint16_t      ev_queue_front;
@@ -49,14 +63,14 @@ struct faith_client {
   uint16_t proto_ver;
 
   // TODO: temporary
-  client_id_t client_id;
+  client_id_t auth_id;
   device_id_t device_id;
 };
 
-static faith_status_code_t client_push_event(faith_client_t    *client,
-                                             faith_event_type_t type,
-                                             uint64_t value0, uint64_t value1,
-                                             const char *message) {
+static faith_status_code_t
+client_push_event_ex(faith_client_t *client, faith_event_type_t type,
+                     uint64_t value0, uint64_t value1, const char *message,
+                     char *chat_message, size_t chat_message_size) {
   if (!client)
     return FAITH_ERR_INVALID;
 
@@ -74,6 +88,8 @@ static faith_status_code_t client_push_event(faith_client_t    *client,
   ev.value0 = value0;
   ev.value1 = value1;
   ev.type = type;
+  ev.chat_message = chat_message;
+  ev.chat_message_size = chat_message_size;
   if (message != NULL) {
     snprintf(ev.message, sizeof(ev.message), "%s", message);
   } else {
@@ -93,6 +109,13 @@ static faith_status_code_t client_push_event(faith_client_t    *client,
   pthread_mutex_unlock(&client->lock);
 
   return FAITH_OK;
+}
+
+static faith_status_code_t client_push_event(faith_client_t    *client,
+                                             faith_event_type_t type,
+                                             uint64_t value0, uint64_t value1,
+                                             const char *message) {
+  return client_push_event_ex(client, type, value0, value1, message, NULL, 0);
 }
 
 static int client_is_running(faith_client_t *client) {
@@ -131,7 +154,8 @@ static int client_init_sock(const char *host, int port) {
     return -1;
   }
 
-  nob_log(INFO, "Client connected");
+  if (g_log_enable_tracing)
+    nob_log(INFO, "[faith] Client connected");
 
   return sockfd;
 }
@@ -144,6 +168,15 @@ static void _sleep_ms(unsigned ms) {
 
   while (nanosleep(&ts, &ts) < 0 && errno == EINTR)
     ;
+}
+
+static void _sleep_heartbeat_interval(faith_client_t *client) {
+  for (int i = 0; i < 100; i++) {
+    if (!client_is_running(client) || !atomic_load(&client->connected))
+      return;
+
+    _sleep_ms(100);
+  }
 }
 
 static uint32_t client_next_backoff_ms(uint32_t current) {
@@ -182,7 +215,7 @@ static SSL_CTX *client_create_ssl_ctx(faith_client_t *client) {
   SSL_CTX_set_options(ctx, opts);
 
   if (client->insecure_skip_verify) {
-    nob_log(WARNING, "TLS certificate verification is disabled");
+    // nob_log(WARNING, "[faith]: TLS certificate verification is disabled");
     SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
     return ctx;
   }
@@ -251,35 +284,21 @@ static faith_status_code_t client_send_ping_sync(SSL *ssl, uint64_t nonce,
   if (!ssl)
     return FAITH_ERR_INVALID;
 
-  const size_t buf_cap_in_bytes = sizeof(uint64_t) * 2;
-  uint8_t     *payload = malloc(buf_cap_in_bytes);
-  if (!payload)
-    return FAITH_ERR_NOMEM;
+  uint8_t payload[sizeof(uint64_t) * 2];
+  size_t  payload_size = 0;
 
-  size_t payload_size = 0;
+  _FH_CHECK_RETURN(
+      encode_ping(payload, &payload_size, sizeof(payload), nonce, sent_at_ms));
 
-  {
-    _FH_CHECK(encode_ping(payload, &payload_size, buf_cap_in_bytes, nonce,
-                          sent_at_ms));
-    if (_fh_rc != FAITH_OK) {
-      free(payload);
-      return _fh_rc;
-    }
-  }
+  _FH_CHECK_RETURN(
+      faith_write_frame_sync(ssl, FAITH_MSG_PING, payload, payload_size));
 
-  _FH_CHECK(faith_write_frame_sync(ssl, FAITH_MSG_PING, payload, payload_size));
-
-  if (_fh_rc != FAITH_OK) {
-    free(payload);
-    return _fh_rc;
-  }
-
-  free(payload);
   return FAITH_OK;
 }
 
-static void client_run_connected(faith_client_t *client, SSL *ssl) {
-  while (client_is_running(client)) {
+static void *pinger(void *arg) {
+  faith_client_t *client = arg;
+  while (atomic_load(&client->connected) && client_is_running(client)) {
     uint64_t sent_at_ms = faith_now_ms();
     uint64_t nonce;
     if (RAND_bytes((unsigned char *)&nonce, sizeof(nonce)) != 1) {
@@ -288,56 +307,158 @@ static void client_run_connected(faith_client_t *client, SSL *ssl) {
       break;
     }
 
-    nob_log(INFO, "[client]: Sending PING to server...");
+    pthread_mutex_lock(&client->ping_lock);
+    client->ping_active = true;
+    client->ping_sent_at_ms = sent_at_ms;
+    client->ping_nonce = nonce;
+    pthread_mutex_unlock(&client->ping_lock);
 
-    if (client_send_ping_sync(ssl, nonce, sent_at_ms) != FAITH_OK) {
+    if (g_log_enable_tracing)
+      nob_log(INFO, "[client - pinger]: Sending PING to server...");
+
+    pthread_mutex_lock(&client->write_lock);
+    faith_status_code_t rc =
+        client_send_ping_sync(client->ssl, nonce, sent_at_ms);
+    pthread_mutex_unlock(&client->write_lock);
+
+    if (rc != FAITH_OK) {
       _FH_CHECK(client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
                                   "Failed to send ping"));
+      atomic_store(&client->connected, false);
       break;
     }
 
-    nob_log(INFO, "[client]: Sent PING to server.");
+    if (g_log_enable_tracing)
+      nob_log(INFO, "[client - pinger]: Sent PING to server successfully.");
 
-    nob_log(INFO, "[client] Waiting for server PONG response ...");
+    // 10 seconds after each ping
+    _sleep_heartbeat_interval(client);
+  }
+
+  return NULL;
+}
+
+static void client_handle_pong(faith_client_t *client, faith_frame_t *frame) {
+  uint64_t pong_nonce;
+  uint64_t server_time_ms;
+
+  _FH_CHECK(decode_pong(frame->payload, frame->payload_size, &pong_nonce,
+                        &server_time_ms));
+
+  pthread_mutex_lock(&client->ping_lock);
+  int ok = _fh_rc == FAITH_OK && pong_nonce == client->ping_nonce &&
+           client->ping_active;
+  uint64_t ping_sent_at_ms = client->ping_sent_at_ms;
+  if (ok) {
+    client->ping_active = false;
+  }
+  pthread_mutex_unlock(&client->ping_lock);
+
+  if (ok) {
+    if (g_log_enable_tracing)
+      nob_log(INFO, "[client - pinger]: Heartbeat successful.");
+    uint64_t now = faith_now_ms();
+    _FH_CHECK(client_push_event(client, FAITH_EVENT_PONG, now - ping_sent_at_ms,
+                                server_time_ms, NULL));
+  } else {
+    _FH_CHECK(client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
+                                "Invalid pong response from server"));
+    atomic_store(&client->connected, false);
+  }
+}
+
+static void client_handle_envl(faith_client_t *client, faith_frame_t *frame) {
+  faith_envelope_t envl;
+  _FH_CHECK(faith_decode_envelope(frame->payload, frame->payload_size, &envl));
+
+  switch (envl.type) {
+  case FAITH_ENVELOPE_MSG_SEND: {
+    if (envl.recipient_id != client->auth_id || _fh_rc != FAITH_OK ||
+        envl.sender_id == 0) {
+      nob_log(ERROR, "[client - reader] Got sent invalid message envelope.");
+      break;
+    }
+
+    if (envl.body_size > FAITH_MAX_MSG_SIZE) {
+      nob_log(ERROR, "[client - reader] Got sent too large message.");
+      break;
+    }
+    char *msg = malloc(envl.body_size + 1);
+    if (!msg) {
+      nob_log(
+          ERROR,
+          "[client - reader] Failed to allocate memory for received message.");
+      break;
+    }
+
+    memcpy(msg, envl.body, envl.body_size);
+    msg[envl.body_size] = '\0';
+
+    _FH_CHECK(client_push_event_ex(client, FAITH_EVENT_MESSAGE_RECEIVED, 0, 0,
+                                   NULL, msg, envl.body_size));
+
+    break;
+  }
+  default:
+    break;
+  }
+}
+
+static void *reader(void *arg) {
+  faith_client_t *client = arg;
+  while (atomic_load(&client->connected) && client_is_running(client)) {
+    if (g_log_enable_tracing)
+      nob_log(INFO, "[client - reader]: Waiting on server frame ...");
 
     faith_frame_t frame;
-    if (faith_read_frame_sync(ssl, &frame) != FAITH_OK) {
-      printf("Server down.\n");
+    if (faith_read_frame_sync(client->ssl, &frame) != FAITH_OK) {
       _FH_CHECK(client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
                                   "Failed to read server frame"));
       break;
     }
 
-    nob_log(INFO, "[client] Got server response: %s",
-            faith_frame_msg_name(frame.msg_type));
-
-    if (frame.msg_type == FAITH_MSG_PONG) {
-      uint64_t pong_nonce;
-      uint64_t server_time_ms;
-
-      _FH_CHECK(decode_pong(frame.payload, frame.payload_size, &pong_nonce,
-                            &server_time_ms));
-
-      if (_fh_rc == FAITH_OK && pong_nonce == nonce) {
-        uint64_t now = faith_now_ms();
-        _FH_CHECK(client_push_event(client, FAITH_EVENT_PONG, now - sent_at_ms,
-                                    server_time_ms, NULL));
-      } else {
-        _FH_CHECK(client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
-                                    "Invalid pong response from server"));
-      }
-    } else {
-      _FH_CHECK(client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
-                                  "Unexpected server response to ping."));
+    switch (frame.msg_type) {
+    case FAITH_MSG_PONG: {
+      client_handle_pong(client, &frame);
+      break;
+    }
+    case FAITH_MSG_ENVL: {
+      client_handle_envl(client, &frame);
+      break;
+    }
+    default:
+      break;
     }
 
-    nob_log(INFO, "[client] Frame successful.");
+    if (g_log_enable_tracing)
+      nob_log(INFO, "[client - reader]: Read server frame successfully.\n");
 
     faith_frame_free(&frame);
-
-    // 10 seconds after ping/pong
-    _sleep_ms(10000);
   }
+
+  return NULL;
+}
+
+static void client_run_connected(faith_client_t *client) {
+  if (!client || !client->ssl)
+    return;
+
+  atomic_store(&client->connected, true);
+
+  if (pthread_create(&client->reader_thread, NULL, reader, client) != 0) {
+    faith_client_destroy(client);
+    return;
+  }
+  if (pthread_create(&client->pinger_thread, NULL, pinger, client) != 0) {
+    faith_client_destroy(client);
+    return;
+  }
+
+  pthread_join(client->reader_thread, NULL);
+
+  atomic_store(&client->connected, false);
+
+  pthread_join(client->pinger_thread, NULL);
 }
 
 static faith_status_code_t client_send_envelope(SSL                    *ssl,
@@ -382,7 +503,7 @@ static faith_status_code_t faith_client_send_hello(faith_client_t *client) {
 
   faith_envelope_t envl = {0};
   envl.type = FAITH_ENVELOPE_HELLO;
-  envl.sender_id = client->client_id;
+  envl.sender_id = client->auth_id;
   envl.body = body;
   envl.body_size = sizeof(body);
 
@@ -461,11 +582,14 @@ static void *faith_client_thread_routine(void *arg) {
       _FH_CHECK(client_push_event(client, FAITH_EVENT_CONNECTED, 0, 0, NULL));
     }
 
-    nob_log(INFO, "Sending HELLO...");
+    if (g_log_enable_tracing)
+      nob_log(INFO, "[client] Sending HELLO...");
+
     {
       _FH_CHECK(faith_client_send_hello(client));
       if (_fh_rc == FAITH_OK) {
-        nob_log(INFO, "Sent HELLO.");
+        if (g_log_enable_tracing)
+          nob_log(INFO, "[client] Sent HELLO.");
       } else {
         client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
                           "Failed to send HELLO");
@@ -473,7 +597,8 @@ static void *faith_client_thread_routine(void *arg) {
       }
     }
 
-    nob_log(INFO, "[client] Waiting for server HELLO_OK response ...");
+    if (g_log_enable_tracing)
+      nob_log(INFO, "[client] Waiting for server HELLO_OK response ...");
 
     faith_frame_t frame = {0};
 
@@ -493,7 +618,7 @@ static void *faith_client_thread_routine(void *arg) {
     faith_envelope_t envl;
     faith_decode_envelope(frame.payload, frame.payload_size, &envl);
 
-    bool ok = envl.type == FAITH_ENVELOPE_HELLO_OK && envl.body_size == 0;
+    int ok = envl.type == FAITH_ENVELOPE_HELLO_OK && envl.body_size == 0;
     if (!ok) {
       faith_frame_free(&frame);
       client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
@@ -502,10 +627,13 @@ static void *faith_client_thread_routine(void *arg) {
     }
 
     faith_frame_free(&frame);
-    
-    nob_log(INFO, "[client] Got HELLO_OK response. Server acknowledged client successfully"); 
 
-    client_run_connected(client, ssl);
+    if (g_log_enable_tracing)
+      nob_log(INFO,
+              "[client] Got HELLO_OK response. Server acknowledged client "
+              "successfully");
+
+    client_run_connected(client);
 
     {
       _FH_CHECK(client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
@@ -519,6 +647,7 @@ static void *faith_client_thread_routine(void *arg) {
       SSL_shutdown(ssl);
       SSL_free(ssl);
       ssl = NULL;
+      client->ssl = NULL;
     }
 
     if (ctx) {
@@ -529,6 +658,7 @@ static void *faith_client_thread_routine(void *arg) {
     close(fd);
 
     pthread_mutex_lock(&client->lock);
+    client->ssl = NULL;
     client->sockfd = -1;
     pthread_mutex_unlock(&client->lock);
 
@@ -554,8 +684,10 @@ static void ignore_sigpipe(void) {
   sigaction(SIGPIPE, &sa, NULL);
 }
 
-faith_status_code_t faith_client_init_global(void) {
+faith_status_code_t faith_client_init_global(int log_enable_tracing) {
   ignore_sigpipe();
+
+  g_log_enable_tracing = log_enable_tracing;
 
   return FAITH_OK;
 }
@@ -590,15 +722,31 @@ faith_client_t *faith_client_create(const faith_client_config_t *cfg) {
     return NULL;
   }
 
-  client->event_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-  if (client->event_fd < 0) {
+  if (pthread_mutex_init(&client->write_lock, NULL) != 0) {
     pthread_mutex_destroy(&client->lock);
     free(client);
     return NULL;
   }
 
+  if (pthread_mutex_init(&client->ping_lock, NULL) != 0) {
+    pthread_mutex_destroy(&client->write_lock);
+    pthread_mutex_destroy(&client->lock);
+    free(client);
+    return NULL;
+  }
+
+  client->event_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+  if (client->event_fd < 0) {
+    pthread_mutex_destroy(&client->write_lock);
+    pthread_mutex_destroy(&client->ping_lock);
+    pthread_mutex_destroy(&client->lock);
+
+    free(client);
+    return NULL;
+  }
+
   // TODO: temporary
-  client->client_id = cfg->client_id;
+  client->auth_id = cfg->auth_id;
   client->device_id = cfg->device_id;
 
   return client;
@@ -622,6 +770,8 @@ void faith_client_destroy(faith_client_t *client) {
     client->event_fd = -1;
   }
 
+  pthread_mutex_destroy(&client->write_lock);
+  pthread_mutex_destroy(&client->ping_lock);
   pthread_mutex_destroy(&client->lock);
 
   free(client);
@@ -676,13 +826,29 @@ faith_status_code_t faith_client_stop(faith_client_t *client) {
   return FAITH_OK;
 }
 
-faith_status_code_t faith_client_send_messege(faith_client_t *client,
+faith_status_code_t faith_client_send_message(faith_client_t *client,
                                               client_id_t     recipient_auth_id,
                                               const char     *msg) {
-  (void)client;
-  (void)recipient_auth_id;
-  (void)msg;
-  return FAITH_OK;
+  if (!client || recipient_auth_id == 0 || !msg)
+    return FAITH_ERR_INVALID;
+
+  /* This does not include the null terminator of the string. */
+  size_t msg_size = strlen(msg);
+
+  if (msg_size == 0)
+    return FAITH_ERR_INVALID;
+
+  faith_envelope_t envl = {0};
+  envl.type = FAITH_ENVELOPE_MSG_SEND;
+  envl.recipient_id = recipient_auth_id;
+  envl.body_size = msg_size;
+  envl.body = (uint8_t *)msg;
+
+  pthread_mutex_lock(&client->write_lock);
+  faith_status_code_t rc = client_send_envelope(client->ssl, &envl);
+  pthread_mutex_unlock(&client->write_lock);
+
+  return rc;
 }
 
 int faith_client_event_fd(faith_client_t *client) {
@@ -709,5 +875,16 @@ faith_status_code_t faith_client_next_event(faith_client_t *client,
   client->ev_queue_len--;
 
   pthread_mutex_unlock(&client->lock);
+  return FAITH_OK;
+}
+
+faith_status_code_t faith_client_free_event(faith_event_t *ev) {
+  if (!ev)
+    return FAITH_ERR_INVALID;
+
+  free(ev->chat_message);
+
+  memset(ev, 0, sizeof(*ev));
+
   return FAITH_OK;
 }

@@ -8,6 +8,7 @@
 
 #define FAITH_PROTO_VERSION    faith_version_pack(0, 0, 1)
 #define FAITH_MAX_FRAME_LEN    128
+#define FAITH_MAX_MSG_SIZE     65536
 #define FAITH_MAX_PAYLOAD_SIZE 128
 #define FAITH_HEADER_SIZE                                                      \
   sizeof(uint32_t) /* frame size    */ +                                       \
@@ -60,7 +61,8 @@ typedef struct {
   X(FAITH_ERR_UNSUPPORTED_VER, 10)                                             \
   X(FAITH_ERR_NOMEM, 11)                                                       \
   X(FAITH_ERR_INCOMPLETE, 12)                                                  \
-  X(FAITH_ERR_UNAUTHORIZED, 13)
+  X(FAITH_ERR_UNAUTHORIZED, 13)                                                \
+  X(FAITH_ERR_NOT_FOUND, 14)
 
 typedef enum {
 #define X(name, value) name = value,
@@ -74,7 +76,8 @@ typedef enum {
   X(FAITH_EVENT_CONNECTED, 2)                                                  \
   X(FAITH_EVENT_DISCONNECTED, 3)                                               \
   X(FAITH_EVENT_PONG, 4)                                                       \
-  X(FAITH_EVENT_ERROR, 5)
+  X(FAITH_EVENT_ERROR, 5)                                                      \
+  X(FAITH_EVENT_MESSAGE_RECEIVED, 6)
 
 typedef enum {
 #define X(name, value) name = value,
