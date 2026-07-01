@@ -2,8 +2,8 @@
 
 
 > [!WARNING]
-> Faith is in active pre-alpha developement and is, from a user's point of view, currently unusable for it's purpose.
-> This will change soon however™.
+> Faith is in active pre-alpha development and is, from a user's point of view, currently unusable for its intended purpose.
+>  However, this will change soon™.
 <img align="left" style="width:200px" src="https://github.com/cococry/faith/blob/main/assets/logo.png" width="200px">
 
 **faith is an instant messenger optimized for security, 
