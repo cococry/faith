@@ -52,8 +52,8 @@ enum client_state_t {
 struct client_conn_t {
   // connection id
   uint64_t            conn_id;
-  uint64_t            client_id;
-  uint64_t            device_id;
+  client_id_t         auth_id;
+  device_id_t         device_id;
   int                 fd;
   SSL                *ssl;
   enum client_state_t state;
@@ -191,13 +191,25 @@ static void server_remove_client(struct server_state_t *s,
 }
 
 static faith_status_code_t
+routing_get_device_sessions(struct routing_state_t *rt, client_id_t auth_id,
+                            struct client_route_device_t **o_devmap) {
+  if (!rt || !o_devmap || auth_id == 0)
+    return FAITH_ERR_INVALID;
+
+  struct client_route_user_t *user = hmgetp_null(rt->active_users, auth_id);
+  if (!user)
+    return FAITH_ERR_NOT_FOUND;
+
+  *o_devmap = user->value;
+
+  return FAITH_OK;
+}
+
+static faith_status_code_t
 routing_register_session(struct routing_state_t *rt, client_id_t auth_id,
                          device_id_t                   device_id,
                          struct client_session_data_t *sess) {
-  if (!rt || !sess)
-    return FAITH_ERR_INVALID;
-
-  if (auth_id == 0)
+  if (!rt || !sess || auth_id == 0)
     return FAITH_ERR_INVALID;
 
   if (device_id == 0)
@@ -218,7 +230,9 @@ routing_register_session(struct routing_state_t *rt, client_id_t auth_id,
 static faith_status_code_t
 routing_unregister_session(struct routing_state_t *rt, client_id_t auth_id,
                            device_id_t device_id) {
-  if (!rt || auth_id == 0)
+  if (auth_id == 0)
+    return FAITH_OK;
+  if (!rt)
     return FAITH_ERR_INVALID;
 
   struct client_route_user_t *user = hmgetp_null(rt->active_users, auth_id);
@@ -265,11 +279,10 @@ static faith_status_code_t close_client(struct server_state_t *s,
   if (!cl)
     return FAITH_ERR_INVALID;
 
-  _FH_CHECK_RETURN(
-      routing_unregister_session(&s->rt, cl->client_id, cl->device_id));
-
   /* Unlink client from linked list of clients */
   server_remove_client(s, cl);
+
+  _FH_CHECK(routing_unregister_session(&s->rt, cl->auth_id, cl->device_id));
 
   epoll_ctl(s->epoll_fd, EPOLL_CTL_DEL, cl->fd, NULL);
 
@@ -600,7 +613,7 @@ static faith_status_code_t server_send_envelope(struct client_conn_t   *cl,
 
   if (rc == FAITH_OK) {
     _FH_CHECK(server_send_over_wire(cl, payload, payload_size, FAITH_MSG_ENVL,
-                               epoll_fd));
+                                    epoll_fd));
     rc = _fh_rc;
   }
 
@@ -615,9 +628,7 @@ static faith_status_code_t server_send_envelope(struct client_conn_t   *cl,
 
 static faith_status_code_t server_handle_hello(struct server_state_t  *s,
                                                struct client_conn_t   *cl,
-                                               const faith_envelope_t *hello,
-                                               int epoll_fd) {
-
+                                               const faith_envelope_t *hello) {
   if (!cl || !hello)
     return FAITH_ERR_INVALID;
   if (hello->type != FAITH_ENVELOPE_HELLO)
@@ -648,10 +659,10 @@ static faith_status_code_t server_handle_hello(struct server_state_t  *s,
   hello_ok.type = FAITH_ENVELOPE_HELLO_OK;
   hello_ok.recipient_id = hello->sender_id;
 
-  cl->client_id = hello->sender_id;
+  cl->auth_id = hello->sender_id;
   cl->device_id = device_id;
 
-  _FH_CHECK_RETURN(server_send_envelope(cl, &hello_ok, epoll_fd));
+  _FH_CHECK_RETURN(server_send_envelope(cl, &hello_ok, s->epoll_fd));
 
   /* allocate session data */
   struct client_session_data_t *sess = calloc(1, sizeof(*sess));
@@ -659,29 +670,97 @@ static faith_status_code_t server_handle_hello(struct server_state_t  *s,
 
   /* register client session */
   _FH_CHECK_RETURN(
-      routing_register_session(&s->rt, cl->client_id, cl->device_id, sess));
+      routing_register_session(&s->rt, cl->auth_id, cl->device_id, sess));
 
   set_client_state(s, cl, CLIENT_OPEN);
 
   nob_log(INFO,
-          "[client=%" PRIu64
-          " fd=%i] Server accepted HELLO (client id: %" PRIu64 ")",
-          cl->conn_id, cl->fd, cl->client_id);
+          "[client=%" PRIu64 " fd=%i] Server accepted HELLO (auth id: %i)",
+          cl->conn_id, cl->fd, cl->auth_id);
+
+  return FAITH_OK;
+}
+
+static faith_status_code_t server_route_msg_envl(struct server_state_t *s,
+                                                 struct client_conn_t  *cl,
+                                                 faith_envelope_t      *envl) {
+  if (!cl || !envl)
+    return FAITH_ERR_INVALID;
+  if (envl->type != FAITH_ENVELOPE_MSG_SEND)
+    return FAITH_ERR_INVALID;
+
+  if (cl->state != CLIENT_OPEN) {
+    return FAITH_ERR_IO;
+  }
+
+  if (envl->body_size == 0)
+    return FAITH_ERR_INVALID;
+
+  struct client_route_device_t *recipient_devices = NULL;
+
+  faith_status_code_t rc = routing_get_device_sessions(
+      &s->rt, envl->recipient_id, &recipient_devices);
+
+  if (rc == FAITH_ERR_INVALID) {
+    return rc;
+  }
+
+  if (rc == FAITH_ERR_NOT_FOUND) {
+    nob_log(INFO,
+            "[client=%" PRIu64
+            " fd=%i] Envelope %s: Recipient (auth_id: %i) is offline.",
+            cl->conn_id, cl->fd, faith_envelope_name(envl->type),
+            envl->recipient_id);
+  }
+
+  for (ptrdiff_t i = 0; i < hmlen(recipient_devices); i++) {
+    struct client_conn_t *recipient = recipient_devices[i].value->conn;
+    if (recipient->auth_id != envl->recipient_id) {
+      nob_log(ERROR,
+              "[client=%" PRIu64
+              " fd=%i] Envelope %s: Device %i of recipient (auth_id: %i) is "
+              "not authenticated. Will not send message to device.",
+              cl->conn_id, cl->fd, faith_envelope_name(envl->type),
+              recipient->device_id, envl->recipient_id);
+      continue;
+    }
+
+    faith_envelope_t routing_envl = *envl;
+    routing_envl.sender_id = recipient->auth_id;
+
+    _FH_CHECK(server_send_envelope(recipient_devices[i].value->conn,
+                                   &routing_envl, s->epoll_fd));
+
+    if (_fh_rc != FAITH_OK) {
+      nob_log(ERROR,
+              "[client=%" PRIu64
+              " fd=%i] Envelope %s: Failed to send message to device "
+              "(device_id: %i) of recipient (auth_id: %i).",
+              cl->conn_id, cl->fd, faith_envelope_name(envl->type),
+              recipient->device_id, envl->recipient_id);
+    }
+
+    nob_log(INFO,
+            "[client=%" PRIu64 " fd=%i] Envelope %s: Sent message to recipient "
+            "(auth_id: %i) device (device_id: %i).",
+            cl->conn_id, cl->fd, faith_envelope_name(envl->type),
+            envl->recipient_id, recipient->device_id);
+  }
 
   return FAITH_OK;
 }
 
 static faith_status_code_t server_handle_envl(struct server_state_t *s,
                                               struct client_conn_t  *cl,
-                                              faith_frame_t         *frame,
-                                              int                    epoll_fd) {
+                                              faith_frame_t         *frame) {
 
   if (!frame || !cl)
     return FAITH_ERR_INVALID;
 
   faith_envelope_t envl;
 
-  _FH_CHECK_RETURN(faith_decode_envelope(frame->payload, frame->payload_size, &envl));
+  _FH_CHECK_RETURN(
+      faith_decode_envelope(frame->payload, frame->payload_size, &envl));
 
   nob_log(INFO,
           "[client=%" PRIu64
@@ -701,7 +780,12 @@ static faith_status_code_t server_handle_envl(struct server_state_t *s,
 
   switch (envl.type) {
   case FAITH_ENVELOPE_HELLO: {
-    _FH_CHECK(server_handle_hello(s, cl, &envl, epoll_fd));
+    _FH_CHECK(server_handle_hello(s, cl, &envl));
+    rc = _fh_rc;
+    break;
+  }
+  case FAITH_ENVELOPE_MSG_SEND: {
+    _FH_CHECK(server_route_msg_envl(s, cl, &envl));
     rc = _fh_rc;
     break;
   }
@@ -741,7 +825,7 @@ static faith_status_code_t handle_frame(struct server_state_t *s,
     _FH_CHECK_RETURN(server_send_pong(cl, frame, epfd));
     break;
   case FAITH_MSG_ENVL:
-    _FH_CHECK_RETURN(server_handle_envl(s, cl, frame, epfd));
+    _FH_CHECK_RETURN(server_handle_envl(s, cl, frame));
     break;
   default:
     return FAITH_ERR_BAD_FRAME;
@@ -1451,7 +1535,20 @@ static int server_init(struct server_state_t *s) {
   return 0;
 }
 
+static void ignore_sigpipe(void) {
+  struct sigaction sa;
+  memset(&sa, 0, sizeof(sa));
+  sa.sa_handler = SIG_IGN;
+
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = 0;
+
+  sigaction(SIGPIPE, &sa, NULL);
+}
+
 int main(int argc, char **argv) {
+  ignore_sigpipe();
+
   SSL_library_init();
   SSL_load_error_strings();
   OpenSSL_add_ssl_algorithms();

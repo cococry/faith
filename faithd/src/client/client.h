@@ -18,8 +18,9 @@ typedef struct {
   uint16_t proto_ver;
 
   // TODO: temporary
-  client_id_t client_id;
+  client_id_t auth_id;
   device_id_t device_id;
+
 } faith_client_config_t;
 
 typedef struct {
@@ -27,9 +28,12 @@ typedef struct {
   uint64_t value0;
   uint64_t value1;
   char     message[256];
+
+  char  *chat_message;
+  size_t chat_message_size;
 } faith_event_t;
 
-faith_status_code_t faith_client_init_global(void);
+faith_status_code_t faith_client_init_global(int log_enable_tracing);
 
 faith_client_t *faith_client_create(const faith_client_config_t *cfg);
 void            faith_client_destroy(faith_client_t *client);
@@ -37,7 +41,7 @@ void            faith_client_destroy(faith_client_t *client);
 faith_status_code_t faith_client_start(faith_client_t *client);
 faith_status_code_t faith_client_stop(faith_client_t *client);
 
-faith_status_code_t faith_client_send_messege(faith_client_t *client,
+faith_status_code_t faith_client_send_message(faith_client_t *client,
                                               client_id_t     recipient_auth_id,
                                               const char     *msg);
 
@@ -45,3 +49,4 @@ int faith_client_event_fd(faith_client_t *client);
 
 faith_status_code_t faith_client_next_event(faith_client_t *client,
                                             faith_event_t  *out);
+faith_status_code_t faith_client_free_event(faith_event_t *ev);

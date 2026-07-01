@@ -475,7 +475,8 @@ void faith_log_handler(Nob_Log_Level level, const char *fmt, va_list args) {
 
   strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S", &tm_utc);
 
-  fprintf(stderr, "%s.%03ldZ [%s] ", timestamp, tv.tv_usec / 1000, level_name);
+  fprintf(stderr, "%s.%03ldZ [%s]%*s ", timestamp, tv.tv_usec / 1000,
+          level_name, (int)(7 - strlen(level_name)), "");
 
   vfprintf(stderr, fmt, args);
   fprintf(stderr, "\n");
