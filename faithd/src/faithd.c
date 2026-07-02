@@ -662,16 +662,35 @@ static faith_status_code_t server_handle_hello(struct server_state_t  *s,
   }
 
   /* Reading device ID from envelope */
-  if (hello->body_size != sizeof(device_id_t) || !hello->body)
+  if (hello->body_size != FAITH_ENVL_HELLO_BODY_SIZE || !hello->body)
     return FAITH_ERR_BAD_FRAME;
 
-  device_id_t device_id;
-  memcpy(device_id.bytes, hello->body, hello->body_size);
+  uint8_t public_key[FAITH_ED25519_PUBLIC_KEY_SIZE];
 
+  size_t offset = 0;
+  device_id_t device_id;
+  memcpy(device_id.bytes, hello->body, sizeof(device_id.bytes));
+  
   if (faith_device_id_equal(device_id, FAITH_DEVICE_ID_NONE)) {
     return FAITH_ERR_INVALID;
   }
+  
+  offset += sizeof(device_id.bytes);
 
+  memcpy(public_key, hello->body + offset, sizeof(public_key));
+  
+  offset += sizeof(public_key);
+
+  uint64_t nonce = faith_read_u64_be(hello->body + offset);
+  printf("SERVER NONCE: %lu\n", nonce);
+
+  printf("= PUBKEY ===================================\n");
+  for(size_t i = 0; i < FAITH_ED25519_PUBLIC_KEY_SIZE; i++) {
+    printf("%02x", (unsigned int) public_key[i]);
+  }
+  printf("\n");
+  printf("============================================\n");
+    
   /* Send HELLO_OK evelope back to client */
   faith_envelope_t hello_ok = {0};
   hello_ok.type = FAITH_ENVELOPE_HELLO_OK;

@@ -17,6 +17,7 @@
 #define FAITH_DEVICE_ID_NONE ((device_id_t){0})
 
 #define FAITH_ED25519_PUBLIC_KEY_SIZE  32
+#define FAITH_ED25519_PRIVATE_KEY_SIZE  32
 
 #define FAITH_HEADER_SIZE                                                      \
   sizeof(uint32_t) /* frame size    */ +                                       \
@@ -28,6 +29,9 @@
    FAITH_CLIENT_ID_SIZE /* sender id     */ +                                  \
    FAITH_CLIENT_ID_SIZE /* recipient id  */ +                                  \
    sizeof(uint32_t) /* body size */)
+
+#define FAITH_ENVL_HELLO_BODY_SIZE                                             \
+  sizeof(device_id_t) + FAITH_ED25519_PUBLIC_KEY_SIZE + sizeof(uint64_t)
 
 #define _FH_CHECK_RETURN(expr)                                                 \
   do {                                                                         \
@@ -73,7 +77,8 @@ typedef struct {
   X(FAITH_ERR_INCOMPLETE, 12)                                                  \
   X(FAITH_ERR_UNAUTHORIZED, 13)                                                \
   X(FAITH_ERR_NOT_FOUND, 14)                                                   \
-  X(FAITH_ERR_SSL, 15)
+  X(FAITH_ERR_SSL, 15)                                                         \
+  X(FAITH_ERR_CRYPTO, 16)
 
 typedef enum {
 #define X(name, value) name = value,
@@ -193,3 +198,12 @@ int faith_client_id_equal(client_id_t a, client_id_t b);
 int faith_device_id_equal(device_id_t a, device_id_t b);
 
 faith_status_code_t faith_id128_to_hex(const uint8_t bytes[16], char out[33]);
+
+// OpenSSL wrapper
+faith_status_code_t faith_random_bytes(uint8_t* o_buf, int num);
+
+// OpenSSL wrapper
+faith_status_code_t
+faith_gen_ed25519_keypair(void   *handle,
+                          uint8_t private_key[FAITH_ED25519_PRIVATE_KEY_SIZE],
+                          uint8_t public_key[FAITH_ED25519_PUBLIC_KEY_SIZE]);

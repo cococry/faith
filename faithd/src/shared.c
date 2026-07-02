@@ -1,5 +1,6 @@
 #include "shared.h"
 
+#include <openssl/rand.h>
 #include <openssl/ssl.h>
 #include <string.h>
 
@@ -182,9 +183,7 @@ faith_status_code_t faith_encode_frame(faith_frame_msg_type_t type,
   if (payload_size > FAITH_MAX_PAYLOAD_SIZE)
     return FAITH_ERR_FRAME_TOO_LARGE;
 
-  const size_t header_size_bytes = sizeof(uint32_t) + /* frame size */
-                                   sizeof(uint16_t) + /* proto version */
-                                   sizeof(uint16_t);  /* msg type */
+  const size_t header_size_bytes = FAITH_HEADER_SIZE;
 
   if (payload_size > SIZE_MAX - header_size_bytes)
     return FAITH_ERR_FRAME_TOO_LARGE;
@@ -428,6 +427,7 @@ faith_status_code_t faith_decode_envelope(const uint8_t    *payload,
     if (!body)
       return FAITH_ERR_NOMEM;
 
+    printf("MEMCPY: %zu, %i\n", offset, body_size);
     memcpy(body, payload + offset, body_size);
   }
 
@@ -497,14 +497,100 @@ faith_status_code_t faith_id128_to_hex(const uint8_t bytes[16], char out[33]) {
   if (!out || !bytes)
     return FAITH_ERR_INVALID;
 
-  static const char hex[] = "0123456789abcdef";
-
   for (size_t i = 0; i < 16; ++i) {
-    out[i * 2 + 0] = hex[bytes[i] >> 4];
-    out[i * 2 + 1] = hex[bytes[i] & 0x0f];
+    int written = snprintf(out + (i * 2), 3, "%02x", bytes[i]);
+
+    if (written != 2)
+      return FAITH_ERR_INVALID;
   }
 
-  out[32] = '\0';
-
   return FAITH_OK;
+}
+
+faith_status_code_t faith_random_bytes(uint8_t *o_buf, int num) {
+  if (RAND_bytes(o_buf, num) != 1) {
+    nob_log(ERROR, "Failed to generate auth_id with OpenSSL RAND_bytes()");
+    return FAITH_ERR_SSL;
+  }
+  return FAITH_OK;
+}
+
+faith_status_code_t
+faith_gen_ed25519_keypair(void   *handle,
+                          uint8_t private_key[FAITH_ED25519_PRIVATE_KEY_SIZE],
+                          uint8_t public_key[FAITH_ED25519_PUBLIC_KEY_SIZE]) {
+  if (!handle || !private_key || !public_key)
+    return FAITH_ERR_INVALID;
+
+  faith_status_code_t status = FAITH_OK;
+
+  EVP_PKEY    **out_keypair = (EVP_PKEY **)handle;
+  EVP_PKEY     *keypair = NULL;
+  EVP_PKEY_CTX *ctx = NULL;
+
+  ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519, NULL);
+  if (!ctx) {
+    status = FAITH_ERR_CRYPTO;
+    goto cleanup;
+  }
+
+  if (EVP_PKEY_keygen_init(ctx) != 1) {
+    status = FAITH_ERR_CRYPTO;
+    goto cleanup;
+  }
+
+  if (EVP_PKEY_keygen(ctx, &keypair) != 1) {
+    status = FAITH_ERR_CRYPTO;
+    goto cleanup;
+  }
+
+  {
+    size_t priv_len = 0;
+
+    if (EVP_PKEY_get_raw_private_key(keypair, NULL, &priv_len) != 1) {
+      status = FAITH_ERR_CRYPTO;
+      goto cleanup;
+    }
+
+    if (priv_len != FAITH_ED25519_PRIVATE_KEY_SIZE) {
+      nob_log(ERROR, "Generated private key has unexpected byte size: %zu",
+              priv_len);
+      status = FAITH_ERR_INVALID;
+      goto cleanup;
+    }
+
+    if (EVP_PKEY_get_raw_private_key(keypair, private_key, &priv_len) != 1) {
+      status = FAITH_ERR_CRYPTO;
+      goto cleanup;
+    }
+  }
+
+  {
+    size_t pub_len = 0;
+
+    if (EVP_PKEY_get_raw_public_key(keypair, NULL, &pub_len) != 1) {
+      status = FAITH_ERR_CRYPTO;
+      goto cleanup;
+    }
+
+    if (pub_len != FAITH_ED25519_PUBLIC_KEY_SIZE) {
+      nob_log(ERROR, "Generated public key has unexpected byte size: %zu",
+              pub_len);
+      status = FAITH_ERR_INVALID;
+      goto cleanup;
+    }
+
+    if (EVP_PKEY_get_raw_public_key(keypair, public_key, &pub_len) != 1) {
+      status = FAITH_ERR_CRYPTO;
+      goto cleanup;
+    }
+  }
+
+  *out_keypair = keypair;
+  keypair = NULL;
+
+cleanup:
+  EVP_PKEY_free(keypair);
+  EVP_PKEY_CTX_free(ctx);
+  return status;
 }
