@@ -27,8 +27,9 @@
 static int g_log_enable_tracing = true;
 
 typedef struct { 
-  EVP_PKEY* private_key;
+  EVP_PKEY* keypair;
   uint8_t public_key[FAITH_ED25519_PUBLIC_KEY_SIZE];
+  uint8_t private_key[FAITH_ED25519_PRIVATE_KEY_SIZE];
 
   client_id_t auth_id;
   device_id_t device_id;
@@ -505,19 +506,127 @@ static faith_status_code_t faith_client_send_hello(faith_client_t *client) {
   if (!client)
     return FAITH_ERR_INVALID;
 
-  uint8_t body[sizeof(client_id_t)] = {0};
+  uint8_t body[FAITH_ENVL_HELLO_BODY_SIZE];
 
-  memcpy(body, client->ident.device_id.bytes, sizeof(body));
+  // HELLO {
+  // header: {
+  // sender_id: auth_id
+  // }
+  //  body: {
+  //    device_id,
+  //    public_key
+  //  }
+  // }
+  // 
+  size_t offset = 0;
+  size_t device_id_size = sizeof(client->ident.device_id.bytes);
+  memcpy(body, client->ident.device_id.bytes,
+         device_id_size);
+  offset += device_id_size;
+
+  memcpy(body + offset, client->ident.public_key, sizeof(client->ident.public_key));
+  offset += sizeof(client->ident.public_key);
+
+  uint64_t nonce;
+  if (RAND_bytes((unsigned char *)&nonce, sizeof(nonce)) != 1) {
+    nob_log(ERROR, "Failed to generate auth_id with OpenSSL RAND_bytes()");
+    return FAITH_ERR_SSL;
+  }
+  printf("CLIENT NONCE: %lu\n", nonce);
+
+  _FH_CHECK_RETURN(faith_write_u64_be(body + offset, nonce)); 
 
   faith_envelope_t envl = {0};
   envl.type = FAITH_ENVELOPE_HELLO;
-  memcpy(envl.sender_id.bytes, client->ident.auth_id.bytes, sizeof(envl.sender_id));
+
+  memcpy(envl.sender_id.bytes, client->ident.auth_id.bytes,
+         sizeof(envl.sender_id));
+
   envl.body = body;
+  printf("Envl body size: %zu\n", sizeof(body));
   envl.body_size = sizeof(body);
 
-  _FH_CHECK_RETURN(client_send_envelope(client->ssl, &envl));
+  char auth_id_hex[33];
+  char device_id_hex[33];
+  _FH_CHECK_RETURN(faith_id128_to_hex(client->ident.auth_id.bytes, auth_id_hex));
+  _FH_CHECK_RETURN(faith_id128_to_hex(client->ident.device_id.bytes, device_id_hex));
 
-  return FAITH_OK;
+  printf("CLIENT AUTH ID: %s\n", auth_id_hex);
+  printf("DEVICE AUTH ID: %s\n", device_id_hex);
+
+  printf("PUBKEY =====================\n");
+  for(size_t i = 0; i < FAITH_ED25519_PUBLIC_KEY_SIZE; i++) {
+    printf("%02x", (unsigned int)client->ident.public_key[i]);
+  }
+  printf("\n");
+  printf("===========================\n");
+    
+
+  pthread_mutex_lock(&client->write_lock);
+  _FH_CHECK(client_send_envelope(client->ssl, &envl));
+  pthread_mutex_unlock(&client->write_lock);
+
+  return _fh_rc;
+}
+
+static faith_status_code_t client_make_handshake(faith_client_t* client) {
+  if(!client) return FAITH_ERR_INVALID;
+   if (g_log_enable_tracing)
+      nob_log(INFO, "[client] Sending HELLO...");
+
+    {
+      _FH_CHECK(faith_client_send_hello(client));
+      if (_fh_rc == FAITH_OK) {
+        if (g_log_enable_tracing)
+          nob_log(INFO, "[client] Sent HELLO.");
+      } else {
+        client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
+                          "Failed to send HELLO");
+       return _fh_rc; 
+      }
+    }
+
+    if (g_log_enable_tracing)
+      nob_log(INFO, "[client] Waiting for server HELLO_OK response ...");
+
+    faith_frame_t frame = {0};
+
+    _FH_CHECK(faith_read_frame_sync(client->ssl, &frame));
+    if (_fh_rc != FAITH_OK) {
+      client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
+                        "Failed to read HELLO response");
+      return _fh_rc; 
+    }
+
+    if (frame.msg_type != FAITH_MSG_ENVL) {
+      faith_frame_free(&frame);
+      client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
+                        "Unexpected HELLO response");
+      return FAITH_ERR_INVALID;
+    }
+
+    faith_envelope_t envl;
+    {
+      _FH_CHECK(
+          faith_decode_envelope(frame.payload, frame.payload_size, &envl));
+    }
+
+    int ok = envl.type == FAITH_ENVELOPE_HELLO_OK && envl.body_size == 0;
+    if (!ok) {
+      faith_frame_free(&frame);
+      client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
+                        "Unexpected HELLO envelope response");
+      return FAITH_ERR_INVALID;
+    }
+
+    faith_frame_free(&frame);
+
+    if (g_log_enable_tracing)
+      nob_log(INFO,
+              "[client] Got HELLO_OK response. Server acknowledged client "
+              "successfully");
+
+    return FAITH_OK;
 }
 
 static void *faith_client_thread_routine(void *arg) {
@@ -588,64 +697,26 @@ static void *faith_client_thread_routine(void *arg) {
 
     {
       _FH_CHECK(client_push_event(client, FAITH_EVENT_CONNECTED, 0, 0, NULL));
-    }
-
-    if (g_log_enable_tracing)
-      nob_log(INFO, "[client] Sending HELLO...");
-
-    {
-      _FH_CHECK(faith_client_send_hello(client));
-      if (_fh_rc == FAITH_OK) {
-        if (g_log_enable_tracing)
-          nob_log(INFO, "[client] Sent HELLO.");
-      } else {
-        client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
-                          "Failed to send HELLO");
+      if (_fh_rc != FAITH_OK) {
         goto fail;
       }
     }
 
-    if (g_log_enable_tracing)
-      nob_log(INFO, "[client] Waiting for server HELLO_OK response ...");
-
-    faith_frame_t frame = {0};
-
-    if (faith_read_frame_sync(ssl, &frame) != FAITH_OK) {
-      client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
-                        "Failed to read HELLO response");
-      goto fail;
+    {
+      _FH_CHECK(client_make_handshake(client));
+      if (_fh_rc != FAITH_OK) {
+        goto fail;
+      }
     }
-
-    if (frame.msg_type != FAITH_MSG_ENVL) {
-      faith_frame_free(&frame);
-      client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
-                        "Unexpected HELLO response");
-      goto fail;
-    }
-
-    faith_envelope_t envl;
-    faith_decode_envelope(frame.payload, frame.payload_size, &envl);
-
-    int ok = envl.type == FAITH_ENVELOPE_HELLO_OK && envl.body_size == 0;
-    if (!ok) {
-      faith_frame_free(&frame);
-      client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
-                        "Unexpected HELLO envelope response");
-      goto fail;
-    }
-
-    faith_frame_free(&frame);
-
-    if (g_log_enable_tracing)
-      nob_log(INFO,
-              "[client] Got HELLO_OK response. Server acknowledged client "
-              "successfully");
 
     client_run_connected(client);
 
     {
       _FH_CHECK(client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
                                   "connection closed"));
+      if (_fh_rc != FAITH_OK) {
+        goto fail;
+      }
     }
 
   fail:
@@ -700,21 +771,70 @@ faith_status_code_t faith_client_init_global(int log_enable_tracing) {
   return FAITH_OK;
 }
 
-static faith_status_code_t gen_new_client_identity(client_identity_t* o_ident) {
-  if(!o_ident) return FAITH_ERR_INVALID;
+
+static bool hex_char_to_nibble(char c, uint8_t *out) {
+  if (!out)
+    return false;
+
+  if (c >= '0' && c <= '9') {
+    *out = (uint8_t)(c - '0');
+    return true;
+  }
+
+  if (c >= 'a' && c <= 'f') {
+    *out = (uint8_t)(c - 'a' + 10);
+    return true;
+  }
+
+  if (c >= 'A' && c <= 'F') {
+    *out = (uint8_t)(c - 'A' + 10);
+    return true;
+  }
+
+  return false;
+}
+
+static bool client_id_from_hex(const char *hex, client_id_t *out) {
+  if (!hex || !out)
+    return false;
+
+  if (strlen(hex) != FAITH_CLIENT_ID_SIZE * 2)
+    return false;
+
+  client_id_t id = {0};
+
+  for (size_t i = 0; i < FAITH_CLIENT_ID_SIZE; ++i) {
+    uint8_t hi = 0;
+    uint8_t lo = 0;
+
+    if (!hex_char_to_nibble(hex[i * 2 + 0], &hi))
+      return false;
+
+    if (!hex_char_to_nibble(hex[i * 2 + 1], &lo))
+      return false;
+
+    id.bytes[i] = (uint8_t)((hi << 4) | lo);
+  }
+
+  *out = id;
+  return true;
+}
+
+static faith_status_code_t client_new_identity(client_identity_t *o_ident) {
+  if (!o_ident)
+    return FAITH_ERR_INVALID;
 
   /* Generate 128 bit random device & auth identities */
-  if (RAND_bytes(o_ident->auth_id.bytes, sizeof(o_ident->auth_id.bytes)) != 1) {
-    nob_log(ERROR, "Failed to generate auth_id with OpenSSL RAND_bytes()");
-    return FAITH_ERR_SSL;
-  }
+  _FH_CHECK_RETURN(faith_random_bytes(o_ident->auth_id.bytes,
+                                      sizeof(o_ident->auth_id.bytes)));
 
-  if (RAND_bytes(o_ident->device_id.bytes, sizeof(o_ident->device_id.bytes)) !=
-      1) {
-    nob_log(ERROR, "Failed to generate device_id with OpenSSL RAND_bytes()");
-    return FAITH_ERR_SSL;
-  }
+  _FH_CHECK_RETURN(faith_random_bytes(o_ident->device_id.bytes,
+                                      sizeof(o_ident->device_id.bytes)));
 
+  /* Generate client identity keypair */
+  _FH_CHECK_RETURN(faith_gen_ed25519_keypair(&o_ident->keypair, o_ident->private_key, o_ident->public_key));
+
+  
   return FAITH_OK;
 }
 
@@ -757,6 +877,11 @@ faith_client_t *faith_client_create(const faith_client_config_t *cfg) {
   client->event_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
   if (client->event_fd < 0)
     goto fail_ping_lock;
+
+  _FH_CHECK(client_new_identity(&client->ident));
+  if(_fh_rc != FAITH_OK)  {
+    goto fail_event_fd;
+  }
 
   return client;
 
