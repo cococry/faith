@@ -16,6 +16,8 @@
 #define FAITH_CLIENT_ID_NONE ((client_id_t){0})
 #define FAITH_DEVICE_ID_NONE ((device_id_t){0})
 
+#define FAITH_ED25519_PUBLIC_KEY_SIZE  32
+
 #define FAITH_HEADER_SIZE                                                      \
   sizeof(uint32_t) /* frame size    */ +                                       \
       sizeof(uint16_t) /* proto version */ +                                   \
@@ -70,7 +72,8 @@ typedef struct {
   X(FAITH_ERR_NOMEM, 11)                                                       \
   X(FAITH_ERR_INCOMPLETE, 12)                                                  \
   X(FAITH_ERR_UNAUTHORIZED, 13)                                                \
-  X(FAITH_ERR_NOT_FOUND, 14)
+  X(FAITH_ERR_NOT_FOUND, 14)                                                   \
+  X(FAITH_ERR_SSL, 15)
 
 typedef enum {
 #define X(name, value) name = value,

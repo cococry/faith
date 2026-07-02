@@ -26,6 +26,15 @@
 
 static int g_log_enable_tracing = true;
 
+typedef struct { 
+  EVP_PKEY* private_key;
+  uint8_t public_key[FAITH_ED25519_PUBLIC_KEY_SIZE];
+
+  client_id_t auth_id;
+  device_id_t device_id;
+} client_identity_t;
+
+
 struct faith_client {
   char     host[256];
   uint16_t port;
@@ -62,9 +71,7 @@ struct faith_client {
 
   uint16_t proto_ver;
 
-  // TODO: temporary
-  client_id_t auth_id;
-  device_id_t device_id;
+  client_identity_t ident;
 };
 
 static faith_status_code_t
@@ -373,7 +380,7 @@ static void client_handle_envl(faith_client_t *client, faith_frame_t *frame) {
 
   switch (envl.type) {
   case FAITH_ENVELOPE_MSG_SEND: {
-    if (!faith_client_id_equal(envl.recipient_id, client->auth_id) ||
+    if (!faith_client_id_equal(envl.recipient_id, client->ident.auth_id) ||
         _fh_rc != FAITH_OK ||
         faith_client_id_equal(envl.sender_id, FAITH_CLIENT_ID_NONE)) {
       nob_log(ERROR, "[client - reader] Got sent invalid message envelope.");
@@ -500,11 +507,11 @@ static faith_status_code_t faith_client_send_hello(faith_client_t *client) {
 
   uint8_t body[sizeof(client_id_t)] = {0};
 
-  memcpy(body, client->device_id.bytes, sizeof(body));
+  memcpy(body, client->ident.device_id.bytes, sizeof(body));
 
   faith_envelope_t envl = {0};
   envl.type = FAITH_ENVELOPE_HELLO;
-  memcpy(envl.sender_id.bytes, client->auth_id.bytes, sizeof(envl.sender_id));
+  memcpy(envl.sender_id.bytes, client->ident.auth_id.bytes, sizeof(envl.sender_id));
   envl.body = body;
   envl.body_size = sizeof(body);
 
@@ -693,6 +700,24 @@ faith_status_code_t faith_client_init_global(int log_enable_tracing) {
   return FAITH_OK;
 }
 
+static faith_status_code_t gen_new_client_identity(client_identity_t* o_ident) {
+  if(!o_ident) return FAITH_ERR_INVALID;
+
+  /* Generate 128 bit random device & auth identities */
+  if (RAND_bytes(o_ident->auth_id.bytes, sizeof(o_ident->auth_id.bytes)) != 1) {
+    nob_log(ERROR, "Failed to generate auth_id with OpenSSL RAND_bytes()");
+    return FAITH_ERR_SSL;
+  }
+
+  if (RAND_bytes(o_ident->device_id.bytes, sizeof(o_ident->device_id.bytes)) !=
+      1) {
+    nob_log(ERROR, "Failed to generate device_id with OpenSSL RAND_bytes()");
+    return FAITH_ERR_SSL;
+  }
+
+  return FAITH_OK;
+}
+
 faith_client_t *faith_client_create(const faith_client_config_t *cfg) {
   if (!cfg || !cfg->host)
     return NULL;
@@ -732,17 +757,6 @@ faith_client_t *faith_client_create(const faith_client_config_t *cfg) {
   client->event_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
   if (client->event_fd < 0)
     goto fail_ping_lock;
-
-  if (RAND_bytes(client->auth_id.bytes, sizeof(client->auth_id.bytes)) != 1) {
-    nob_log(ERROR, "Failed to generate auth_id with OpenSSL RAND_bytes()");
-    goto fail_event_fd;
-  }
-
-  if (RAND_bytes(client->device_id.bytes, sizeof(client->device_id.bytes)) !=
-      1) {
-    nob_log(ERROR, "Failed to generate device_id with OpenSSL RAND_bytes()");
-    goto fail_event_fd;
-  }
 
   return client;
 
