@@ -43,7 +43,7 @@ supports concurrent networking, implements a custom binary protocol and uses TLS
 - Basic binary protocol over wire
 - In-memory table of online clients
 - Support for multiple devices per client
-- Foundation for client-to-client message routing
+- Client-to-client message routing
 
 ## Build & Run
 
