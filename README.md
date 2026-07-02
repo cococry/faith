@@ -9,15 +9,16 @@
 **faith is an instant messenger optimized for security, 
 native performance & customization.**
 
-The ***faith*** <ins>client</ins> is designed and optimized for native, GPU accelerated rendering
+The ***faith*** <ins>client</ins> is designed around native, GPU accelerated rendering
 of arbitrarily large text message scrolls.
 
 It implements a custom text layout and rendering engine, supporting
 Unicode, international scripts, emoji, bidirectional text, ligatures 
 and shaped glyphs.
 
-The user interface is rendered through an optimized backend abstraction 
-over Vulkan and OpenGL, with native X11 and Wayland windowing support.
+The user interface is rendered through an optimized rendering backend abstraction over Vulkan and OpenGL. 
+Windowing is handled by the implemented backends, which currently include **X11** and **Wayland**.
+
 
 The ***faith*** <ins>server</ins> is designed around security & low latency. It is written from scratch in C,
 supports concurrent networking, implements a custom binary protocol and uses TLS for wire security.
