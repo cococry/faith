@@ -8,17 +8,55 @@
 #include <string.h>
 #include <unistd.h>
 
-int main(int argc, char **argv) {
-  if (argc < 4) {
-    fprintf(stderr, "usage: %s [auth-id] [device-id] [who-to-talk-to]\n",
-            argv[0]);
-    return EXIT_FAILURE;
+static bool hex_char_to_nibble(char c, uint8_t *out) {
+  if (!out)
+    return false;
+
+  if (c >= '0' && c <= '9') {
+    *out = (uint8_t)(c - '0');
+    return true;
   }
 
-  uint16_t auth_id = (uint16_t)atoi(argv[1]);
-  uint16_t device_id = (uint16_t)atoi(argv[2]);
-  uint16_t recipient_id = (uint16_t)atoi(argv[3]);
+  if (c >= 'a' && c <= 'f') {
+    *out = (uint8_t)(c - 'a' + 10);
+    return true;
+  }
 
+  if (c >= 'A' && c <= 'F') {
+    *out = (uint8_t)(c - 'A' + 10);
+    return true;
+  }
+
+  return false;
+}
+
+static bool client_id_from_hex(const char *hex, client_id_t *out) {
+  if (!hex || !out)
+    return false;
+
+  if (strlen(hex) != FAITH_CLIENT_ID_SIZE * 2)
+    return false;
+
+  client_id_t id = {0};
+
+  for (size_t i = 0; i < FAITH_CLIENT_ID_SIZE; ++i) {
+    uint8_t hi = 0;
+    uint8_t lo = 0;
+
+    if (!hex_char_to_nibble(hex[i * 2 + 0], &hi))
+      return false;
+
+    if (!hex_char_to_nibble(hex[i * 2 + 1], &lo))
+      return false;
+
+    id.bytes[i] = (uint8_t)((hi << 4) | lo);
+  }
+
+  *out = id;
+  return true;
+}
+
+int main(int argc, char **argv) {
   faith_client_init_global(false);
 
   faith_client_config_t cfg = {
@@ -27,14 +65,21 @@ int main(int argc, char **argv) {
       .server_name = NULL,
       .host = "127.0.0.1",
       .port = 4433,
-      .auth_id = auth_id,
-      .device_id = device_id,
   };
 
   faith_client_t *client = faith_client_create(&cfg);
   if (!client) {
     fprintf(stderr, "faith_client_create() failed.\n");
     return EXIT_FAILURE;
+  }
+
+  client_id_t recipient_id = FAITH_CLIENT_ID_NONE;
+
+  if (argc >= 2) {
+    if (!client_id_from_hex(argv[1], &recipient_id)) {
+      nob_log(ERROR, "Invalid recipient client id: expected 32 hex characters");
+      return EXIT_FAILURE;
+    }
   }
 
   if (faith_client_start(client) != FAITH_OK) {
@@ -94,7 +139,7 @@ int main(int argc, char **argv) {
             faith_client_send_message(client, recipient_id, line);
 
         if (send_rc != FAITH_OK) {
-          fprintf(stderr, "faith_client_send_message() failed: %d\n", send_rc);
+          fprintf(stderr, "faith_client_send_message() failed: %s\n", faith_status_code_name(send_rc));
         }
         printf("You: %s\n", line);
       }

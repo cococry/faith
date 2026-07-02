@@ -193,7 +193,7 @@ static void server_remove_client(struct server_state_t *s,
 static faith_status_code_t
 routing_get_device_sessions(struct routing_state_t *rt, client_id_t auth_id,
                             struct client_route_device_t **o_devmap) {
-  if (!rt || !o_devmap || auth_id == 0)
+  if (!rt || !o_devmap || faith_client_id_equal(auth_id, FAITH_CLIENT_ID_NONE))
     return FAITH_ERR_INVALID;
 
   struct client_route_user_t *user = hmgetp_null(rt->active_users, auth_id);
@@ -209,20 +209,26 @@ static faith_status_code_t
 routing_register_session(struct routing_state_t *rt, client_id_t auth_id,
                          device_id_t                   device_id,
                          struct client_session_data_t *sess) {
-  if (!rt || !sess || auth_id == 0)
+  if (!rt || !sess || faith_client_id_equal(auth_id, FAITH_CLIENT_ID_NONE))
     return FAITH_ERR_INVALID;
 
-  if (device_id == 0)
+  if (faith_device_id_equal(device_id, FAITH_DEVICE_ID_NONE))
     return FAITH_ERR_INVALID;
 
   struct client_route_device_t *devmap = hmget(rt->active_users, auth_id);
   hmput(devmap, device_id, sess);
   hmput(rt->active_users, auth_id, devmap);
 
+  char auth_id_hex[33];
+  char device_id_hex[33];
+
+  _FH_CHECK_RETURN(faith_id128_to_hex(auth_id.bytes, auth_id_hex));
+  _FH_CHECK_RETURN(faith_id128_to_hex(device_id.bytes, device_id_hex));
+
   nob_log(
       INFO,
-      "Registered session with auth_id=%i, device_id=%i (online clients: %zu)",
-      auth_id, device_id, hmlen(rt->active_users));
+      "Registered session with auth_id=%s, device_id=%s (online clients: %zu)",
+      auth_id_hex, device_id_hex, hmlen(rt->active_users));
 
   return FAITH_OK;
 }
@@ -230,7 +236,7 @@ routing_register_session(struct routing_state_t *rt, client_id_t auth_id,
 static faith_status_code_t
 routing_unregister_session(struct routing_state_t *rt, client_id_t auth_id,
                            device_id_t device_id) {
-  if (auth_id == 0)
+  if (faith_client_id_equal(auth_id, FAITH_CLIENT_ID_NONE))
     return FAITH_OK;
   if (!rt)
     return FAITH_ERR_INVALID;
@@ -259,10 +265,16 @@ routing_unregister_session(struct routing_state_t *rt, client_id_t auth_id,
     hmput(rt->active_users, auth_id, devmap);
   }
 
+  char auth_id_hex[33];
+  char device_id_hex[33];
+
+  _FH_CHECK_RETURN(faith_id128_to_hex(auth_id.bytes, auth_id_hex));
+  _FH_CHECK_RETURN(faith_id128_to_hex(device_id.bytes, device_id_hex));
+
   nob_log(INFO,
-          "Unregistered session with auth_id=%i, device_id=%i (online clients: "
+          "Unregistered session with auth_id=%s, device_id=%s (online clients: "
           "%zu)",
-          auth_id, device_id, hmlen(rt->active_users));
+          auth_id_hex, device_id_hex, hmlen(rt->active_users));
 
   return FAITH_OK;
 }
@@ -645,14 +657,20 @@ static faith_status_code_t server_handle_hello(struct server_state_t  *s,
     return FAITH_ERR_UNAUTHORIZED;
   }
 
-  if (hello->sender_id == 0) {
+  if (faith_client_id_equal(hello->sender_id, FAITH_CLIENT_ID_NONE)) {
     return FAITH_ERR_INVALID;
   }
 
-  if (hello->body_size != sizeof(uint32_t))
+  /* Reading device ID from envelope */
+  if (hello->body_size != sizeof(device_id_t) || !hello->body)
     return FAITH_ERR_BAD_FRAME;
 
-  device_id_t device_id = faith_read_u32_be(hello->body);
+  device_id_t device_id;
+  memcpy(device_id.bytes, hello->body, hello->body_size);
+
+  if (faith_device_id_equal(device_id, FAITH_DEVICE_ID_NONE)) {
+    return FAITH_ERR_INVALID;
+  }
 
   /* Send HELLO_OK evelope back to client */
   faith_envelope_t hello_ok = {0};
@@ -674,9 +692,16 @@ static faith_status_code_t server_handle_hello(struct server_state_t  *s,
 
   set_client_state(s, cl, CLIENT_OPEN);
 
+  char auth_id_hex[33];
+  char device_id_hex[33];
+
+  _FH_CHECK_RETURN(faith_id128_to_hex(cl->auth_id.bytes, auth_id_hex));
+  _FH_CHECK_RETURN(faith_id128_to_hex(device_id.bytes, device_id_hex));
+
   nob_log(INFO,
-          "[client=%" PRIu64 " fd=%i] Server accepted HELLO (auth id: %i)",
-          cl->conn_id, cl->fd, cl->auth_id);
+          "[client=%" PRIu64
+          " fd=%i] Server accepted HELLO (auth id: %s, device id: %s)",
+          cl->conn_id, cl->fd, auth_id_hex, device_id_hex);
 
   return FAITH_OK;
 }
@@ -706,22 +731,33 @@ static faith_status_code_t server_route_msg_envl(struct server_state_t *s,
   }
 
   if (rc == FAITH_ERR_NOT_FOUND) {
+    char recipient_id_hex[33];
+    _FH_CHECK_RETURN(
+        faith_id128_to_hex(envl->recipient_id.bytes, recipient_id_hex));
     nob_log(INFO,
             "[client=%" PRIu64
-            " fd=%i] Envelope %s: Recipient (auth_id: %i) is offline.",
+            " fd=%i] Envelope %s: Recipient (auth_id: %s) is offline.",
             cl->conn_id, cl->fd, faith_envelope_name(envl->type),
-            envl->recipient_id);
+            recipient_id_hex);
   }
 
   for (ptrdiff_t i = 0; i < hmlen(recipient_devices); i++) {
     struct client_conn_t *recipient = recipient_devices[i].value->conn;
-    if (recipient->auth_id != envl->recipient_id) {
+
+    char recipient_device_id_hex[33];
+    char recipient_id_hex[33];
+    _FH_CHECK_RETURN(faith_id128_to_hex(recipient->device_id.bytes,
+                                        recipient_device_id_hex));
+    _FH_CHECK_RETURN(
+        faith_id128_to_hex(envl->recipient_id.bytes, recipient_id_hex));
+
+    if (!faith_client_id_equal(recipient->auth_id, envl->recipient_id)) {
       nob_log(ERROR,
               "[client=%" PRIu64
-              " fd=%i] Envelope %s: Device %i of recipient (auth_id: %i) is "
+              " fd=%i] Envelope %s: Device %s of recipient (auth_id: %s) is "
               "not authenticated. Will not send message to device.",
               cl->conn_id, cl->fd, faith_envelope_name(envl->type),
-              recipient->device_id, envl->recipient_id);
+              recipient_device_id_hex, recipient_id_hex);
       continue;
     }
 
@@ -735,16 +771,16 @@ static faith_status_code_t server_route_msg_envl(struct server_state_t *s,
       nob_log(ERROR,
               "[client=%" PRIu64
               " fd=%i] Envelope %s: Failed to send message to device "
-              "(device_id: %i) of recipient (auth_id: %i).",
+              "(device_id: %s) of recipient (auth_id: %s).",
               cl->conn_id, cl->fd, faith_envelope_name(envl->type),
-              recipient->device_id, envl->recipient_id);
+              recipient_device_id_hex, recipient_id_hex);
     }
 
     nob_log(INFO,
             "[client=%" PRIu64 " fd=%i] Envelope %s: Sent message to recipient "
-            "(auth_id: %i) device (device_id: %i).",
+            "(auth_id: %s) device (device_id: %s).",
             cl->conn_id, cl->fd, faith_envelope_name(envl->type),
-            envl->recipient_id, recipient->device_id);
+            recipient_id_hex, recipient_device_id_hex);
   }
 
   return FAITH_OK;
@@ -1029,10 +1065,6 @@ static int drive_client_read(struct server_state_t *s, struct client_conn_t *cl,
   for (;;) {
     faith_frame_t frame;
 
-    if (cfg->verbose_logging) {
-      nob_log(INFO, "[client=%" PRIu64 " fd=%i]: HANDLING NEW CLIENT FRAME.",
-              cl->conn_id, cl->fd);
-    }
     enum read_frame_result_t rr = try_read_one_frame(cl, &frame, cfg);
 
     if (rr == READ_FRAME_OK) {

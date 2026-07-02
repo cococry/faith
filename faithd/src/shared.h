@@ -10,14 +10,22 @@
 #define FAITH_MAX_FRAME_LEN    128
 #define FAITH_MAX_MSG_SIZE     65536
 #define FAITH_MAX_PAYLOAD_SIZE 128
+
+#define FAITH_CLIENT_ID_SIZE 16
+#define FAITH_DEVICE_ID_SIZE 16
+#define FAITH_CLIENT_ID_NONE ((client_id_t){0})
+#define FAITH_DEVICE_ID_NONE ((device_id_t){0})
+
 #define FAITH_HEADER_SIZE                                                      \
   sizeof(uint32_t) /* frame size    */ +                                       \
       sizeof(uint16_t) /* proto version */ +                                   \
       sizeof(uint16_t) /* message type  */
+
 #define FAITH_ENVL_HEADER_SIZE                                                 \
   (sizeof(uint32_t) /* envelope type */ +                                      \
-   sizeof(uint32_t) /* sender id     */ +                                      \
-   sizeof(uint32_t) /* recipient id  */ + sizeof(uint32_t) /* body size */)
+   FAITH_CLIENT_ID_SIZE /* sender id     */ +                                  \
+   FAITH_CLIENT_ID_SIZE /* recipient id  */ +                                  \
+   sizeof(uint32_t) /* body size */)
 
 #define _FH_CHECK_RETURN(expr)                                                 \
   do {                                                                         \
@@ -110,8 +118,13 @@ typedef enum {
 #undef X
 } faith_envelope_type_t;
 
-typedef uint32_t client_id_t;
-typedef uint32_t device_id_t;
+typedef struct {
+  uint8_t bytes[16];
+} client_id_t;
+
+typedef struct {
+  uint8_t bytes[16];
+} device_id_t;
 
 typedef struct {
   faith_envelope_type_t type;
@@ -172,3 +185,8 @@ faith_status_code_t faith_decode_envelope(const uint8_t    *payload,
                                           faith_envelope_t *o_envl);
 
 void faith_log_handler(Nob_Log_Level level, const char *fmt, va_list args);
+
+int faith_client_id_equal(client_id_t a, client_id_t b);
+int faith_device_id_equal(device_id_t a, device_id_t b);
+
+faith_status_code_t faith_id128_to_hex(const uint8_t bytes[16], char out[33]);
