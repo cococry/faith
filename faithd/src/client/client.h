@@ -17,10 +17,6 @@ typedef struct {
 
   uint16_t proto_ver;
 
-  // TODO: temporary
-  client_id_t auth_id;
-  device_id_t device_id;
-
 } faith_client_config_t;
 
 typedef struct {

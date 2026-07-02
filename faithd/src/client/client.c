@@ -373,8 +373,9 @@ static void client_handle_envl(faith_client_t *client, faith_frame_t *frame) {
 
   switch (envl.type) {
   case FAITH_ENVELOPE_MSG_SEND: {
-    if (envl.recipient_id != client->auth_id || _fh_rc != FAITH_OK ||
-        envl.sender_id == 0) {
+    if (!faith_client_id_equal(envl.recipient_id, client->auth_id) ||
+        _fh_rc != FAITH_OK ||
+        faith_client_id_equal(envl.sender_id, FAITH_CLIENT_ID_NONE)) {
       nob_log(ERROR, "[client - reader] Got sent invalid message envelope.");
       break;
     }
@@ -497,13 +498,13 @@ static faith_status_code_t faith_client_send_hello(faith_client_t *client) {
   if (!client)
     return FAITH_ERR_INVALID;
 
-  uint8_t body[sizeof(uint32_t)] = {0};
+  uint8_t body[sizeof(client_id_t)] = {0};
 
-  _FH_CHECK_RETURN(faith_write_u32_be(body, client->device_id));
+  memcpy(body, client->device_id.bytes, sizeof(body));
 
   faith_envelope_t envl = {0};
   envl.type = FAITH_ENVELOPE_HELLO;
-  envl.sender_id = client->auth_id;
+  memcpy(envl.sender_id.bytes, client->auth_id.bytes, sizeof(envl.sender_id));
   envl.body = body;
   envl.body_size = sizeof(body);
 
@@ -708,48 +709,58 @@ faith_client_t *faith_client_create(const faith_client_config_t *cfg) {
   snprintf(client->host, sizeof(client->host), "%s", cfg->host);
   client->port = cfg->port;
 
-  if (cfg->server_name)
+  if (cfg->server_name) {
     snprintf(client->server_name, sizeof(client->server_name), "%s",
              cfg->server_name);
+  }
 
-  if (cfg->ca_file)
+  if (cfg->ca_file) {
     snprintf(client->ca_file, sizeof(client->ca_file), "%s", cfg->ca_file);
+  }
 
   client->insecure_skip_verify = cfg->insecure_skip_verify;
 
-  if (pthread_mutex_init(&client->lock, NULL) != 0) {
-    free(client);
-    return NULL;
-  }
+  if (pthread_mutex_init(&client->lock, NULL) != 0)
+    goto fail_client;
 
-  if (pthread_mutex_init(&client->write_lock, NULL) != 0) {
-    pthread_mutex_destroy(&client->lock);
-    free(client);
-    return NULL;
-  }
+  if (pthread_mutex_init(&client->write_lock, NULL) != 0)
+    goto fail_lock;
 
-  if (pthread_mutex_init(&client->ping_lock, NULL) != 0) {
-    pthread_mutex_destroy(&client->write_lock);
-    pthread_mutex_destroy(&client->lock);
-    free(client);
-    return NULL;
-  }
+  if (pthread_mutex_init(&client->ping_lock, NULL) != 0)
+    goto fail_write_lock;
 
   client->event_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-  if (client->event_fd < 0) {
-    pthread_mutex_destroy(&client->write_lock);
-    pthread_mutex_destroy(&client->ping_lock);
-    pthread_mutex_destroy(&client->lock);
+  if (client->event_fd < 0)
+    goto fail_ping_lock;
 
-    free(client);
-    return NULL;
+  if (RAND_bytes(client->auth_id.bytes, sizeof(client->auth_id.bytes)) != 1) {
+    nob_log(ERROR, "Failed to generate auth_id with OpenSSL RAND_bytes()");
+    goto fail_event_fd;
   }
 
-  // TODO: temporary
-  client->auth_id = cfg->auth_id;
-  client->device_id = cfg->device_id;
+  if (RAND_bytes(client->device_id.bytes, sizeof(client->device_id.bytes)) !=
+      1) {
+    nob_log(ERROR, "Failed to generate device_id with OpenSSL RAND_bytes()");
+    goto fail_event_fd;
+  }
 
   return client;
+
+fail_event_fd:
+  close(client->event_fd);
+
+fail_ping_lock:
+  pthread_mutex_destroy(&client->ping_lock);
+
+fail_write_lock:
+  pthread_mutex_destroy(&client->write_lock);
+
+fail_lock:
+  pthread_mutex_destroy(&client->lock);
+
+fail_client:
+  free(client);
+  return NULL;
 }
 
 void faith_client_destroy(faith_client_t *client) {
@@ -829,7 +840,8 @@ faith_status_code_t faith_client_stop(faith_client_t *client) {
 faith_status_code_t faith_client_send_message(faith_client_t *client,
                                               client_id_t     recipient_auth_id,
                                               const char     *msg) {
-  if (!client || recipient_auth_id == 0 || !msg)
+  if (!client ||
+      faith_client_id_equal(recipient_auth_id, FAITH_CLIENT_ID_NONE) || !msg)
     return FAITH_ERR_INVALID;
 
   /* This does not include the null terminator of the string. */

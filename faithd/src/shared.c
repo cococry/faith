@@ -361,12 +361,13 @@ faith_status_code_t faith_encode_envelope(uint8_t *out_buf, size_t *out_size,
   // Type (faith_envelope_type_t -> uint32_t)
   _FH_CHECK_RETURN(faith_write_u32_be(out_buf + offset, env->type));
   offset += sizeof(uint32_t);
-  // Sender (client_id_t -> uint32_t)
-  _FH_CHECK_RETURN(faith_write_u32_be(out_buf + offset, env->sender_id));
-  offset += sizeof(uint32_t);
-  // Recipient (client_id_t -> uint32_t)
-  _FH_CHECK_RETURN(faith_write_u32_be(out_buf + offset, env->recipient_id));
-  offset += sizeof(uint32_t);
+  // Sender (client_id_t -> 16 raw bytes)
+  memcpy(out_buf + offset, env->sender_id.bytes, sizeof(env->sender_id.bytes));
+  offset += sizeof(env->sender_id.bytes);
+  // Recipient (client_id_t -> 16 raw bytes)
+  memcpy(out_buf + offset, env->recipient_id.bytes,
+         sizeof(env->recipient_id.bytes));
+  offset += sizeof(env->recipient_id.bytes);
   // Body Size (uint32_t)
   _FH_CHECK_RETURN(faith_write_u32_be(out_buf + offset, env->body_size));
 
@@ -402,12 +403,14 @@ faith_status_code_t faith_decode_envelope(const uint8_t    *payload,
   // Type (faith_envelope_type_t -> uint32_t)
   uint32_t type = faith_read_u32_be(payload + offset);
   offset += sizeof(uint32_t);
-  // Sender (client_id_t -> uint32_t)
-  uint32_t sender_id = faith_read_u32_be(payload + offset);
-  offset += sizeof(uint32_t);
-  // Recipient (client_id_t -> uint32_t)
-  uint32_t recipient_id = faith_read_u32_be(payload + offset);
-  offset += sizeof(uint32_t);
+  // Sender (client_id_t -> 16 raw bytes)
+  client_id_t sender_id;
+  memcpy(sender_id.bytes, payload + offset, sizeof(sender_id.bytes));
+  offset += sizeof(sender_id.bytes);
+  // Recipient (client_id_t -> 16 raw bytes)
+  client_id_t recipient_id;
+  memcpy(recipient_id.bytes, payload + offset, sizeof(recipient_id.bytes));
+  offset += sizeof(recipient_id.bytes);
   // Body Size (uint32_t)
   uint32_t body_size = faith_read_u32_be(payload + offset);
 
@@ -480,4 +483,28 @@ void faith_log_handler(Nob_Log_Level level, const char *fmt, va_list args) {
 
   vfprintf(stderr, fmt, args);
   fprintf(stderr, "\n");
+}
+
+int faith_client_id_equal(client_id_t a, client_id_t b) {
+  return memcmp(a.bytes, b.bytes, 16) == 0;
+}
+
+int faith_device_id_equal(device_id_t a, device_id_t b) {
+  return memcmp(a.bytes, b.bytes, 16) == 0;
+}
+
+faith_status_code_t faith_id128_to_hex(const uint8_t bytes[16], char out[33]) {
+  if (!out || !bytes)
+    return FAITH_ERR_INVALID;
+
+  static const char hex[] = "0123456789abcdef";
+
+  for (size_t i = 0; i < 16; ++i) {
+    out[i * 2 + 0] = hex[bytes[i] >> 4];
+    out[i * 2 + 1] = hex[bytes[i] & 0x0f];
+  }
+
+  out[32] = '\0';
+
+  return FAITH_OK;
 }
