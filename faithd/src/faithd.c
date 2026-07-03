@@ -49,11 +49,19 @@ enum client_state_t {
 #undef X
 };
 
+struct client_temporary_handshake_params_t {
+  uint64_t          nonce;
+  uint64_t          server_nonce;
+  uint8_t           public_key[FAITH_ED25519_PUBLIC_KEY_SIZE];
+  faith_client_id_t sender_auth_id;
+  faith_device_id_t device_id;
+};
+
 struct client_conn_t {
   // connection id
   uint64_t            conn_id;
-  client_id_t         auth_id;
-  device_id_t         device_id;
+  faith_client_id_t   auth_id;
+  faith_device_id_t   device_id;
   int                 fd;
   SSL                *ssl;
   enum client_state_t state;
@@ -72,6 +80,8 @@ struct client_conn_t {
   struct client_conn_t *next;
   struct client_conn_t *prev;
 
+  struct client_temporary_handshake_params_t temp_handshake_params;
+
   int authorized;
 };
 
@@ -80,13 +90,13 @@ struct client_session_data_t {
 };
 
 struct client_route_device_t {
-  device_id_t                   key; /* device id */
+  faith_device_id_t             key; /* device id */
   struct client_session_data_t *value;
 };
 
 /* nested hashmap [auth id -> device id -> conn/sess data] */
 struct client_route_user_t {
-  client_id_t key; /* client/auth id */
+  faith_client_id_t key; /* client/auth id */
   struct client_route_device_t
       *value; /* a hashmap of device id -> client conn/sess data*/
 };
@@ -191,7 +201,8 @@ static void server_remove_client(struct server_state_t *s,
 }
 
 static faith_status_code_t
-routing_get_device_sessions(struct routing_state_t *rt, client_id_t auth_id,
+routing_get_device_sessions(struct routing_state_t        *rt,
+                            faith_client_id_t              auth_id,
                             struct client_route_device_t **o_devmap) {
   if (!rt || !o_devmap || faith_client_id_equal(auth_id, FAITH_CLIENT_ID_NONE))
     return FAITH_ERR_INVALID;
@@ -206,8 +217,8 @@ routing_get_device_sessions(struct routing_state_t *rt, client_id_t auth_id,
 }
 
 static faith_status_code_t
-routing_register_session(struct routing_state_t *rt, client_id_t auth_id,
-                         device_id_t                   device_id,
+routing_register_session(struct routing_state_t *rt, faith_client_id_t auth_id,
+                         faith_device_id_t             device_id,
                          struct client_session_data_t *sess) {
   if (!rt || !sess || faith_client_id_equal(auth_id, FAITH_CLIENT_ID_NONE))
     return FAITH_ERR_INVALID;
@@ -234,8 +245,9 @@ routing_register_session(struct routing_state_t *rt, client_id_t auth_id,
 }
 
 static faith_status_code_t
-routing_unregister_session(struct routing_state_t *rt, client_id_t auth_id,
-                           device_id_t device_id) {
+routing_unregister_session(struct routing_state_t *rt,
+                           faith_client_id_t       auth_id,
+                           faith_device_id_t       device_id) {
   if (faith_client_id_equal(auth_id, FAITH_CLIENT_ID_NONE))
     return FAITH_OK;
   if (!rt)
@@ -638,68 +650,21 @@ static faith_status_code_t server_send_envelope(struct client_conn_t   *cl,
   return rc;
 }
 
-static faith_status_code_t server_handle_hello(struct server_state_t  *s,
-                                               struct client_conn_t   *cl,
-                                               const faith_envelope_t *hello) {
-  if (!cl || !hello)
+static faith_status_code_t
+server_accept_hello(struct server_state_t *s, struct client_conn_t *cl,
+                    const faith_client_id_t *sender_id,
+                    const faith_device_id_t *device_id) {
+  if (!s || !cl || !device_id)
     return FAITH_ERR_INVALID;
-  if (hello->type != FAITH_ENVELOPE_HELLO)
-    return FAITH_ERR_INVALID;
-
-  if (cl->state != CLIENT_WAIT_FOR_HELLO_ACK) {
-    nob_log(ERROR,
-            "[client=%" PRIu64 " fd=%i] Server got invalid HELLO from client.",
-            cl->conn_id, cl->fd);
-    return FAITH_ERR_INVALID;
-  }
-
-  if (cl->authorized != 1) {
-    return FAITH_ERR_UNAUTHORIZED;
-  }
-
-  if (faith_client_id_equal(hello->sender_id, FAITH_CLIENT_ID_NONE)) {
-    return FAITH_ERR_INVALID;
-  }
-
-  /* Reading device ID from envelope */
-  if (hello->body_size != FAITH_ENVL_HELLO_BODY_SIZE || !hello->body)
-    return FAITH_ERR_BAD_FRAME;
-
-  uint8_t public_key[FAITH_ED25519_PUBLIC_KEY_SIZE];
-
-  size_t offset = 0;
-  device_id_t device_id;
-  memcpy(device_id.bytes, hello->body, sizeof(device_id.bytes));
-  
-  if (faith_device_id_equal(device_id, FAITH_DEVICE_ID_NONE)) {
-    return FAITH_ERR_INVALID;
-  }
-  
-  offset += sizeof(device_id.bytes);
-
-  memcpy(public_key, hello->body + offset, sizeof(public_key));
-  
-  offset += sizeof(public_key);
-
-  uint64_t nonce = faith_read_u64_be(hello->body + offset);
-  printf("SERVER NONCE: %lu\n", nonce);
-
-  printf("= PUBKEY ===================================\n");
-  for(size_t i = 0; i < FAITH_ED25519_PUBLIC_KEY_SIZE; i++) {
-    printf("%02x", (unsigned int) public_key[i]);
-  }
-  printf("\n");
-  printf("============================================\n");
-    
   /* Send HELLO_OK evelope back to client */
-  faith_envelope_t hello_ok = {0};
-  hello_ok.type = FAITH_ENVELOPE_HELLO_OK;
-  hello_ok.recipient_id = hello->sender_id;
+  faith_envelope_t hello_ok_envl = {0};
+  hello_ok_envl.type = FAITH_ENVELOPE_HELLO_OK;
+  hello_ok_envl.recipient_id = *sender_id;
 
-  cl->auth_id = hello->sender_id;
-  cl->device_id = device_id;
+  cl->auth_id = *sender_id;
+  cl->device_id = *device_id;
 
-  _FH_CHECK_RETURN(server_send_envelope(cl, &hello_ok, s->epoll_fd));
+  _FH_CHECK_RETURN(server_send_envelope(cl, &hello_ok_envl, s->epoll_fd));
 
   /* allocate session data */
   struct client_session_data_t *sess = calloc(1, sizeof(*sess));
@@ -715,13 +680,205 @@ static faith_status_code_t server_handle_hello(struct server_state_t  *s,
   char device_id_hex[33];
 
   _FH_CHECK_RETURN(faith_id128_to_hex(cl->auth_id.bytes, auth_id_hex));
-  _FH_CHECK_RETURN(faith_id128_to_hex(device_id.bytes, device_id_hex));
+  _FH_CHECK_RETURN(faith_id128_to_hex(device_id->bytes, device_id_hex));
 
   nob_log(INFO,
           "[client=%" PRIu64
           " fd=%i] Server accepted HELLO (auth id: %s, device id: %s)",
           cl->conn_id, cl->fd, auth_id_hex, device_id_hex);
 
+  return FAITH_OK;
+}
+
+static faith_status_code_t
+server_handle_hello(struct server_state_t *s, struct client_conn_t *cl,
+                    const faith_envelope_t *hello_envl) {
+  // HELLO {
+  // header: {
+  // sender_id: auth_id
+  // }
+  //  body: {
+  //    device_id,
+  //    public_key,
+  //    client_nonce
+  //  }
+  // }
+  //
+  if (!cl || !hello_envl)
+    return FAITH_ERR_INVALID;
+  if (hello_envl->type != FAITH_ENVELOPE_HELLO)
+    return FAITH_ERR_INVALID;
+
+  if (cl->state != CLIENT_WAIT_FOR_HELLO_ACK) {
+    nob_log(ERROR,
+            "[client=%" PRIu64 " fd=%i] Server got invalid HELLO from client.",
+            cl->conn_id, cl->fd);
+    return FAITH_ERR_INVALID;
+  }
+
+  if (cl->authorized != 1) {
+    return FAITH_ERR_UNAUTHORIZED;
+  }
+
+  if (faith_client_id_equal(hello_envl->sender_id, FAITH_CLIENT_ID_NONE)) {
+    return FAITH_ERR_INVALID;
+  }
+
+  /* Reading body from envelope */
+
+  if (hello_envl->body_size != FAITH_ENVL_HELLO_BODY_SIZE || !hello_envl->body)
+    return FAITH_ERR_BAD_FRAME;
+
+  uint8_t public_key[FAITH_ED25519_PUBLIC_KEY_SIZE];
+
+  /* 1. Deserialize device ID */
+  size_t            offset = 0;
+  faith_device_id_t device_id;
+  memcpy(device_id.bytes, hello_envl->body, sizeof(device_id.bytes));
+
+  if (faith_device_id_equal(device_id, FAITH_DEVICE_ID_NONE)) {
+    return FAITH_ERR_INVALID;
+  }
+
+  offset += sizeof(device_id.bytes);
+
+  /* 2. Deserialize public key */
+  memcpy(public_key, hello_envl->body + offset, sizeof(public_key));
+
+  offset += sizeof(public_key);
+
+  /* 3. Deserialize nonce */
+  uint64_t nonce = faith_read_u64_be(hello_envl->body + offset);
+
+  uint64_t server_nonce;
+  _FH_CHECK_RETURN(
+      faith_random_bytes((uint8_t *)&server_nonce, sizeof(server_nonce)));
+
+  /* Construct temporary handshake parameters for client identity evaluation */
+
+  struct client_temporary_handshake_params_t *params =
+      &cl->temp_handshake_params;
+  params->nonce = nonce;
+  params->device_id = device_id;
+  memcpy(params->public_key, public_key, sizeof(params->public_key));
+  params->server_nonce = server_nonce;
+  params->sender_auth_id = hello_envl->sender_id;
+
+  /* Send CHALLENGE envelope */
+
+  faith_envelope_t challenge_envl;
+  challenge_envl.type = FAITH_ENVELOPE_CHALLENGE;
+  challenge_envl.recipient_id = hello_envl->sender_id;
+
+  size_t  challenge_size = FAITH_ENVL_HELLO_CHALLENGE_BODY_SIZE;
+  uint8_t body[challenge_size];
+  _FH_CHECK_RETURN(faith_write_u64_be(body, server_nonce));
+
+  challenge_envl.body = body;
+  challenge_envl.body_size = sizeof(body);
+
+  _FH_CHECK_RETURN(server_send_envelope(cl, &challenge_envl, s->epoll_fd));
+
+  return FAITH_OK;
+}
+
+static faith_status_code_t server_handle_challenge_response(
+    struct server_state_t *s, struct client_conn_t *cl,
+    const faith_envelope_t *challenge_response_envl) {
+  if (!s || !cl || !challenge_response_envl)
+    return FAITH_ERR_INVALID;
+  if (challenge_response_envl->type != FAITH_ENVELOPE_CHALLENGE_RESPONSE) {
+    nob_log(ERROR,
+            "[client=%" PRIu64 " fd=%i] INvalid envelope type. Expected FAITH_ENVELOPE_CHALLENGE_RESPONSE, got %s",
+            cl->conn_id, cl->fd, faith_envelope_name(challenge_response_envl->type));
+    return FAITH_ERR_INVALID;
+  }
+
+  if (cl->state != CLIENT_WAIT_FOR_HELLO_ACK) {
+    nob_log(ERROR,
+            "[client=%" PRIu64 " fd=%i] Server got invalid CHALLENGE_RESPONSE from client.",
+            cl->conn_id, cl->fd);
+    return FAITH_ERR_INVALID;
+  }
+
+  if (cl->authorized != 1) {
+    return FAITH_ERR_UNAUTHORIZED;
+  }
+  
+  struct client_temporary_handshake_params_t *params =
+      &cl->temp_handshake_params;
+
+  if (!faith_client_id_equal(challenge_response_envl->sender_id, params->sender_auth_id)) {
+    nob_log(ERROR,
+            "[client=%" PRIu64
+            " fd=%i] Server got CHALLENGE_RESPONSE from invalid client.",
+            cl->conn_id, cl->fd);
+    return FAITH_ERR_INVALID;
+  }
+  if (challenge_response_envl->body_size != FAITH_ED25519_SIGNATURE_SIZE) {
+    nob_log(ERROR,
+            "[client=%" PRIu64
+            " fd=%i] Server got invalid CHALLENGE_RESPONSE envelope contents.",
+            cl->conn_id, cl->fd);
+    return FAITH_ERR_INVALID;
+  }
+
+  uint8_t client_signature[FAITH_ED25519_SIGNATURE_SIZE];
+  memcpy(client_signature, challenge_response_envl->body,
+         sizeof(client_signature));
+
+  /* Construct message buffer for signature generation
+   *    Message Buffer {
+   *      client_id,
+   *      public_key,
+   *      client_nonce,
+   *      server_nonce
+   *    } */
+  uint8_t msg_buf[FAITH_HELLO_HANDSHAKE_SIGNATURE_SIZE];
+  {
+    _FH_CHECK(faith_gen_signing_msg_buf(msg_buf, sizeof(msg_buf), &params->sender_auth_id,
+                                        params->public_key, params->nonce,
+                                        params->server_nonce));
+    if (_fh_rc != FAITH_OK) {
+      nob_log(ERROR,
+              "[client=%" PRIu64
+              " fd=%i] Failed to generate signing message buffer",
+              cl->conn_id, cl->fd);
+
+      return FAITH_ERR_CRYPTO;
+    }
+  }
+
+  EVP_PKEY *pkey =
+      EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, NULL, params->public_key,
+                                  FAITH_ED25519_PUBLIC_KEY_SIZE);
+
+  if (pkey == NULL) {
+    nob_log(ERROR,
+            "[client=%" PRIu64
+            " fd=%i] Failed to create EVP_PKEY from raw public key",
+            cl->conn_id, cl->fd);
+
+    return FAITH_ERR_CRYPTO;
+  }
+
+  _FH_CHECK(faith_verify_signature(pkey, msg_buf, sizeof(msg_buf),
+                                   client_signature, sizeof(client_signature)));
+
+  int authorized = _fh_rc == FAITH_OK;
+  if (!authorized) {
+    nob_log(ERROR,
+            "[client=%" PRIu64
+            " fd=%i] Client failed authorization. Will not register client.",
+            cl->conn_id, cl->fd);
+    EVP_PKEY_free(pkey);
+    return FAITH_ERR_UNAUTHORIZED;
+  }
+
+  EVP_PKEY_free(pkey);
+
+  _FH_CHECK_RETURN(
+      server_accept_hello(s, cl, &params->sender_auth_id, &params->device_id));
   return FAITH_OK;
 }
 
@@ -817,13 +974,10 @@ static faith_status_code_t server_handle_envl(struct server_state_t *s,
   _FH_CHECK_RETURN(
       faith_decode_envelope(frame->payload, frame->payload_size, &envl));
 
-  nob_log(INFO,
-          "[client=%" PRIu64
-          " fd=%i] Server got envelope: type=%s body_size=%u",
-          cl->conn_id, cl->fd, faith_envelope_name(envl.type), envl.body_size);
-
   faith_status_code_t rc = FAITH_OK;
-  if (cl->state != CLIENT_OPEN && envl.type != FAITH_ENVELOPE_HELLO) {
+  if (cl->state != CLIENT_OPEN &&
+      (envl.type != FAITH_ENVELOPE_HELLO &&
+       envl.type != FAITH_ENVELOPE_CHALLENGE_RESPONSE)) {
     nob_log(ERROR,
             "[client=%" PRIu64 " fd=%i] Client is not acknowledged yet. Will "
             "not handle envelope (%s).",
@@ -832,6 +986,11 @@ static faith_status_code_t server_handle_envl(struct server_state_t *s,
     rc = FAITH_ERR_IO;
     goto defer;
   }
+
+  nob_log(INFO,
+          "[client=%" PRIu64
+          " fd=%i] Server got envelope: type=%s body_size=%u",
+          cl->conn_id, cl->fd, faith_envelope_name(envl.type), envl.body_size);
 
   switch (envl.type) {
   case FAITH_ENVELOPE_HELLO: {
@@ -844,7 +1003,13 @@ static faith_status_code_t server_handle_envl(struct server_state_t *s,
     rc = _fh_rc;
     break;
   }
+  case FAITH_ENVELOPE_CHALLENGE_RESPONSE: {
+    _FH_CHECK(server_handle_challenge_response(s, cl, &envl));
+    rc = _fh_rc;
+    break;
+  }
   default:
+    rc = FAITH_ERR_BAD_FRAME;
     break;
   }
 

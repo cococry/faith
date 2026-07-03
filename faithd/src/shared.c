@@ -360,10 +360,10 @@ faith_status_code_t faith_encode_envelope(uint8_t *out_buf, size_t *out_size,
   // Type (faith_envelope_type_t -> uint32_t)
   _FH_CHECK_RETURN(faith_write_u32_be(out_buf + offset, env->type));
   offset += sizeof(uint32_t);
-  // Sender (client_id_t -> 16 raw bytes)
+  // Sender (faith_client_id_t -> 16 raw bytes)
   memcpy(out_buf + offset, env->sender_id.bytes, sizeof(env->sender_id.bytes));
   offset += sizeof(env->sender_id.bytes);
-  // Recipient (client_id_t -> 16 raw bytes)
+  // Recipient (faith_client_id_t -> 16 raw bytes)
   memcpy(out_buf + offset, env->recipient_id.bytes,
          sizeof(env->recipient_id.bytes));
   offset += sizeof(env->recipient_id.bytes);
@@ -402,12 +402,12 @@ faith_status_code_t faith_decode_envelope(const uint8_t    *payload,
   // Type (faith_envelope_type_t -> uint32_t)
   uint32_t type = faith_read_u32_be(payload + offset);
   offset += sizeof(uint32_t);
-  // Sender (client_id_t -> 16 raw bytes)
-  client_id_t sender_id;
+  // Sender (faith_client_id_t -> 16 raw bytes)
+  faith_client_id_t sender_id;
   memcpy(sender_id.bytes, payload + offset, sizeof(sender_id.bytes));
   offset += sizeof(sender_id.bytes);
-  // Recipient (client_id_t -> 16 raw bytes)
-  client_id_t recipient_id;
+  // Recipient (faith_client_id_t -> 16 raw bytes)
+  faith_client_id_t recipient_id;
   memcpy(recipient_id.bytes, payload + offset, sizeof(recipient_id.bytes));
   offset += sizeof(recipient_id.bytes);
   // Body Size (uint32_t)
@@ -427,7 +427,6 @@ faith_status_code_t faith_decode_envelope(const uint8_t    *payload,
     if (!body)
       return FAITH_ERR_NOMEM;
 
-    printf("MEMCPY: %zu, %i\n", offset, body_size);
     memcpy(body, payload + offset, body_size);
   }
 
@@ -485,11 +484,11 @@ void faith_log_handler(Nob_Log_Level level, const char *fmt, va_list args) {
   fprintf(stderr, "\n");
 }
 
-int faith_client_id_equal(client_id_t a, client_id_t b) {
+int faith_client_id_equal(faith_client_id_t a, faith_client_id_t b) {
   return memcmp(a.bytes, b.bytes, 16) == 0;
 }
 
-int faith_device_id_equal(device_id_t a, device_id_t b) {
+int faith_device_id_equal(faith_device_id_t a, faith_device_id_t b) {
   return memcmp(a.bytes, b.bytes, 16) == 0;
 }
 
@@ -593,4 +592,96 @@ cleanup:
   EVP_PKEY_free(keypair);
   EVP_PKEY_CTX_free(ctx);
   return status;
+}
+
+faith_status_code_t
+faith_gen_signing_msg_buf(uint8_t *o_buf, size_t buf_cap,
+                          const faith_client_id_t *client_id,
+                          uint8_t  public_key[FAITH_ED25519_PUBLIC_KEY_SIZE],
+                          uint64_t client_nonce, uint64_t server_nonce) {
+  if (!o_buf)
+    return FAITH_ERR_INVALID;
+  if (buf_cap < FAITH_HELLO_HANDSHAKE_SIGNATURE_SIZE)
+    return FAITH_ERR_INVALID;
+  if (!public_key)
+    return FAITH_ERR_INVALID;
+
+  size_t offset = 0;
+
+  memcpy(o_buf, client_id->bytes,
+         sizeof(client_id->bytes));
+  offset += sizeof(client_id->bytes);
+  if(offset > buf_cap) return FAITH_ERR_INVALID;
+
+  memcpy(o_buf + offset, public_key, FAITH_ED25519_PUBLIC_KEY_SIZE);
+  offset += FAITH_ED25519_PUBLIC_KEY_SIZE;
+  if (offset > buf_cap)
+    return FAITH_ERR_INVALID;
+
+  memcpy(o_buf + offset, &client_nonce, sizeof(client_nonce));
+  offset += sizeof(client_nonce);
+  if (offset > buf_cap)
+    return FAITH_ERR_INVALID;
+
+  memcpy(o_buf + offset, &server_nonce, sizeof(server_nonce));
+  offset += sizeof(server_nonce);
+  if (offset > buf_cap)
+    return FAITH_ERR_INVALID;
+
+  return FAITH_OK;
+}
+
+faith_status_code_t faith_gen_signature(EVP_PKEY      *keypair,
+                                        uint8_t      *o_signature,
+                                        size_t        *o_signature_size,
+                                        const uint8_t *msg_input,
+                                        size_t         msg_size) {
+
+  EVP_MD_CTX *ctx = EVP_MD_CTX_create();
+  if (EVP_DigestSignInit(ctx, NULL, NULL, NULL, keypair) != 1) {
+    return FAITH_ERR_SSL;
+  }
+
+  if (EVP_DigestSign(ctx, NULL, o_signature_size, msg_input,
+                     sizeof(msg_input)) != 1) {
+    EVP_MD_CTX_free(ctx);
+    return FAITH_ERR_SSL;
+  }
+
+  if (*o_signature_size != FAITH_ED25519_SIGNATURE_SIZE) {
+    EVP_MD_CTX_free(ctx);
+    return FAITH_ERR_SSL;
+  }
+
+  if (EVP_DigestSign(ctx, o_signature, o_signature_size, msg_input,
+                     sizeof(msg_size)) != 1) {
+    EVP_MD_CTX_free(ctx);
+    return FAITH_ERR_SSL;
+  }
+
+  EVP_MD_CTX_free(ctx);
+  return FAITH_OK;
+}
+
+faith_status_code_t faith_verify_signature(EVP_PKEY      *public_key,
+                                           const uint8_t *msg_input,
+                                           size_t         msg_size,
+                                           const uint8_t *signature,
+                                           size_t         signature_size) {
+  if(public_key || !msg_input || !signature_size) return FAITH_ERR_INVALID;
+
+  EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+  if (!ctx)
+    return 0;
+
+  if (EVP_DigestVerifyInit(ctx, NULL, EVP_sha256(), NULL, public_key) <= 0)
+    return 0;
+
+  if (EVP_DigestVerifyUpdate(ctx, msg_input, msg_size) <= 0)
+    return 0;
+
+  int rc = EVP_DigestVerifyFinal(ctx, signature, signature_size);
+
+  EVP_MD_CTX_free(ctx);
+  return (rc == 1) ? FAITH_OK : FAITH_ERR_NOT_EQUAL;
 }

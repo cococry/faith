@@ -30,14 +30,14 @@ static bool hex_char_to_nibble(char c, uint8_t *out) {
   return false;
 }
 
-static bool client_id_from_hex(const char *hex, client_id_t *out) {
+static bool client_id_from_hex(const char *hex, faith_client_id_t *out) {
   if (!hex || !out)
     return false;
 
   if (strlen(hex) != FAITH_CLIENT_ID_SIZE * 2)
     return false;
 
-  client_id_t id = {0};
+  faith_client_id_t id = {0};
 
   for (size_t i = 0; i < FAITH_CLIENT_ID_SIZE; ++i) {
     uint8_t hi = 0;
@@ -73,7 +73,7 @@ int main(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 
-  client_id_t recipient_id = FAITH_CLIENT_ID_NONE;
+  faith_client_id_t recipient_id = FAITH_CLIENT_ID_NONE;
 
   if (argc >= 2) {
     if (!client_id_from_hex(argv[1], &recipient_id)) {
@@ -139,7 +139,8 @@ int main(int argc, char **argv) {
             faith_client_send_message(client, recipient_id, line);
 
         if (send_rc != FAITH_OK) {
-          fprintf(stderr, "faith_client_send_message() failed: %s\n", faith_status_code_name(send_rc));
+          fprintf(stderr, "faith_client_send_message() failed: %s\n",
+                  faith_status_code_name(send_rc));
         }
         printf("You: %s\n", line);
       }
@@ -164,6 +165,10 @@ int main(int argc, char **argv) {
           printf("Mista: %s\n", ev.chat_message);
           printf("> ");
           fflush(stdout);
+        } else {
+          if(strlen(ev.message) != 0) {
+            printf("GOT MESSAGE: %s\n", ev.message);
+          }
         }
       }
       faith_client_free_event(&ev);

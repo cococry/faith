@@ -13,11 +13,12 @@
 
 #define FAITH_CLIENT_ID_SIZE 16
 #define FAITH_DEVICE_ID_SIZE 16
-#define FAITH_CLIENT_ID_NONE ((client_id_t){0})
-#define FAITH_DEVICE_ID_NONE ((device_id_t){0})
+#define FAITH_CLIENT_ID_NONE ((faith_client_id_t){0})
+#define FAITH_DEVICE_ID_NONE ((faith_device_id_t){0})
 
 #define FAITH_ED25519_PUBLIC_KEY_SIZE  32
-#define FAITH_ED25519_PRIVATE_KEY_SIZE  32
+#define FAITH_ED25519_PRIVATE_KEY_SIZE 32
+#define FAITH_ED25519_SIGNATURE_SIZE   64
 
 #define FAITH_HEADER_SIZE                                                      \
   sizeof(uint32_t) /* frame size    */ +                                       \
@@ -31,7 +32,13 @@
    sizeof(uint32_t) /* body size */)
 
 #define FAITH_ENVL_HELLO_BODY_SIZE                                             \
-  sizeof(device_id_t) + FAITH_ED25519_PUBLIC_KEY_SIZE + sizeof(uint64_t)
+  sizeof(faith_device_id_t) + FAITH_ED25519_PUBLIC_KEY_SIZE + sizeof(uint64_t)
+
+#define FAITH_ENVL_HELLO_CHALLENGE_BODY_SIZE sizeof(uint64_t)
+
+#define FAITH_HELLO_HANDSHAKE_SIGNATURE_SIZE                                   \
+  sizeof(faith_client_id_t) + FAITH_ED25519_PUBLIC_KEY_SIZE +                  \
+      sizeof(uint64_t) + sizeof(uint64_t)
 
 #define _FH_CHECK_RETURN(expr)                                                 \
   do {                                                                         \
@@ -78,7 +85,8 @@ typedef struct {
   X(FAITH_ERR_UNAUTHORIZED, 13)                                                \
   X(FAITH_ERR_NOT_FOUND, 14)                                                   \
   X(FAITH_ERR_SSL, 15)                                                         \
-  X(FAITH_ERR_CRYPTO, 16)
+  X(FAITH_ERR_CRYPTO, 16)                                                      \
+  X(FAITH_ERR_NOT_EQUAL, 17)
 
 typedef enum {
 #define X(name, value) name = value,
@@ -118,7 +126,9 @@ typedef enum {
   X(FAITH_ENVELOPE_MSG_SEND, 2)                                                \
   X(FAITH_ENVELOPE_MSG_DELIVER, 3)                                             \
   X(FAITH_ENVELOPE_MSG_ACK, 4)                                                 \
-  X(FAITH_ENVELOPE_MSG_ERR, 5)
+  X(FAITH_ENVELOPE_MSG_ERR, 5)                                                 \
+  X(FAITH_ENVELOPE_CHALLENGE, 6)                                               \
+  X(FAITH_ENVELOPE_CHALLENGE_RESPONSE, 7)
 
 typedef enum {
 #define X(name, value) name = value,
@@ -128,17 +138,17 @@ typedef enum {
 
 typedef struct {
   uint8_t bytes[16];
-} client_id_t;
+} faith_client_id_t;
 
 typedef struct {
   uint8_t bytes[16];
-} device_id_t;
+} faith_device_id_t;
 
 typedef struct {
   faith_envelope_type_t type;
 
-  client_id_t sender_id;
-  client_id_t recipient_id;
+  faith_client_id_t sender_id;
+  faith_client_id_t recipient_id;
 
   uint32_t body_size;
 
@@ -194,16 +204,31 @@ faith_status_code_t faith_decode_envelope(const uint8_t    *payload,
 
 void faith_log_handler(Nob_Log_Level level, const char *fmt, va_list args);
 
-int faith_client_id_equal(client_id_t a, client_id_t b);
-int faith_device_id_equal(device_id_t a, device_id_t b);
+int faith_client_id_equal(faith_client_id_t a, faith_client_id_t b);
+int faith_device_id_equal(faith_device_id_t a, faith_device_id_t b);
 
 faith_status_code_t faith_id128_to_hex(const uint8_t bytes[16], char out[33]);
 
 // OpenSSL wrapper
-faith_status_code_t faith_random_bytes(uint8_t* o_buf, int num);
+faith_status_code_t faith_random_bytes(uint8_t *o_buf, int num);
 
 // OpenSSL wrapper
 faith_status_code_t
 faith_gen_ed25519_keypair(void   *handle,
                           uint8_t private_key[FAITH_ED25519_PRIVATE_KEY_SIZE],
                           uint8_t public_key[FAITH_ED25519_PUBLIC_KEY_SIZE]);
+
+faith_status_code_t
+faith_gen_signing_msg_buf(uint8_t *o_buf, size_t buf_cap,
+                          const faith_client_id_t *client_id,
+                          uint8_t  public_key[FAITH_ED25519_PUBLIC_KEY_SIZE],
+                          uint64_t client_nonce, uint64_t server_nonce);
+
+faith_status_code_t faith_gen_signature(EVP_PKEY* keypair, uint8_t *o_signature,
+                                        size_t        *o_signature_size,
+                                        const uint8_t *msg_input,
+                                        size_t         msg_size);
+
+faith_status_code_t faith_verify_signature( EVP_PKEY *public_key, const uint8_t *msg_input,
+                                        size_t         msg_size,  const uint8_t *signature,
+                                        const size_t        signature_size);
