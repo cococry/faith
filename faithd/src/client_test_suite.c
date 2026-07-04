@@ -166,7 +166,7 @@ int main(int argc, char **argv) {
           printf("> ");
           fflush(stdout);
         } else {
-          if(strlen(ev.message) != 0) {
+          if (strlen(ev.message) != 0) {
             printf("GOT MESSAGE: %s\n", ev.message);
           }
         }
