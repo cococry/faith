@@ -608,10 +608,10 @@ faith_gen_signing_msg_buf(uint8_t *o_buf, size_t buf_cap,
 
   size_t offset = 0;
 
-  memcpy(o_buf, client_id->bytes,
-         sizeof(client_id->bytes));
+  memcpy(o_buf, client_id->bytes, sizeof(client_id->bytes));
   offset += sizeof(client_id->bytes);
-  if(offset > buf_cap) return FAITH_ERR_INVALID;
+  if (offset > buf_cap)
+    return FAITH_ERR_INVALID;
 
   memcpy(o_buf + offset, public_key, FAITH_ED25519_PUBLIC_KEY_SIZE);
   offset += FAITH_ED25519_PUBLIC_KEY_SIZE;
@@ -631,8 +631,7 @@ faith_gen_signing_msg_buf(uint8_t *o_buf, size_t buf_cap,
   return FAITH_OK;
 }
 
-faith_status_code_t faith_gen_signature(EVP_PKEY      *keypair,
-                                        uint8_t      *o_signature,
+faith_status_code_t faith_gen_signature(EVP_PKEY *keypair, uint8_t *o_signature,
                                         size_t        *o_signature_size,
                                         const uint8_t *msg_input,
                                         size_t         msg_size) {
@@ -668,7 +667,8 @@ faith_status_code_t faith_verify_signature(EVP_PKEY      *public_key,
                                            size_t         msg_size,
                                            const uint8_t *signature,
                                            size_t         signature_size) {
-  if(public_key || !msg_input || !signature_size) return FAITH_ERR_INVALID;
+  if (!public_key || !msg_input || !signature_size)
+    return FAITH_ERR_INVALID;
 
   EVP_MD_CTX *ctx = EVP_MD_CTX_new();
   if (!ctx)
@@ -684,4 +684,21 @@ faith_status_code_t faith_verify_signature(EVP_PKEY      *public_key,
 
   EVP_MD_CTX_free(ctx);
   return (rc == 1) ? FAITH_OK : FAITH_ERR_NOT_EQUAL;
+}
+
+faith_status_code_t faith_verify_signature_raw_pubkey(
+    uint8_t public_key[FAITH_ED25519_PUBLIC_KEY_SIZE], const uint8_t *msg_input,
+    size_t msg_size, const uint8_t *signature, const size_t signature_size) {
+  EVP_PKEY *pkey = EVP_PKEY_new_raw_public_key(
+      EVP_PKEY_ED25519, NULL, public_key, FAITH_ED25519_PUBLIC_KEY_SIZE);
+
+  if (pkey == NULL) {
+    return FAITH_ERR_CRYPTO;
+  }
+
+  _FH_CHECK(faith_verify_signature(pkey, msg_input, msg_size, signature,
+                                   signature_size));
+  EVP_PKEY_free(pkey);
+
+  return _fh_rc;
 }

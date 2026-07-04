@@ -37,9 +37,9 @@ void            faith_client_destroy(faith_client_t *client);
 faith_status_code_t faith_client_start(faith_client_t *client);
 faith_status_code_t faith_client_stop(faith_client_t *client);
 
-faith_status_code_t faith_client_send_message(faith_client_t *client,
-                                              faith_client_id_t     recipient_auth_id,
-                                              const char     *msg);
+faith_status_code_t
+faith_client_send_message(faith_client_t   *client,
+                          faith_client_id_t recipient_auth_id, const char *msg);
 
 int faith_client_event_fd(faith_client_t *client);
 

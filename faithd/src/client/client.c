@@ -311,7 +311,7 @@ static void *pinger(void *arg) {
   while (atomic_load(&client->connected) && client_is_running(client)) {
     uint64_t sent_at_ms = faith_now_ms();
     uint64_t nonce;
-    _FH_CHECK(faith_random_bytes((uint8_t*)&nonce, sizeof(nonce)));
+    _FH_CHECK(faith_random_bytes((uint8_t *)&nonce, sizeof(nonce)));
     if (_fh_rc != FAITH_OK) {
       goto fail;
     }
@@ -540,9 +540,12 @@ static faith_status_code_t faith_client_send_hello(faith_client_t *client) {
 
   /* 3. Serialize nonce */
   uint64_t nonce;
-  _FH_CHECK_RETURN(faith_random_bytes((uint8_t*)&nonce, sizeof(nonce)));
+  _FH_CHECK_RETURN(faith_random_bytes((uint8_t *)&nonce, sizeof(nonce)));
 
   _FH_CHECK_RETURN(faith_write_u64_be(body + offset, nonce));
+
+  /* Store nonce in temporary client state */
+  client->nonce_tmp = nonce;
 
   faith_envelope_t envl = {0};
   envl.type = FAITH_ENVELOPE_HELLO;
@@ -578,20 +581,26 @@ static faith_status_code_t faith_client_send_hello(faith_client_t *client) {
   return _fh_rc;
 }
 
-static faith_status_code_t client_handle_challenge(faith_client_t* client, faith_envelope_t* challenge_envl) {
+static faith_status_code_t
+client_handle_challenge(faith_client_t   *client,
+                        faith_envelope_t *challenge_envl) {
 
-  int ok = challenge_envl->type == FAITH_ENVELOPE_CHALLENGE && challenge_envl->body_size == FAITH_ENVL_HELLO_CHALLENGE_BODY_SIZE;
+  int ok = challenge_envl->type == FAITH_ENVELOPE_CHALLENGE &&
+           challenge_envl->body_size == FAITH_ENVL_HELLO_CHALLENGE_BODY_SIZE;
   if (!ok) {
     client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
                       "Unexpected or malformed HELLO envelope response");
     return FAITH_ERR_INVALID;
   }
-  if(!faith_client_id_equal(challenge_envl->recipient_id, client->ident.auth_id)) {
+  if (!faith_client_id_equal(challenge_envl->recipient_id,
+                             client->ident.auth_id)) {
     char auth_id_hex[33];
     char recipient_id_hex[33];
 
-    _FH_CHECK_RETURN(faith_id128_to_hex(client->ident.auth_id.bytes, auth_id_hex));
-    _FH_CHECK_RETURN(faith_id128_to_hex(challenge_envl->recipient_id.bytes, recipient_id_hex));
+    _FH_CHECK_RETURN(
+        faith_id128_to_hex(client->ident.auth_id.bytes, auth_id_hex));
+    _FH_CHECK_RETURN(faith_id128_to_hex(challenge_envl->recipient_id.bytes,
+                                        recipient_id_hex));
 
     char msg[512];
     snprintf(msg, sizeof(msg),
@@ -607,7 +616,7 @@ static faith_status_code_t client_handle_challenge(faith_client_t* client, faith
 
   uint64_t server_nonce = faith_read_u64_be(challenge_envl->body);
 
-  /* 2. Construct message buffer for signature generation  
+  /* 2. Construct message buffer for signature generation
    *    Message Buffer {
    *      client_id,
    *      public_key,
@@ -629,12 +638,12 @@ static faith_status_code_t client_handle_challenge(faith_client_t* client, faith
   /* 3. Generating the 64 byte cryptographic signature from the message buffer
    */
   uint8_t signature[FAITH_ED25519_SIGNATURE_SIZE];
-  size_t signature_size;
+  size_t  signature_size;
   {
 
     _FH_CHECK(faith_gen_signature(client->ident.keypair, signature,
                                   &signature_size, msg_buf, sizeof(msg_buf)));
-    if(_fh_rc != FAITH_OK) {
+    if (_fh_rc != FAITH_OK) {
       client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
                         "Failed to generate signature.");
       return FAITH_ERR_CRYPTO;
@@ -868,6 +877,54 @@ faith_status_code_t faith_client_init_global(int log_enable_tracing) {
   return FAITH_OK;
 }
 
+static bool hex_char_to_nibble(char c, uint8_t *out) {
+  if (!out)
+    return false;
+
+  if (c >= '0' && c <= '9') {
+    *out = (uint8_t)(c - '0');
+    return true;
+  }
+
+  if (c >= 'a' && c <= 'f') {
+    *out = (uint8_t)(c - 'a' + 10);
+    return true;
+  }
+
+  if (c >= 'A' && c <= 'F') {
+    *out = (uint8_t)(c - 'A' + 10);
+    return true;
+  }
+
+  return false;
+}
+
+static bool client_id_from_hex(const char *hex, faith_client_id_t *out) {
+  if (!hex || !out)
+    return false;
+
+  if (strlen(hex) != FAITH_CLIENT_ID_SIZE * 2)
+    return false;
+
+  faith_client_id_t id = {0};
+
+  for (size_t i = 0; i < FAITH_CLIENT_ID_SIZE; ++i) {
+    uint8_t hi = 0;
+    uint8_t lo = 0;
+
+    if (!hex_char_to_nibble(hex[i * 2 + 0], &hi))
+      return false;
+
+    if (!hex_char_to_nibble(hex[i * 2 + 1], &lo))
+      return false;
+
+    id.bytes[i] = (uint8_t)((hi << 4) | lo);
+  }
+
+  *out = id;
+  return true;
+}
+
 static faith_status_code_t client_new_identity(client_identity_t *o_ident) {
   if (!o_ident)
     return FAITH_ERR_INVALID;
@@ -1024,9 +1081,10 @@ faith_status_code_t faith_client_stop(faith_client_t *client) {
   return FAITH_OK;
 }
 
-faith_status_code_t faith_client_send_message(faith_client_t *client,
-                                              faith_client_id_t     recipient_auth_id,
-                                              const char     *msg) {
+faith_status_code_t
+faith_client_send_message(faith_client_t   *client,
+                          faith_client_id_t recipient_auth_id,
+                          const char       *msg) {
   if (!client ||
       faith_client_id_equal(recipient_auth_id, FAITH_CLIENT_ID_NONE) || !msg)
     return FAITH_ERR_INVALID;
