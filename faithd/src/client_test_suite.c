@@ -155,7 +155,15 @@ int main(int argc, char **argv) {
                    strcmp(line, "no") == 0 || strcmp(line, "NO") == 0) {
           pending_device_link_request = false;
 
-          printf("Device link ignored.\n");
+          faith_status_code_t deny_rc =
+              faith_client_deny_pending_device_auth(client);
+
+          if (deny_rc != FAITH_OK) {
+            fprintf(stderr, "faith_client_deny_device_link() failed: %s\n",
+                    faith_status_code_name(deny_rc));
+          } else {
+            printf("Device link denied.\n");
+          }
         } else {
           printf("Please answer y or n.\n");
           printf("(y)es/n(o) ? ");

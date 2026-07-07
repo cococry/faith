@@ -1059,6 +1059,32 @@ static bool client_id_from_hex(const char *hex, faith_client_id_t *out) {
   return true;
 }
 
+static bool device_id_from_hex(const char *hex, faith_device_id_t*out) {
+  if (!hex || !out)
+    return false;
+
+  if (strlen(hex) != FAITH_DEVICE_ID_SIZE* 2)
+    return false;
+
+  faith_device_id_t id = {0};
+
+  for (size_t i = 0; i < FAITH_DEVICE_ID_SIZE; ++i) {
+    uint8_t hi = 0;
+    uint8_t lo = 0;
+
+    if (!hex_char_to_nibble(hex[i * 2 + 0], &hi))
+      return false;
+
+    if (!hex_char_to_nibble(hex[i * 2 + 1], &lo))
+      return false;
+
+    id.bytes[i] = (uint8_t)((hi << 4) | lo);
+  }
+
+  *out = id;
+  return true;
+}
+
 static faith_status_code_t client_new_identity(client_identity_t *o_ident) {
   if (!o_ident)
     return FAITH_ERR_INVALID;
@@ -1301,17 +1327,13 @@ faith_status_code_t faith_client_free_event(faith_event_t *ev) {
   return FAITH_OK;
 }
 
-faith_status_code_t
-faith_client_approve_pending_device_auth(faith_client_t *client) {
-  if (!client)
-    return FAITH_ERR_INVALID;
+static faith_status_code_t 
+client_gen_device_auth_respone_signature(faith_client_t *client,
+                                         const faith_client_device_link_req_t* req,
+                                         uint8_t o_signature[FAITH_ED25519_SIGNATURE_SIZE],
+                                         size_t* o_signature_size) {
+  if(!client || !req || !o_signature || !o_signature_size) return FAITH_ERR_INVALID;
 
-  faith_client_device_link_req_t* req = client->pending_device_link_req;
-  if (!req) {
-    nob_log(ERROR, "[client] Cannot approve pending device authorization; No "
-                   "authorization pending.");
-    return FAITH_ERR_INVALID;
-  }
   /* Construct message buffer for signature generation
    *    Message Buffer {
    *      auth_id,
@@ -1339,52 +1361,80 @@ faith_client_approve_pending_device_auth(faith_client_t *client) {
         msg_buf, sizeof(msg_buf), &sign_msg));
 
     if (_fh_rc != FAITH_OK) {
-      nob_log(ERROR, "Failed to generate DEVICE_AUTH_APPROVE signing "
-                     "message buffer.");
+      nob_log(ERROR, "Failed to generate signing message buffer for device "
+                     "auth response.");
 
       return _fh_rc;
     }
   }
 
-  /* Generating the 64 byte cryptographic signature from the message buffer
-   */
+  /* Generating the 64 byte cryptographic signature from the message buffer */
+
+  /* This returns FAITH_ERR_SSL if signature_size !=
+   * FAITH_ED25519_SIGNATURE_SIZE */
+  _FH_CHECK(faith_gen_signature(client->ident.keypair, o_signature,
+                                o_signature_size, msg_buf, sizeof(msg_buf)));
+  if (_fh_rc != FAITH_OK) {
+    nob_log(ERROR, "Failed to generate signature for DEVICE_AUTH_APPROE.");
+    return _fh_rc;
+  }
+
+  return FAITH_OK;
+}
+
+faith_status_code_t
+faith_client_approve_pending_device_auth(faith_client_t *client) {
+  if (!client)
+    return FAITH_ERR_INVALID;
+
+  faith_client_device_link_req_t *req = client->pending_device_link_req;
+  if (!req) {
+    nob_log(ERROR, "[client] Cannot approve pending device authorization; No "
+                   "authorization pending.");
+    return FAITH_ERR_INVALID;
+  }
+
   uint8_t signature[FAITH_ED25519_SIGNATURE_SIZE];
   size_t  signature_size = 0;
-  {
 
-    /* This returns FAITH_ERR_SSL if signature_size !=
-     * FAITH_ED25519_SIGNATURE_SIZE */
-    _FH_CHECK(faith_gen_signature(client->ident.keypair, signature,
-                                  &signature_size, msg_buf, sizeof(msg_buf)));
-    if (_fh_rc != FAITH_OK) {
-      nob_log(ERROR, "Failed to generate signature for DEVICE_AUTH_APPROE.");
-      return _fh_rc;
-    }
-  }
+  faith_status_code_t _fh_result = FAITH_OK;
+  _FH_CHECK_DEFER(client_gen_device_auth_respone_signature(
+      client, req, signature, &signature_size));
+
+  /* Serialize faith_client_device_link_response_t */
+
+  faith_client_device_link_response_t response_body = {0};
+  response_body.device_id_new = req->device_id_new;
+  memcpy(response_body.signature_response, signature, signature_size);
+
+  size_t  body_size = 0;
+  uint8_t body[sizeof(response_body)];
+
+  _FH_CHECK_DEFER(faith_encode_device_link_response(
+      body, &body_size, sizeof(body), &response_body));
 
   faith_envelope_t approval_envl = {0};
   approval_envl.type = FAITH_ENVELOPE_DEVICE_AUTH_APPROVE;
 
-  /* Serialize faith_client_device_link_approval_t */
-
-  faith_client_device_link_approval_t approval_body = {0};
-  approval_body.device_id_new = req->device_id_new;
-  memcpy(approval_body.signature_approval, signature, signature_size);
-
-  size_t  body_size = 0;
-  uint8_t body[sizeof(approval_body)];
-
-  faith_encode_device_link_approval(body, &body_size, sizeof(body),
-                                    &approval_body);
-
   approval_envl.body = body;
   approval_envl.body_size = body_size;
 
+  _FH_CHECK_DEFER(client_send_envelope_locked(client, &approval_envl));
+
   /* Free allocated pending device link request */
   free(client->pending_device_link_req);
+  /* Finish the pending device link request */
   client->pending_device_link_req = NULL;
 
-  return client_send_envelope_locked(client, &approval_envl);
+  return FAITH_OK;
+
+defer: {
+  /* This frees the allocated pending device link request */
+  _FH_CHECK(faith_client_deny_pending_device_auth(client));
+
+  _fh_result = _fh_result == FAITH_OK ? _fh_rc : _fh_result;
+  return _fh_result;
+}
 }
 
 faith_status_code_t
@@ -1392,11 +1442,45 @@ faith_client_deny_pending_device_auth(faith_client_t *client) {
   if (!client)
     return FAITH_ERR_INVALID;
 
-  if (!client->pending_device_link_req) {
+  faith_client_device_link_req_t *req = client->pending_device_link_req;
+  if (!req) {
     nob_log(ERROR, "[client] Cannot deny pending device authorization; No "
                    "authorization pending.");
     return FAITH_ERR_INVALID;
   }
 
-  return FAITH_OK;
+  uint8_t signature[FAITH_ED25519_SIGNATURE_SIZE];
+  size_t  signature_size = 0;
+
+  faith_status_code_t _fh_result = FAITH_OK;
+  _FH_CHECK_DEFER(client_gen_device_auth_respone_signature(
+      client, req, signature, &signature_size));
+
+  /* Serialize faith_client_device_link_response_t */
+
+  faith_client_device_link_response_t response_body = {0};
+  response_body.device_id_new = req->device_id_new;
+  memcpy(response_body.signature_response, signature, signature_size);
+
+  size_t  body_size = 0;
+  uint8_t body[sizeof(response_body)];
+
+  faith_encode_device_link_response(body, &body_size, sizeof(body),
+                                    &response_body);
+
+  faith_envelope_t approval_envl = {0};
+  approval_envl.type = FAITH_ENVELOPE_DEVICE_AUTH_DENY;
+
+  approval_envl.body = body;
+  approval_envl.body_size = body_size;
+
+  _FH_CHECK_DEFER(client_send_envelope_locked(client, &approval_envl));
+
+defer:
+  /* Free allocated pending device link request */
+  free(client->pending_device_link_req);
+  /* Finish the pending device link request */
+  client->pending_device_link_req = NULL;
+
+  return _fh_result;
 }

@@ -116,7 +116,8 @@ typedef struct {
   X(FAITH_ERR_CRYPTO, 16)                                                      \
   X(FAITH_ERR_NOT_EQUAL, 17)                                                   \
   X(FAITH_ERR_NOT_CONNECTED, 18)                                               \
-  X(FAITH_ERR_EXPIRED, 19)
+  X(FAITH_ERR_EXPIRED, 19)                                                     \
+  X(FAITH_ERR_UNREACHABLE, 20)
 
 typedef enum {
 #define X(name, value) name = value,
@@ -206,10 +207,10 @@ typedef struct {
 } faith_client_device_link_req_t;
 
 typedef struct {
-  uint8_t           signature_approval[FAITH_ED25519_SIGNATURE_SIZE];
+  uint8_t           signature_response[FAITH_ED25519_SIGNATURE_SIZE];
   faith_device_id_t device_id_new;
 
-} faith_client_device_link_approval_t;
+} faith_client_device_link_response_t;
 
 typedef struct {
   faith_client_id_t auth_id;
@@ -291,13 +292,13 @@ faith_status_code_t
 faith_decode_device_link_req(const uint8_t *payload, size_t payload_size,
                              faith_client_device_link_req_t *o_req);
 
-faith_status_code_t faith_encode_device_link_approval(
+faith_status_code_t faith_encode_device_link_response(
     uint8_t *out_buf, size_t *out_size, size_t buf_cap_in_bytes,
-    const faith_client_device_link_approval_t *approval);
+    const faith_client_device_link_response_t *response);
 
-faith_status_code_t faith_decode_device_link_approval(
+faith_status_code_t faith_decode_device_link_response(
     const uint8_t *payload, size_t payload_size,
-    faith_client_device_link_approval_t *o_approval);
+    faith_client_device_link_response_t *o_response);
 
 void faith_log_handler(Nob_Log_Level level, const char *fmt, va_list args);
 
