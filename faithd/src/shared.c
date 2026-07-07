@@ -599,55 +599,55 @@ faith_decode_device_link_req(const uint8_t *payload, size_t payload_size,
   return FAITH_OK;
 }
 
-faith_status_code_t faith_encode_device_link_approval(
+faith_status_code_t faith_encode_device_link_response(
     uint8_t *out_buf, size_t *out_size, size_t buf_cap_in_bytes,
-    const faith_client_device_link_approval_t *approval) {
-  if (!out_buf || !out_size || !approval)
+    const faith_client_device_link_response_t *response) {
+  if (!out_buf || !out_size || !response)
     return FAITH_ERR_INVALID;
 
-  const size_t approval_size = sizeof(faith_client_device_link_approval_t);
+  const size_t response_size = sizeof(faith_client_device_link_response_t);
 
-  if (buf_cap_in_bytes < approval_size)
+  if (buf_cap_in_bytes < response_size)
     return FAITH_ERR_OVERFLOW;
 
   size_t offset = 0;
 
   FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset,
-                      approval->signature_approval,
-                      sizeof(approval->signature_approval));
+                      response->signature_response,
+                      sizeof(response->signature_response));
 
   FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset,
-                      approval->device_id_new.bytes,
-                      sizeof(approval->device_id_new.bytes));
+                      response->device_id_new.bytes,
+                      sizeof(response->device_id_new.bytes));
 
-  *out_size = approval_size;
+  *out_size = response_size;
 
   return FAITH_OK;
 }
 
-faith_status_code_t faith_decode_device_link_approval(
+faith_status_code_t faith_decode_device_link_response(
     const uint8_t *payload, size_t payload_size,
-    faith_client_device_link_approval_t *o_approval) {
-  if (!o_approval)
+    faith_client_device_link_response_t*o_response) {
+  if (!o_response)
     return FAITH_ERR_INVALID;
 
-  memset(o_approval, 0, sizeof(*o_approval));
+  memset(o_response, 0, sizeof(*o_response));
 
   if (!payload)
     return payload_size == 0 ? FAITH_ERR_BAD_FRAME : FAITH_ERR_INVALID;
 
-  if (payload_size < sizeof(faith_client_device_link_approval_t))
+  if (payload_size < sizeof(faith_client_device_link_response_t))
     return FAITH_ERR_BAD_FRAME;
 
   size_t offset = 0;
 
   FAITH_DECODE_RETURN(payload, payload_size, offset,
-                      o_approval->signature_approval,
-                      sizeof(o_approval->signature_approval));
+                      o_response->signature_response,
+                      sizeof(o_response->signature_response));
 
   FAITH_DECODE_RETURN(payload, payload_size, offset,
-                      o_approval->device_id_new.bytes,
-                      sizeof(o_approval->device_id_new.bytes));
+                      o_response->device_id_new.bytes,
+                      sizeof(o_response->device_id_new.bytes));
 
   return FAITH_OK;
 }

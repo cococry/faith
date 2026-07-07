@@ -368,45 +368,47 @@ static void routing_destroy(struct routing_state_t *rt) {
 }
 
 static faith_status_code_t close_client(struct server_state_t *s,
-                                        struct client_conn_t  *cl) {
+                                        struct client_conn_t  **cl) {
   if (!cl)
     return FAITH_ERR_INVALID;
 
   /* Unlink client from linked list of clients */
-  server_remove_client(s, cl);
+  server_remove_client(s, *cl);
 
-  if (cl->authorized) {
-    _FH_CHECK(routing_unregister_session(&s->rt, &cl->auth_id, &cl->device_id));
+  if ((*cl)->authorized) {
+    _FH_CHECK(routing_unregister_session(&s->rt, &(*cl)->auth_id, &(*cl)->device_id));
   }
 
-  epoll_ctl(s->epoll_fd, EPOLL_CTL_DEL, cl->fd, NULL);
+  epoll_ctl(s->epoll_fd, EPOLL_CTL_DEL, (*cl)->fd, NULL);
 
-  if (cl->ssl) {
-    SSL_set_shutdown(cl->ssl, SSL_SENT_SHUTDOWN | SSL_RECEIVED_SHUTDOWN);
-    SSL_free(cl->ssl);
-    cl->ssl = NULL;
+  if ((*cl)->ssl) {
+    SSL_set_shutdown((*cl)->ssl, SSL_SENT_SHUTDOWN | SSL_RECEIVED_SHUTDOWN);
+    SSL_free((*cl)->ssl);
+    (*cl)->ssl = NULL;
   }
 
-  int log_fd = cl->fd;
-  if (cl->fd >= 0) {
-    close(cl->fd);
-    cl->fd = -1;
+  int log_fd = (*cl)->fd;
+  if ((*cl)->fd >= 0) {
+    close((*cl)->fd);
+    (*cl)->fd = -1;
   }
 
-  if (cl->out_buf != NULL) {
-    free(cl->out_buf);
-    cl->out_buf = NULL;
+  if ((*cl)->out_buf != NULL) {
+    free((*cl)->out_buf);
+    (*cl)->out_buf = NULL;
   }
 
-  if (cl->in_buf != NULL) {
-    free(cl->in_buf);
-    cl->in_buf = NULL;
+  if ((*cl)->in_buf != NULL) {
+    free((*cl)->in_buf);
+    (*cl)->in_buf = NULL;
   }
 
-  nob_log(INFO, "[client=%" PRIu64 " fd=%i]: Closed client", cl->conn_id,
+  nob_log(INFO, "[client=%" PRIu64 " fd=%i]: Closed client", (*cl)->conn_id,
           log_fd);
 
-  free(cl);
+  free((*cl));
+
+  *cl = NULL;
 
   return FAITH_OK;
 }
@@ -455,7 +457,8 @@ void server_destroy(struct server_state_t *s) {
   }
 
   while (s->clients) {
-    close_client(s, s->clients);
+    struct client_conn_t *cl = s->clients;
+    close_client(s, &cl);
   }
 
   routing_destroy(&s->rt);
@@ -1219,10 +1222,10 @@ reject: {
 }
 
 static faith_status_code_t
-server_handle_device_link_approval(struct server_state_t  *s,
+server_handle_device_link_response(struct server_state_t  *s,
                                    struct client_conn_t   *cl,
-                                   const faith_envelope_t *approval_envl) {
-  if (!s || !cl || !approval_envl)
+                                   const faith_envelope_t *response_envl) {
+  if (!s || !cl || !response_envl)
     return FAITH_ERR_INVALID;
 
   faith_status_code_t _fh_result = FAITH_OK;
@@ -1233,27 +1236,44 @@ server_handle_device_link_approval(struct server_state_t  *s,
   if (!req || !req_cl) {
     nob_log(ERROR,
             "[client=%" PRIu64
-            " fd=%i] Server got DEVICE_AUTH_APPROVE but there is no "
+            " fd=%i] Server got %s but there is no "
             "device link request pending. Rejecting envelope.",
-            cl->conn_id, cl->fd);
+            cl->conn_id, cl->fd, faith_envelope_name(response_envl->type));
     return FAITH_ERR_INVALID;
   }
 
-  if (approval_envl->type != FAITH_ENVELOPE_DEVICE_AUTH_APPROVE) {
+  if (response_envl->type != FAITH_ENVELOPE_DEVICE_AUTH_APPROVE &&
+      response_envl->type != FAITH_ENVELOPE_DEVICE_AUTH_DENY) {
     nob_log(ERROR,
             "[client=%" PRIu64 " fd=%i] Invalid envelope type. Expected "
-            "FAITH_ENVELOPE_DEVICE_AUTH_APPROVE, got %s",
-            cl->conn_id, cl->fd, faith_envelope_name(approval_envl->type));
+            "FAITH_ENVELOPE_DEVICE_AUTH_APPROVE or "
+            "FAITH_ENVELOPE_DEVICE_AUTH_DENY, got %s",
+            cl->conn_id, cl->fd, faith_envelope_name(response_envl->type));
     return FAITH_ERR_INVALID;
   }
 
-  if (!approval_envl->body ||
-      approval_envl->body_size != sizeof(faith_client_device_link_approval_t)) {
+  if (!response_envl->body ||
+      response_envl->body_size != sizeof(faith_client_device_link_response_t)) {
     nob_log(ERROR,
             "[client=%" PRIu64
-            " fd=%i] Server got invalid DEVICE_AUTH_APPROVE envelope contents.",
-            cl->conn_id, cl->fd);
+            " fd=%i] Server got invalid %s envelope contents.",
+            cl->conn_id, cl->fd, faith_envelope_name(response_envl->type));
     return FAITH_ERR_INVALID;
+  }
+
+  if (!req_cl || req_cl->fd < 0 || req_cl->state != CLIENT_OPEN) {
+    char req_auth_id_hex[33];
+    char req_device_id_hex[33];
+    _FH_CHECK_RETURN(faith_id128_to_hex(req->auth_id.bytes, req_auth_id_hex));
+    _FH_CHECK_RETURN(
+        faith_id128_to_hex(req->device_id_new.bytes, req_device_id_hex));
+
+    nob_log(INFO,
+            "[client=%" PRIu64 " fd=%i] Client that requested"
+            "their device (device_id=%s) to be linked to auth_id=%s has "
+            "already been closed.",
+            cl->conn_id, cl->fd, req_auth_id_hex, req_device_id_hex);
+    return FAITH_OK;
   }
 
   if (!cl->authorized) {
@@ -1263,47 +1283,49 @@ server_handle_device_link_approval(struct server_state_t  *s,
     _FH_CHECK_RETURN(faith_id128_to_hex(cl->device_id.bytes, device_id_hex));
 
     nob_log(ERROR,
-            "[client=%" PRIu64
-            " fd=%i] Server got unauthorized DEVICE_AUTH_APPROVE "
+            "[client=%" PRIu64 " fd=%i] Server got unauthorized %s"
             "from client. Client (auth_id=%s, device_id=%s) is not authorized.",
-            cl->conn_id, cl->fd, auth_id_hex, device_id_hex);
+            cl->conn_id, cl->fd, faith_envelope_name(response_envl->type),
+            auth_id_hex, device_id_hex);
 
     /* Return UNAUTHORIZED without rejecting/closing the client connection that
-     * requested the device link. */
+     * requested the device link. We are protecting the pending client
+     * connection here. */
     return FAITH_ERR_UNAUTHORIZED;
   }
 
   if (cl->state != CLIENT_OPEN) {
     nob_log(ERROR,
-            "[client=%" PRIu64 " fd=%i] Server got invalid DEVICE_AUTH_APPROVE "
+            "[client=%" PRIu64 " fd=%i] Server got invalid %s"
             "from client. Authorizing client is not in OPEN state.",
-            cl->conn_id, cl->fd);
+            cl->conn_id, cl->fd, faith_envelope_name(response_envl->type));
 
     /* Return INVALID without rejecting/closing the client connection that
-     * requested the device link. */
+     * requested the device link. We are protecting the pending client
+     * connection here. */
     return FAITH_ERR_INVALID;
   }
 
   if (faith_now_ms() > cl->pending_device_link_req->expires_at_ms) {
     nob_log(ERROR,
-            "[client=%" PRIu64 " fd=%i] Server got DEVICE_AUTH_APPROVE but the "
+            "[client=%" PRIu64 " fd=%i] Server got %s but the "
             "link request has already expired.",
-            cl->conn_id, cl->fd);
+            cl->conn_id, cl->fd, faith_envelope_name(response_envl->type));
 
     /* Reject the requesting client conection if the request has expired. */
     _FH_RETURN_DEFER(FAITH_ERR_EXPIRED);
   }
 
-  faith_client_device_link_approval_t approval = {0};
-  _FH_CHECK_RETURN(faith_decode_device_link_approval(
-      approval_envl->body, approval_envl->body_size, &approval));
+  faith_client_device_link_response_t response = {0};
+  _FH_CHECK_RETURN(faith_decode_device_link_response(
+      response_envl->body, response_envl->body_size, &response));
 
-  if (!faith_device_id_equal(approval.device_id_new, req->device_id_new)) {
+  if (!faith_device_id_equal(response.device_id_new, req->device_id_new)) {
     nob_log(
         ERROR,
-        "[client=%" PRIu64 " fd=%i] Server got DEVICE_AUTH_APPROVE but the sent"
+        "[client=%" PRIu64 " fd=%i] Server got %s but the sent"
         "device_id does not match the device_id that requested the approval.",
-        cl->conn_id, cl->fd);
+        cl->conn_id, cl->fd, faith_envelope_name(response_envl->type));
 
     /* Return INVALID without rejecting/closing the client connection that
      * requested the device link. */
@@ -1317,7 +1339,7 @@ server_handle_device_link_approval(struct server_state_t  *s,
    *      public_key_new_device,
    *      code,
    *      expires_at_ms,
-   *      device_id_approving (device ID of the approving device)
+   *      device_id_approving (device ID of the responding device)
    *    } */
 
   faith_signature_device_link_approval_t sign_msg = {0};
@@ -1337,8 +1359,10 @@ server_handle_device_link_approval(struct server_state_t  *s,
                                                       &sign_msg));
 
     if (_fh_rc != FAITH_OK) {
-      nob_log(ERROR, "Failed to generate DEVICE_AUTH_APPROVE signing "
-                     "message buffer.");
+      nob_log(ERROR,
+              "Failed to generate %s signing "
+              "message buffer.",
+              faith_envelope_name(response_envl->type));
 
       /* Return _fh_rc without rejecting/closing the client connection that
        * requested the device link. */
@@ -1347,9 +1371,12 @@ server_handle_device_link_approval(struct server_state_t  *s,
   }
 
   struct client_device_session_data_t *sess = NULL;
-  /* We specifically need routing_get_session() to return FAITH_OK. */
   {
     _FH_CHECK(routing_get_session(&s->rt, &cl->auth_id, &cl->device_id, &sess));
+    /* We specifically need routing_get_session() to return FAITH_OK. This is
+     * returned only if <cl->auth_id> is a registered client_route_user_t
+     * and <cl->device_id> is a registered client_route_device_t of that user.
+     * */
     if (_fh_rc != FAITH_OK) {
       _fh_result = _fh_rc;
       /* Reject the requesting client conection if the authorized connection
@@ -1360,16 +1387,16 @@ server_handle_device_link_approval(struct server_state_t  *s,
 
   /* This means cl->auth_id is registered but cl->device_id is not, effectively
    * telling us that the client connection is not yet authorized. Because we
-   * checked cl->authorized above, this should never happend with correct
+   * checked cl->authorized above, this should never happen with correct
    * behaviour.*/
   if (!sess) {
     nob_log(ERROR,
             "[client=%" PRIu64
-            " fd=%i] Server got DEVICE_AUTH_APPROVE but client connection that "
+            " fd=%i] Server got %s but client connection that "
             "sent the envelope does not have registered session data. "
             "However, the client connection IS authorized, so there is "
             "probably a deeper issue.",
-            cl->conn_id, cl->fd);
+            cl->conn_id, cl->fd, faith_envelope_name(response_envl->type));
     return FAITH_ERR_INVALID;
   }
 
@@ -1378,7 +1405,7 @@ server_handle_device_link_approval(struct server_state_t  *s,
   {
     _FH_CHECK(faith_verify_signature_raw_pubkey(
         sess->ident.public_key, msg_buf, sizeof(msg_buf),
-        approval.signature_approval, sizeof(approval.signature_approval)));
+        response.signature_response, sizeof(response.signature_response)));
 
     verification_rc = _fh_rc;
   }
@@ -1390,31 +1417,43 @@ server_handle_device_link_approval(struct server_state_t  *s,
                          : verification_rc);
   }
 
-  /* =============================== */
-  /* Client passed authorization */
-  /* =============================== */
+  /* ======================================== */
+  /* Client proved their legitimacy to us. */
+  /* ======================================== */
 
-  _FH_CHECK_DEFER(server_authorize_client(s, req_cl, &req->auth_id,
-                                           &req->device_id_new,
-                                           req->public_key_new_device, 1));
+  faith_status_code_t rc = FAITH_OK;
+  switch(response_envl->type) {
+    case FAITH_ENVELOPE_DEVICE_AUTH_DENY: 
+      rc = close_client(s, &req_cl);
+      break;
+    case FAITH_ENVELOPE_DEVICE_AUTH_APPROVE:
+      _FH_CHECK_DEFER(server_authorize_client(s, req_cl, &req->auth_id,
+                                              &req->device_id_new,
+                                              req->public_key_new_device, 1));
+      break;
+    default:
+      return FAITH_ERR_UNREACHABLE;
+  }
 
   /* Remove the pending device link request */
   free(cl->pending_device_link_req);
   cl->pending_device_link_req = NULL;
 
-  return FAITH_OK;
+  return rc;
 
 defer: {
+  /* ================================================= */
+  /* Client failed to proved their legitimacy to us.
+   * This path punishes the pending client that  
+   * requested to be linked to this auth_id. */
+  /* ================================================= */
 
-  /* =============================== */
-  /* Client failed authorization */
-  /* =============================== */
-
+  /* Copies for logging*/
   faith_client_id_t client_id = req->auth_id;
   faith_device_id_t device_id_new = req->device_id_new;
 
   /* Close the connection that requested the device link */
-  close_client(s, req_cl);
+  close_client(s, &req_cl);
 
   /* Remove the pending device link request */
   free(cl->pending_device_link_req);
@@ -1564,8 +1603,9 @@ static faith_status_code_t server_handle_envl(struct server_state_t *s,
     rc = _fh_rc;
     break;
   }
-  case FAITH_ENVELOPE_DEVICE_AUTH_APPROVE: {
-    _FH_CHECK(server_handle_device_link_approval(s, cl, &envl));
+  case FAITH_ENVELOPE_DEVICE_AUTH_APPROVE: 
+  case FAITH_ENVELOPE_DEVICE_AUTH_DENY: {
+    _FH_CHECK(server_handle_device_link_response(s, cl, &envl));
     rc = _fh_rc;
     break;
   }
@@ -1918,7 +1958,7 @@ static void accept_clients(struct server_state_t *s) {
     if (!cl->ssl) {
       nob_log(ERROR, "SSL_new() failed for client connection (FD: %i)",
               client_fd);
-      _FH_CHECK(close_client(s, cl));
+      _FH_CHECK(close_client(s, &cl));
       continue;
     }
 
@@ -1936,7 +1976,7 @@ static void accept_clients(struct server_state_t *s) {
     if (epoll_ctl(s->epoll_fd, EPOLL_CTL_ADD, client_fd, &ev) < 0) {
       nob_log(ERROR, "epoll_ctl() failed for client (FD: %i): %s", client_fd,
               strerror(errno));
-      _FH_CHECK(close_client(s, cl));
+      _FH_CHECK(close_client(s, &cl));
       continue;
     }
   }
@@ -2069,30 +2109,30 @@ int loop(struct server_state_t *s) {
         continue;
       }
 
-      struct client_conn_t *c = events[i].data.ptr;
+      struct client_conn_t *cl = events[i].data.ptr;
 
       if (revents & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
-        _FH_CHECK(close_client(s, c));
+        _FH_CHECK(close_client(s, &cl));
         continue;
       }
 
       int dead = 0;
 
-      if (c->state == CLIENT_HANDSHAKE) {
-        if (drive_tls_handshake(s, c) < 0)
+      if (cl->state == CLIENT_HANDSHAKE) {
+        if (drive_tls_handshake(s, cl) < 0)
           dead = 1;
-      } else if (c->state == CLIENT_OPEN ||
-                 c->state == CLIENT_WAIT_FOR_HELLO_ACK) {
-        if ((revents & EPOLLIN) && drive_client_read(s, c, &s->cfg) < 0)
+      } else if (cl->state == CLIENT_OPEN ||
+                 cl->state == CLIENT_WAIT_FOR_HELLO_ACK) {
+        if ((revents & EPOLLIN) && drive_client_read(s, cl, &s->cfg) < 0)
           dead = 1;
 
         if (!dead && (revents & EPOLLOUT) &&
-            flush_client_output(s->epoll_fd, c) < 0)
+            flush_client_output(s->epoll_fd, cl) < 0)
           dead = 1;
       }
 
       if (dead) {
-        _FH_CHECK(close_client(s, c));
+        _FH_CHECK(close_client(s, &cl));
       }
     }
   }
