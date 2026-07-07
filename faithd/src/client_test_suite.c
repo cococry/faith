@@ -1,4 +1,5 @@
 #include "client/client.h"
+#include "shared.h"
 
 #include <errno.h>
 #include <poll.h>
@@ -95,6 +96,8 @@ int main(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 
+  bool pending_device_link_request = false;
+
   printf("Type messages and press Enter. Type /quit to exit.\n");
 
   printf("> ");
@@ -134,6 +137,37 @@ int main(int argc, char **argv) {
         break;
       }
 
+      if (pending_device_link_request) {
+        if (strcmp(line, "y") == 0 || strcmp(line, "Y") == 0 ||
+            strcmp(line, "yes") == 0 || strcmp(line, "YES") == 0) {
+          pending_device_link_request = false;
+
+          faith_status_code_t approve_rc =
+              faith_client_approve_pending_device_auth(client);
+
+          if (approve_rc != FAITH_OK) {
+            fprintf(stderr, "faith_client_approve_device_link() failed: %s\n",
+                    faith_status_code_name(approve_rc));
+          } else {
+            printf("Device link approved.\n");
+          }
+        } else if (strcmp(line, "n") == 0 || strcmp(line, "N") == 0 ||
+                   strcmp(line, "no") == 0 || strcmp(line, "NO") == 0) {
+          pending_device_link_request = false;
+
+          printf("Device link ignored.\n");
+        } else {
+          printf("Please answer y or n.\n");
+          printf("(y)es/n(o) ? ");
+          fflush(stdout);
+          continue;
+        }
+
+        printf("> ");
+        fflush(stdout);
+        continue;
+      }
+
       if (line[0] != '\0') {
         faith_status_code_t send_rc =
             faith_client_send_message(client, recipient_id, line);
@@ -166,8 +200,23 @@ int main(int argc, char **argv) {
           printf("> ");
           fflush(stdout);
         } else {
+          if (ev.type == FAITH_EVENT_PONG)
+            continue;
+
+          printf("Got event: %s", faith_event_name(ev.type));
           if (strlen(ev.message) != 0) {
-            printf("GOT MESSAGE: %s\n", ev.message);
+            printf(" message => %s\n", ev.message);
+          } else {
+            printf("\n");
+          }
+
+          if (ev.type == FAITH_EVENT_DEVICE_LINK_REQUEST) {
+            pending_device_link_request = true;
+            printf("(y)es/n(o) ? ");
+            fflush(stdout);
+          } else {
+            printf("> ");
+            fflush(stdout);
           }
         }
       }

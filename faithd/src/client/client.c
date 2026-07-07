@@ -68,11 +68,14 @@ struct faith_client {
   uint16_t      ev_queue_back;
   uint16_t      ev_queue_len;
 
-  SSL *ssl;
+  SSL     *ssl;
+  SSL_CTX *ssl_ctx;
 
   uint16_t proto_ver;
 
   client_identity_t ident;
+
+  faith_client_device_link_req_t *pending_device_link_req;
 
   uint64_t nonce_tmp;
 };
@@ -88,7 +91,8 @@ client_push_event_ex(faith_client_t *client, faith_event_type_t type,
 
   /* Enqueue event */
 
-  if (client->ev_queue_len == MAX_QUEUED_EVENTS) {
+  if (client->ev_queue_len == MAX_QUEUED_EVENTS ||
+      client->ev_queue_back > MAX_QUEUED_EVENTS - 1) {
     pthread_mutex_unlock(&client->lock);
     nob_log(ERROR, "Event queue overflow.");
     return FAITH_ERR_OVERFLOW;
@@ -251,6 +255,108 @@ static SSL_CTX *client_create_ssl_ctx(faith_client_t *client) {
   return ctx;
 }
 
+static SSL *client_create_ssl_conn(faith_client_t *client, SSL_CTX *ctx,
+                                   int sockfd) {
+  if (!client || !ctx || sockfd < 0)
+    return NULL;
+
+  SSL *ssl = NULL;
+
+  ssl = SSL_new(ctx);
+  if (ssl == NULL) {
+    nob_log(ERROR, "Failed to create SSL object for client");
+    return NULL;
+  }
+
+  if (SSL_set_fd(ssl, sockfd) != 1) {
+    nob_log(ERROR, "Failed to set FD of SSL connection for client");
+    return NULL;
+  }
+
+  if (!client->insecure_skip_verify && client->server_name[0] != '\0') {
+    if (SSL_set_tlsext_host_name(ssl, client->server_name) != 1) {
+      nob_log(ERROR, "Failed to set TLS hostname to '%s'", client->server_name);
+      return NULL;
+    }
+
+    if (SSL_set1_host(ssl, client->server_name) != 1) {
+      nob_log(ERROR, "Failed to set TLS hostname to '%s'", client->server_name);
+      return NULL;
+    }
+  }
+
+  if (SSL_connect(ssl) <= 0) {
+    nob_log(ERROR, "TLS handshake failed");
+    return NULL;
+  }
+
+  return ssl;
+}
+
+static void client_cleanup_connection(faith_client_t *client) {
+  if (!client) {
+    return;
+  }
+
+  pthread_mutex_lock(&client->write_lock);
+
+  if (client->ssl) {
+    SSL_free(client->ssl);
+    client->ssl = NULL;
+  }
+
+  if (client->ssl_ctx) {
+    SSL_CTX_free(client->ssl_ctx);
+    client->ssl_ctx = NULL;
+  }
+
+  pthread_mutex_unlock(&client->write_lock);
+
+  pthread_mutex_lock(&client->lock);
+  int fd = client->sockfd;
+  client->sockfd = -1;
+  pthread_mutex_unlock(&client->lock);
+
+  if (fd >= 0) {
+    close(fd);
+  }
+}
+
+static faith_status_code_t client_init_ssl(faith_client_t *client) {
+  if (!client)
+    return FAITH_ERR_INVALID;
+
+  int fd = client_init_sock(client->host, client->port);
+
+  if (fd < 0) {
+    client_push_event(client, FAITH_EVENT_ERROR, 0, 0,
+                      "Client connection failed. Server down?");
+    return FAITH_ERR_IO;
+  }
+
+  pthread_mutex_lock(&client->lock);
+  client->sockfd = fd;
+  pthread_mutex_unlock(&client->lock);
+
+  SSL_CTX *ctx = NULL;
+  ctx = client_create_ssl_ctx(client);
+  if (!ctx) {
+    client_push_event(client, FAITH_EVENT_ERROR, 0, 0,
+                      "TLS context creation failed");
+    return FAITH_ERR_SSL;
+  }
+  SSL *ssl = client_create_ssl_conn(client, ctx, fd);
+  if (!ssl) {
+    client_push_event(client, FAITH_EVENT_ERROR, 0, 0, "TLS connection failed");
+    return FAITH_ERR_SSL;
+  }
+
+  client->ssl = ssl;
+  client->ssl_ctx = ctx;
+
+  return FAITH_OK;
+}
+
 static faith_status_code_t encode_ping(uint8_t *out_buf, size_t *out_size,
                                        size_t buf_cap_in_bytes, uint64_t nonce,
                                        uint64_t sent_at_ms) {
@@ -381,42 +487,90 @@ static void client_handle_pong(faith_client_t *client, faith_frame_t *frame) {
   }
 }
 
-static void client_handle_envl(faith_client_t *client, faith_frame_t *frame) {
+static faith_status_code_t client_handle_envl(faith_client_t *client,
+                                              faith_frame_t  *frame) {
   faith_envelope_t envl;
   _FH_CHECK(faith_decode_envelope(frame->payload, frame->payload_size, &envl));
-
   switch (envl.type) {
   case FAITH_ENVELOPE_MSG_SEND: {
     if (!faith_client_id_equal(envl.recipient_id, client->ident.auth_id) ||
-        _fh_rc != FAITH_OK ||
         faith_client_id_equal(envl.sender_id, FAITH_CLIENT_ID_NONE)) {
-      nob_log(ERROR, "[client - reader] Got sent invalid message envelope.");
-      break;
+      nob_log(ERROR, "[client - reader] Got sent invalid MESSAGE envelope.");
+      return _fh_rc;
     }
 
     if (envl.body_size > FAITH_MAX_MSG_SIZE) {
       nob_log(ERROR, "[client - reader] Got sent too large message.");
-      break;
+      return FAITH_ERR_OVERFLOW;
     }
     char *msg = malloc(envl.body_size + 1);
     if (!msg) {
       nob_log(
           ERROR,
           "[client - reader] Failed to allocate memory for received message.");
-      break;
+      return FAITH_ERR_NOMEM;
     }
 
     memcpy(msg, envl.body, envl.body_size);
     msg[envl.body_size] = '\0';
 
-    _FH_CHECK(client_push_event_ex(client, FAITH_EVENT_MESSAGE_RECEIVED, 0, 0,
-                                   NULL, msg, envl.body_size));
+    _FH_CHECK_RETURN(client_push_event_ex(client, FAITH_EVENT_MESSAGE_RECEIVED,
+                                          0, 0, NULL, msg, envl.body_size));
 
+    break;
+  }
+  case FAITH_ENVELOPE_DEVICE_LINK_REQUEST: {
+    /* Client-side rejection of multiple pending device link requests. TOOD:
+     * This has to also be server enforced.*/
+    if (client->pending_device_link_req != NULL) {
+      if(g_log_enable_tracing) {
+        nob_log(WARNING, "[client - reader] Rejecting new DEVICE_LINK_REQUEST; "
+                         "A link request is already pending for this client.");
+      }
+      return FAITH_OK;
+    }
+
+    if (!faith_client_id_equal(envl.recipient_id, client->ident.auth_id)) {
+      char recipient_id_hex[33];
+      char auth_id_hex[33];
+      _FH_CHECK_RETURN(
+          faith_id128_to_hex(envl.recipient_id.bytes, recipient_id_hex));
+      _FH_CHECK_RETURN(
+          faith_id128_to_hex(client->ident.auth_id.bytes, auth_id_hex));
+
+      nob_log(ERROR,
+              "[client - reader] Got sent invalid DEVICE_LINK_REQUEST envelope. Expected "
+              "envelope recipient_id to be %s but got %s.",
+              auth_id_hex, recipient_id_hex);
+      return _fh_rc;
+    }
+
+    // Allocate pending device link request 
+    faith_client_device_link_req_t* req = calloc(1, sizeof(*req));
+    _FH_CHECK_RETURN(faith_decode_device_link_req(envl.body, envl.body_size, req));
+
+    client->pending_device_link_req = req;
+
+    char msg[512];
+    char device_id_hex[33];
+
+    _FH_CHECK_RETURN(
+        faith_id128_to_hex(req->device_id_new.bytes, device_id_hex));
+
+    snprintf(msg, sizeof(msg),
+             "A new device requested to log in (device_id=%s). Accept?",
+             device_id_hex);
+
+    _FH_CHECK_RETURN(client_push_event_ex(client,
+                                          FAITH_EVENT_DEVICE_LINK_REQUEST, 0, 0,
+                                          msg, NULL, envl.body_size));
     break;
   }
   default:
     break;
   }
+
+  return FAITH_OK;
 }
 
 static void *reader(void *arg) {
@@ -438,6 +592,7 @@ static void *reader(void *arg) {
       break;
     }
     case FAITH_MSG_ENVL: {
+      printf("HANDLING ENVELOPE.\n");
       client_handle_envl(client, &frame);
       break;
     }
@@ -508,6 +663,34 @@ static faith_status_code_t client_send_envelope(SSL                    *ssl,
   return rc;
 }
 
+static faith_status_code_t
+client_send_envelope_locked(faith_client_t         *client,
+                            const faith_envelope_t *envl) {
+  if (!client || !envl) {
+    return FAITH_ERR_INVALID;
+  }
+
+  pthread_mutex_lock(&client->write_lock);
+
+  if (!atomic_load(&client->connected) || !client->ssl) {
+    pthread_mutex_unlock(&client->write_lock);
+    return FAITH_ERR_NOT_CONNECTED;
+  }
+
+  _FH_CHECK(client_send_envelope(client->ssl, envl));
+  faith_status_code_t rc = _fh_rc;
+
+  if (rc != FAITH_OK) {
+    nob_log(ERROR,
+            "[client] Failed to send envelope (type=%s, body_size=%" PRIu32
+            ") to server.",
+            faith_envelope_name(envl->type), envl->body_size);
+  }
+
+  pthread_mutex_unlock(&client->write_lock);
+  return rc;
+}
+
 static faith_status_code_t faith_client_send_hello(faith_client_t *client) {
   if (!client)
     return FAITH_ERR_INVALID;
@@ -554,44 +737,33 @@ static faith_status_code_t faith_client_send_hello(faith_client_t *client) {
          sizeof(envl.sender_id));
 
   envl.body = body;
-  printf("Envl body size: %zu\n", sizeof(body));
   envl.body_size = sizeof(body);
 
-  char auth_id_hex[33];
-  char device_id_hex[33];
-  _FH_CHECK_RETURN(
-      faith_id128_to_hex(client->ident.auth_id.bytes, auth_id_hex));
-  _FH_CHECK_RETURN(
-      faith_id128_to_hex(client->ident.device_id.bytes, device_id_hex));
-
-  printf("CLIENT AUTH ID: %s\n", auth_id_hex);
-  printf("DEVICE AUTH ID: %s\n", device_id_hex);
-
-  printf("PUBKEY =====================\n");
-  for (size_t i = 0; i < FAITH_ED25519_PUBLIC_KEY_SIZE; i++) {
-    printf("%02x", (unsigned int)client->ident.public_key[i]);
-  }
-  printf("\n");
-  printf("===========================\n");
-
-  pthread_mutex_lock(&client->write_lock);
-  _FH_CHECK(client_send_envelope(client->ssl, &envl));
-  pthread_mutex_unlock(&client->write_lock);
-
-  return _fh_rc;
+  return client_send_envelope_locked(client, &envl);
 }
 
 static faith_status_code_t
 client_handle_challenge(faith_client_t   *client,
                         faith_envelope_t *challenge_envl) {
+  if (!client || !challenge_envl)
+    return FAITH_ERR_INVALID;
 
   int ok = challenge_envl->type == FAITH_ENVELOPE_CHALLENGE &&
+           challenge_envl->body &&
            challenge_envl->body_size == FAITH_ENVL_HELLO_CHALLENGE_BODY_SIZE;
   if (!ok) {
-    client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
-                      "Unexpected or malformed HELLO envelope response");
+    nob_log(ERROR,
+            "Unexpected or malformed server envelope response to HELLO "
+            "envelope. Expected: "
+            "type=FAITH_ENVELOPE_CHALLENGE, body_size=%" PRIu32
+            ", Got: type=%s, body_size=%" PRIu32,
+            FAITH_ENVL_HELLO_CHALLENGE_BODY_SIZE,
+            faith_envelope_name(challenge_envl->type),
+            challenge_envl->body_size);
     return FAITH_ERR_INVALID;
   }
+
+  /* Bail if the CHALLENGE recipient ID does not equal the client auth ID */
   if (!faith_client_id_equal(challenge_envl->recipient_id,
                              client->ident.auth_id)) {
     char auth_id_hex[33];
@@ -602,17 +774,15 @@ client_handle_challenge(faith_client_t   *client,
     _FH_CHECK_RETURN(faith_id128_to_hex(challenge_envl->recipient_id.bytes,
                                         recipient_id_hex));
 
-    char msg[512];
-    snprintf(msg, sizeof(msg),
-             "Invalid Auth ID in CHALLENGE envelope. Auth ID (%s) does not "
-             "match our own one (%s).",
-             recipient_id_hex, auth_id_hex);
-    client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0, msg);
+    nob_log(ERROR,
+            "Invalid Auth ID in CHALLENGE envelope. Recipient auth ID (%s) "
+            "does not "
+            "match our own one (%s).",
+            recipient_id_hex, auth_id_hex);
     return FAITH_ERR_INVALID;
   }
 
-  /* 1. Read CHALLENGE from server, 64 bit integer of server nonce in envelope
-   * body. */
+  /* 1. Read CHALLENGE contents from server: 64 bit integer server nonce */
 
   uint64_t server_nonce = faith_read_u64_be(challenge_envl->body);
 
@@ -623,191 +793,162 @@ client_handle_challenge(faith_client_t   *client,
    *      client_nonce,
    *      server_nonce
    *    } */
-  uint8_t msg_buf[FAITH_HELLO_HANDSHAKE_SIGNATURE_SIZE];
+
+  faith_signature_hello_handshake_t sign_msg = {0};
+
+  sign_msg.auth_id = client->ident.auth_id;
+
+  memcpy(sign_msg.public_key, client->ident.public_key,
+         FAITH_ED25519_PUBLIC_KEY_SIZE);
+
+  sign_msg.client_nonce = client->nonce_tmp;
+  sign_msg.server_nonce = server_nonce;
+
+  uint8_t msg_buf[sizeof(sign_msg)];
   {
-    _FH_CHECK(faith_gen_signing_msg_buf(
-        msg_buf, sizeof(msg_buf), &client->ident.auth_id,
-        client->ident.public_key, client->nonce_tmp, server_nonce));
+    _FH_CHECK(faith_gen_sign_buf_hello_handshake(msg_buf, sizeof(msg_buf),
+                                                 &sign_msg));
+
     if (_fh_rc != FAITH_OK) {
-      client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
-                        "Failed to generate signing message buffer.");
-      return FAITH_ERR_CRYPTO;
+      nob_log(ERROR,
+              "Failed to generate HELLO handshake signing message buffer.");
+      return _fh_rc;
     }
   }
 
   /* 3. Generating the 64 byte cryptographic signature from the message buffer
    */
   uint8_t signature[FAITH_ED25519_SIGNATURE_SIZE];
-  size_t  signature_size;
+  size_t  signature_size = 0;
   {
 
+    /* This returns FAITH_ERR_SSL if signature_size !=
+     * FAITH_ED25519_SIGNATURE_SIZE */
     _FH_CHECK(faith_gen_signature(client->ident.keypair, signature,
                                   &signature_size, msg_buf, sizeof(msg_buf)));
     if (_fh_rc != FAITH_OK) {
-      client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
-                        "Failed to generate signature.");
-      return FAITH_ERR_CRYPTO;
+      nob_log(ERROR, "Failed to generate signature for CHALLENGE_RESPONSE.");
+      return _fh_rc;
     }
   }
 
   /* 4. Send CHALLENGE_RESPONSE back to server. Contains 64 byte client
    * signature in envelope body*/
 
-  printf("SIGNATURE =====================\n");
-  for (size_t i = 0; i < FAITH_ED25519_SIGNATURE_SIZE; i++) {
-    printf("%02x", (unsigned int)signature[i]);
-  }
-  printf("\n");
-  printf("========================[i]===\n");
+  faith_envelope_t envl = {0};
+  envl.type = FAITH_ENVELOPE_CHALLENGE_RESPONSE;
+  envl.sender_id = client->ident.auth_id;
 
-  faith_envelope_t challenge_response_envl;
-  challenge_response_envl.type = FAITH_ENVELOPE_CHALLENGE_RESPONSE;
-  challenge_response_envl.sender_id = client->ident.auth_id;
+  envl.body = signature;
+  envl.body_size = sizeof(signature);
 
-  challenge_response_envl.body = signature;
-  challenge_response_envl.body_size = sizeof(signature);
-
-  {
-    pthread_mutex_lock(&client->write_lock);
-    _FH_CHECK(client_send_envelope(client->ssl, &challenge_response_envl));
-    pthread_mutex_unlock(&client->write_lock);
-  }
-
-  return FAITH_OK;
+  return client_send_envelope_locked(client, &envl);
 }
 
 static faith_status_code_t client_make_handshake(faith_client_t *client) {
   if (!client)
     return FAITH_ERR_INVALID;
+
   if (g_log_enable_tracing)
     nob_log(INFO, "[client] Sending HELLO...");
 
-  {
-    _FH_CHECK(faith_client_send_hello(client));
-    if (_fh_rc == FAITH_OK) {
-      if (g_log_enable_tracing)
-        nob_log(INFO, "[client] Sent HELLO.");
-    } else {
-      client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
-                        "Failed to send HELLO");
-      return _fh_rc;
-    }
-  }
+  faith_status_code_t _fh_result = FAITH_OK;
+
+  /* 1. Send HELLO envelope to the server */
+  _FH_CHECK_RETURN(faith_client_send_hello(client));
 
   if (g_log_enable_tracing)
-    nob_log(INFO, "[client] Waiting for server HELLO_OK response ...");
+    nob_log(INFO, "[client] Sent HELLO.");
+
+  /* 2. Wait for server response by synchronously reading the next server
+   * frame. An evelope frame of type CHALLENGE is expected. */
+  if (g_log_enable_tracing)
+    nob_log(INFO, "[client] Waiting for server CHALLENGE response ...");
 
   faith_frame_t frame = {0};
 
-  {
-    _FH_CHECK(faith_read_frame_sync(client->ssl, &frame));
-    if (_fh_rc != FAITH_OK) {
-      client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
-                        "Failed to read HELLO response");
-      return _fh_rc;
-    }
-  }
+  _FH_CHECK_RETURN(faith_read_frame_sync(client->ssl, &frame));
 
-  if (frame.msg_type != FAITH_MSG_ENVL) {
-    faith_frame_free(&frame);
-    client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
-                      "Unexpected HELLO response");
-    return FAITH_ERR_INVALID;
-  }
+  if (frame.msg_type != FAITH_MSG_ENVL)
+    _FH_RETURN_DEFER(FAITH_ERR_INVALID);
 
+  printf("GOT SENT CHALLENGE.\n");
   faith_envelope_t envl;
-  {
-    _FH_CHECK(faith_decode_envelope(frame.payload, frame.payload_size, &envl));
-  }
+  _FH_CHECK_DEFER(
+      faith_decode_envelope(frame.payload, frame.payload_size, &envl));
 
-  {
-    _FH_CHECK(client_handle_challenge(client, &envl));
-    if (_fh_rc != FAITH_OK) {
-      faith_frame_free(&frame);
-      return _fh_rc;
-    }
-  }
+  /* 3. Handle the CHALLENGE envelope sent by the server. This verifies the type
+   * of the envelope (ensures CHALLENGE). */
+  _FH_CHECK_DEFER(client_handle_challenge(client, &envl));
 
-  if (g_log_enable_tracing)
-    nob_log(INFO, "[client] Got HELLO_OK response. Server acknowledged client "
-                  "successfully");
+  faith_frame_free(&frame);
+
+  /* ========================== */
+  /* Read next frame */
+  /* ========================== */
+
+  printf("Waiting for new frame...\n");
+  _FH_CHECK_RETURN(faith_read_frame_sync(client->ssl, &frame));
+  printf("Got new frame...\n");
+
+  _FH_CHECK_DEFER(
+      faith_decode_envelope(frame.payload, frame.payload_size, &envl));
+
+  switch (envl.type) {
+  case FAITH_ENVELOPE_HELLO_OK: {
+    /* Authorization successful */
+    if (g_log_enable_tracing)
+      nob_log(INFO,
+              "[client] Got HELLO_OK response. Server acknowledged client "
+              "successfully.");
+    _FH_RETURN_DEFER(FAITH_OK);
+  }
+  case FAITH_ENVELOPE_DEVICE_AUTH_PENDING: {
+    if (g_log_enable_tracing)
+      nob_log(
+          INFO,
+          "Device authorization pending. Waiting for an already authorization "
+          "device to respond to the request.");
+    _FH_RETURN_DEFER(FAITH_OK);
+  }
+  default:
+    nob_log(ERROR,
+            "Received invalid server envelope response to "
+            "CHALLENGE_RESPONSE. Got %s",
+            faith_envelope_name(envl.type));
+    _FH_RETURN_DEFER(FAITH_ERR_INVALID);
+  }
 
   return FAITH_OK;
+
+defer:
+  faith_frame_free(&frame);
+  return _fh_result;
 }
 
 static void *faith_client_thread_routine(void *arg) {
   faith_client_t *client = arg;
-
-  uint32_t backoff_ms = 250;
+  uint32_t        backoff_ms = 250;
 
   while (client_is_running(client)) {
     {
       _FH_CHECK(client_push_event(client, FAITH_EVENT_CONNECTING, 0, 0, NULL));
     }
 
-    int fd = client_init_sock(client->host, client->port);
-
-    if (fd < 0) {
-      _FH_CHECK(client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
-                                  "Connect failed. Server down?"));
-      _sleep_ms(backoff_ms);
-      backoff_ms = client_next_backoff_ms(backoff_ms);
-      continue;
-    }
-
-    pthread_mutex_lock(&client->lock);
-    client->sockfd = fd;
-    pthread_mutex_unlock(&client->lock);
-
-    SSL_CTX *ctx = NULL;
-    SSL     *ssl = NULL;
-
-    ctx = client_create_ssl_ctx(client);
-    if (!ctx) {
-      client_push_event(client, FAITH_EVENT_ERROR, 0, 0, "TLS context failed");
-      goto fail;
-    }
-
-    ssl = SSL_new(ctx);
-    if (ssl == NULL) {
-      nob_log(ERROR, "Failed to create SSL object for client");
-      goto fail;
-    }
-
-    if (SSL_set_fd(ssl, fd) != 1) {
-      nob_log(ERROR, "Failed to set FD of SSL connection for client");
-      goto fail;
-    }
-
-    if (!client->insecure_skip_verify && client->server_name[0] != '\0') {
-      if (SSL_set_tlsext_host_name(ssl, client->server_name) != 1) {
-        nob_log(ERROR, "Failed to set TLS hostname to '%s'",
-                client->server_name);
-        goto fail;
-      }
-
-      if (SSL_set1_host(ssl, client->server_name) != 1) {
-        nob_log(ERROR, "Failed to set TLS hostname to '%s'",
-                client->server_name);
+    /* Init SSL for client connection (SSL* and SSL_CTX*) */
+    {
+      _FH_CHECK(client_init_ssl(client));
+      if (_fh_rc != FAITH_OK) {
+        ERR_print_errors_fp(stderr);
         goto fail;
       }
     }
 
-    client->ssl = ssl;
+    atomic_store(&client->connected, true);
 
-    if (SSL_connect(ssl) <= 0) {
-      nob_log(ERROR, "TLS handshake failed");
-      goto fail;
-    }
     backoff_ms = 250;
 
-    {
-      _FH_CHECK(client_push_event(client, FAITH_EVENT_CONNECTED, 0, 0, NULL));
-      if (_fh_rc != FAITH_OK) {
-        goto fail;
-      }
-    }
-
+    /* Make protocol handshake with server */
     {
       _FH_CHECK(client_make_handshake(client));
       if (_fh_rc != FAITH_OK) {
@@ -815,8 +956,20 @@ static void *faith_client_thread_routine(void *arg) {
       }
     }
 
+    /* If successful, push CONNECTED event */
+    {
+      _FH_CHECK(client_push_event(client, FAITH_EVENT_CONNECTED, 0, 0, NULL));
+      if (_fh_rc != FAITH_OK) {
+        goto fail;
+      }
+    }
+
+    /* Main client loop, starts reader_thread and pinger_thread */
     client_run_connected(client);
 
+    atomic_store(&client->connected, false);
+
+    /* Send DISCONNECTED event when client closed */
     {
       _FH_CHECK(client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
                                   "connection closed"));
@@ -826,26 +979,7 @@ static void *faith_client_thread_routine(void *arg) {
     }
 
   fail:
-    ERR_print_errors_fp(stderr);
-
-    if (ssl) {
-      SSL_shutdown(ssl);
-      SSL_free(ssl);
-      ssl = NULL;
-      client->ssl = NULL;
-    }
-
-    if (ctx) {
-      SSL_CTX_free(ctx);
-      ctx = NULL;
-    }
-
-    close(fd);
-
-    pthread_mutex_lock(&client->lock);
-    client->ssl = NULL;
-    client->sockfd = -1;
-    pthread_mutex_unlock(&client->lock);
+    client_cleanup_connection(client);
 
     if (client_is_running(client)) {
       _sleep_ms(backoff_ms);
@@ -930,8 +1064,7 @@ static faith_status_code_t client_new_identity(client_identity_t *o_ident) {
     return FAITH_ERR_INVALID;
 
   /* Generate 128 bit random device & auth identities */
-  _FH_CHECK_RETURN(faith_random_bytes(o_ident->auth_id.bytes,
-                                      sizeof(o_ident->auth_id.bytes)));
+  client_id_from_hex("88d9296cf57e1538fc16c8a3f6c64567", &o_ident->auth_id);
 
   _FH_CHECK_RETURN(faith_random_bytes(o_ident->device_id.bytes,
                                       sizeof(o_ident->device_id.bytes)));
@@ -939,6 +1072,16 @@ static faith_status_code_t client_new_identity(client_identity_t *o_ident) {
   /* Generate client identity keypair */
   _FH_CHECK_RETURN(faith_gen_ed25519_keypair(
       &o_ident->keypair, o_ident->private_key, o_ident->public_key));
+
+  if(g_log_enable_tracing) {
+    char auth_id_hex[33];
+    char device_id_hex[33];
+    _FH_CHECK_RETURN(faith_id128_to_hex(o_ident->auth_id.bytes, auth_id_hex));
+    _FH_CHECK_RETURN(
+        faith_id128_to_hex(o_ident->device_id.bytes, device_id_hex));
+    nob_log(INFO, "[faith] Generated new client identity (auth_id=%s, device_id=%s).",
+        auth_id_hex, device_id_hex);
+  }
 
   return FAITH_OK;
 }
@@ -1059,24 +1202,40 @@ faith_status_code_t faith_client_start(faith_client_t *client) {
 }
 
 faith_status_code_t faith_client_stop(faith_client_t *client) {
-  if (!client)
+  if (!client) {
     return FAITH_ERR_INVALID;
+  }
+
+  if (pthread_equal(pthread_self(), client->thread)) {
+    nob_log(ERROR, "faith_client_stop called from client thread."
+                   "Use faith_client_cleanup_connection instead.");
+    return FAITH_ERR_INVALID;
+  }
 
   pthread_mutex_lock(&client->lock);
+
   int was_running = client->running;
   client->running = 0;
+  int fd = client->sockfd;
+
   pthread_mutex_unlock(&client->lock);
 
-  if (was_running) {
-    pthread_mutex_lock(&client->lock);
-    int fd = client->sockfd;
-    pthread_mutex_unlock(&client->lock);
-    if (fd >= 0) {
-      shutdown(fd, SHUT_RDWR);
-    }
-
-    pthread_join(client->thread, NULL);
+  if (was_running && fd >= 0) {
+    shutdown(fd, SHUT_RDWR);
   }
+
+  if (was_running) {
+    int err = pthread_join(client->thread, NULL);
+    if (err != 0) {
+      nob_log(ERROR,
+              "Failed to join client thread during client stop: "
+              "pthread_join returned %d.",
+              err);
+      return FAITH_ERR_THREAD;
+    }
+  }
+
+  client_cleanup_connection(client);
 
   return FAITH_OK;
 }
@@ -1101,11 +1260,7 @@ faith_client_send_message(faith_client_t   *client,
   envl.body_size = msg_size;
   envl.body = (uint8_t *)msg;
 
-  pthread_mutex_lock(&client->write_lock);
-  faith_status_code_t rc = client_send_envelope(client->ssl, &envl);
-  pthread_mutex_unlock(&client->write_lock);
-
-  return rc;
+  return client_send_envelope_locked(client, &envl);
 }
 
 int faith_client_event_fd(faith_client_t *client) {
@@ -1142,6 +1297,106 @@ faith_status_code_t faith_client_free_event(faith_event_t *ev) {
   free(ev->chat_message);
 
   memset(ev, 0, sizeof(*ev));
+
+  return FAITH_OK;
+}
+
+faith_status_code_t
+faith_client_approve_pending_device_auth(faith_client_t *client) {
+  if (!client)
+    return FAITH_ERR_INVALID;
+
+  faith_client_device_link_req_t* req = client->pending_device_link_req;
+  if (!req) {
+    nob_log(ERROR, "[client] Cannot approve pending device authorization; No "
+                   "authorization pending.");
+    return FAITH_ERR_INVALID;
+  }
+  /* Construct message buffer for signature generation
+   *    Message Buffer {
+   *      auth_id,
+   *      device_id_new,
+   *      public_key_new_device,
+   *      code,
+   *      expires_at_ms,
+   *      device_id_approving (device ID of the approving device)
+   *    } */
+
+  faith_signature_device_link_approval_t sign_msg = {0};
+  sign_msg.auth_id = req->auth_id;
+  sign_msg.device_id_new = req->device_id_new;
+
+  memcpy(sign_msg.public_key_new_device, req->public_key_new_device,
+         FAITH_ED25519_PUBLIC_KEY_SIZE);
+  memcpy(sign_msg.code, req->code, sizeof(req->code));
+
+  sign_msg.expires_at_ms = req->expires_at_ms;
+  sign_msg.device_id_approving = client->ident.device_id;
+
+  uint8_t msg_buf[sizeof(faith_signature_device_link_approval_t)];
+  {
+    _FH_CHECK(faith_gen_sign_buf_device_link_approval(
+        msg_buf, sizeof(msg_buf), &sign_msg));
+
+    if (_fh_rc != FAITH_OK) {
+      nob_log(ERROR, "Failed to generate DEVICE_AUTH_APPROVE signing "
+                     "message buffer.");
+
+      return _fh_rc;
+    }
+  }
+
+  /* Generating the 64 byte cryptographic signature from the message buffer
+   */
+  uint8_t signature[FAITH_ED25519_SIGNATURE_SIZE];
+  size_t  signature_size = 0;
+  {
+
+    /* This returns FAITH_ERR_SSL if signature_size !=
+     * FAITH_ED25519_SIGNATURE_SIZE */
+    _FH_CHECK(faith_gen_signature(client->ident.keypair, signature,
+                                  &signature_size, msg_buf, sizeof(msg_buf)));
+    if (_fh_rc != FAITH_OK) {
+      nob_log(ERROR, "Failed to generate signature for DEVICE_AUTH_APPROE.");
+      return _fh_rc;
+    }
+  }
+
+  faith_envelope_t approval_envl = {0};
+  approval_envl.type = FAITH_ENVELOPE_DEVICE_AUTH_APPROVE;
+
+  /* Serialize faith_client_device_link_approval_t */
+
+  faith_client_device_link_approval_t approval_body = {0};
+  approval_body.device_id_new = req->device_id_new;
+  memcpy(approval_body.signature_approval, signature, signature_size);
+
+  size_t  body_size = 0;
+  uint8_t body[sizeof(approval_body)];
+
+  faith_encode_device_link_approval(body, &body_size, sizeof(body),
+                                    &approval_body);
+
+  approval_envl.body = body;
+  approval_envl.body_size = body_size;
+
+  /* Free allocated pending device link request */
+  free(client->pending_device_link_req);
+  client->pending_device_link_req = NULL;
+
+  return client_send_envelope_locked(client, &approval_envl);
+}
+
+faith_status_code_t
+faith_client_deny_pending_device_auth(faith_client_t *client) {
+  if (!client)
+    return FAITH_ERR_INVALID;
+
+  if (!client->pending_device_link_req) {
+    nob_log(ERROR, "[client] Cannot deny pending device authorization; No "
+                   "authorization pending.");
+    return FAITH_ERR_INVALID;
+  }
 
   return FAITH_OK;
 }

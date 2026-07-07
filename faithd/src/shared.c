@@ -22,6 +22,32 @@ inline uint8_t faith_version_patch(uint16_t v) { return (uint8_t)(v & 0x3f); }
 
 const char *faith_strerror(int code) { return strerror(code); }
 
+int faith_buf_append(uint8_t *buf, size_t cap, size_t *offset,
+                            const void *src, size_t len) {
+  if (!buf || !offset || !src)
+    return 0;
+
+  if (*offset > cap || len > cap - *offset)
+    return 0;
+
+  memcpy(buf + *offset, src, len);
+  *offset += len;
+  return 1;
+}
+
+int faith_buf_decode(const uint8_t *buf, size_t size, size_t *offset,
+                            void *dst, size_t len) {
+  if (!buf || !offset || !dst)
+    return 0;
+
+  if (*offset > size || len > size - *offset)
+    return 0;
+
+  memcpy(dst, buf + *offset, len);
+  *offset += len;
+  return 1;
+}
+
 faith_status_code_t faith_write_bytes_sync(SSL *ssl, const uint8_t *buf,
                                            size_t size) {
   if (!ssl || !buf)
@@ -52,30 +78,56 @@ faith_status_code_t faith_write_bytes_sync(SSL *ssl, const uint8_t *buf,
   return FAITH_OK;
 }
 
-faith_status_code_t faith_read_bytes_sync(SSL *ssl, uint8_t *buf, size_t size) {
-  if (!ssl || !buf)
+faith_status_code_t
+faith_read_bytes_sync(SSL *ssl, uint8_t *buf, size_t size) {
+  if (!ssl || !buf) {
     return FAITH_ERR_INVALID;
+  }
 
   size_t total = 0;
 
   while (total < size) {
     size_t nread = 0;
-    int    ok = SSL_read_ex(ssl, buf + total, size - total, &nread);
+    int ok = SSL_read_ex(ssl, buf + total, size - total, &nread);
 
-    if (ok <= 0) {
-      int err = SSL_get_error(ssl, ok);
+    if (ok == 1) {
+      total += nread;
+      continue;
+    }
 
-      if (err == SSL_ERROR_ZERO_RETURN) {
-        fprintf(stderr, "error closed: %li\n", nread);
+    int err = SSL_get_error(ssl, 0);
+
+    nob_log(ERROR,
+            "SSL_read_ex failed: ssl_err=%d, nread=%zu, total=%zu, want=%zu, "
+            "errno=%d (%s)\n",
+            err, nread, total, size - total, errno, strerror(errno));
+
+    switch (err) {
+    case SSL_ERROR_WANT_READ:
+    case SSL_ERROR_WANT_WRITE:
+      continue;
+
+    case SSL_ERROR_ZERO_RETURN:
+      return FAITH_ERR_CLOSED;
+
+    case SSL_ERROR_SYSCALL:
+      return FAITH_ERR_CLOSED;
+
+    case SSL_ERROR_SSL: {
+      unsigned long e = ERR_peek_error();
+
+      if (ERR_GET_REASON(e) == SSL_R_UNEXPECTED_EOF_WHILE_READING) {
+        ERR_clear_error();
         return FAITH_ERR_CLOSED;
       }
 
       ERR_print_errors_fp(stderr);
-      fprintf(stderr, "error io: %li\n", nread);
-      return FAITH_ERR_IO;
+      return FAITH_ERR_SSL;
     }
 
-    total += nread;
+    default:
+      return FAITH_ERR_IO;
+    }
   }
 
   return FAITH_OK;
@@ -105,8 +157,13 @@ faith_status_code_t faith_read_frame_sync(SSL *ssl, faith_frame_t *out) {
   if (frame_size < sizeof(hdr_buf))
     return FAITH_ERR_BAD_FRAME;
 
-  if (frame_size > FAITH_MAX_FRAME_LEN)
+  if (frame_size > FAITH_MAX_FRAME_LEN) {
+    nob_log(ERROR,
+            "Failed to read frame; Frame is too large, "
+            "frame_size=%i MAX_FRAME_LEN=%i",
+            (int32_t)frame_size, (int32_t)FAITH_MAX_FRAME_LEN);
     return FAITH_ERR_FRAME_TOO_LARGE;
+  }
 
   _FH_CHECK_RETURN(faith_read_bytes_sync(ssl, hdr_buf, sizeof(hdr_buf)));
 
@@ -118,8 +175,14 @@ faith_status_code_t faith_read_frame_sync(SSL *ssl, faith_frame_t *out) {
   if (out->proto_ver != FAITH_PROTO_VERSION)
     return FAITH_ERR_UNSUPPORTED_VER;
 
-  if (out->payload_size > FAITH_MAX_PAYLOAD_SIZE)
+  if (out->payload_size > FAITH_MAX_PAYLOAD_SIZE) {
+    nob_log(ERROR,
+            "Failed to read frame; Frame is too large, "
+            "frame_size=%zu MAX_FRAME_LEN=%i",
+            out->payload_size, (int32_t)FAITH_MAX_FRAME_LEN);
+
     return FAITH_ERR_FRAME_TOO_LARGE;
+  }
 
   if (out->payload_size > 0) {
     out->payload = malloc(out->payload_size);
@@ -180,21 +243,44 @@ faith_status_code_t faith_encode_frame(faith_frame_msg_type_t type,
   if (payload_size > 0 && !payload)
     return FAITH_ERR_INVALID;
 
-  if (payload_size > FAITH_MAX_PAYLOAD_SIZE)
+  if (payload_size > FAITH_MAX_PAYLOAD_SIZE) {
+    nob_log(ERROR,
+            "Failed to encode frame to buffer; Frame is too large, "
+            "frame_size=%zu MAX_FRAME_LEN=%i",
+            payload_size, (int32_t)FAITH_MAX_FRAME_LEN);
     return FAITH_ERR_FRAME_TOO_LARGE;
+  }
 
   const size_t header_size_bytes = FAITH_HEADER_SIZE;
 
-  if (payload_size > SIZE_MAX - header_size_bytes)
+  if (payload_size > SIZE_MAX - header_size_bytes) {
+    nob_log(ERROR,
+            "Failed to encode frame to buffer; Frame is too large, "
+            "frame_size=%zu MAX_FRAME_LEN=%i",
+            payload_size, (int32_t)FAITH_MAX_FRAME_LEN);
+
     return FAITH_ERR_FRAME_TOO_LARGE;
+  }
 
   size_t frame_size_size_t = sizeof(uint16_t) + sizeof(uint16_t) + payload_size;
 
-  if (frame_size_size_t > UINT32_MAX)
-    return FAITH_ERR_FRAME_TOO_LARGE;
+  if (frame_size_size_t > UINT32_MAX) {
+    nob_log(ERROR,
+            "Failed to encode frame to buffer; Frame is too large, "
+            "frame_size=%zu MAX_FRAME_LEN=%i",
+            frame_size_size_t, (int32_t)FAITH_MAX_FRAME_LEN);
 
-  if (frame_size_size_t > FAITH_MAX_FRAME_LEN)
     return FAITH_ERR_FRAME_TOO_LARGE;
+  }
+
+  if (frame_size_size_t > FAITH_MAX_FRAME_LEN) {
+    nob_log(ERROR,
+            "Failed to encode frame to buffer; Frame is too large, "
+            "frame_size=%zu MAX_FRAME_LEN=%i",
+            frame_size_size_t, (int32_t)FAITH_MAX_FRAME_LEN);
+
+    return FAITH_ERR_FRAME_TOO_LARGE;
+  }
 
   size_t data_size = header_size_bytes + payload_size;
 
@@ -361,12 +447,11 @@ faith_status_code_t faith_encode_envelope(uint8_t *out_buf, size_t *out_size,
   _FH_CHECK_RETURN(faith_write_u32_be(out_buf + offset, env->type));
   offset += sizeof(uint32_t);
   // Sender (faith_client_id_t -> 16 raw bytes)
-  memcpy(out_buf + offset, env->sender_id.bytes, sizeof(env->sender_id.bytes));
-  offset += sizeof(env->sender_id.bytes);
+  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, env->sender_id.bytes,
+               sizeof(env->sender_id.bytes));
   // Recipient (faith_client_id_t -> 16 raw bytes)
-  memcpy(out_buf + offset, env->recipient_id.bytes,
-         sizeof(env->recipient_id.bytes));
-  offset += sizeof(env->recipient_id.bytes);
+  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, env->recipient_id.bytes,
+               sizeof(env->recipient_id.bytes));
   // Body Size (uint32_t)
   _FH_CHECK_RETURN(faith_write_u32_be(out_buf + offset, env->body_size));
 
@@ -375,7 +460,7 @@ faith_status_code_t faith_encode_envelope(uint8_t *out_buf, size_t *out_size,
 
     if (offset + env->body_size > buf_cap_in_bytes)
       return FAITH_ERR_OVERFLOW;
-    memcpy(out_buf + offset, env->body, env->body_size);
+    FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, env->body, env->body_size);
   }
 
   *out_size = env_size;
@@ -403,13 +488,13 @@ faith_status_code_t faith_decode_envelope(const uint8_t    *payload,
   uint32_t type = faith_read_u32_be(payload + offset);
   offset += sizeof(uint32_t);
   // Sender (faith_client_id_t -> 16 raw bytes)
-  faith_client_id_t sender_id;
-  memcpy(sender_id.bytes, payload + offset, sizeof(sender_id.bytes));
-  offset += sizeof(sender_id.bytes);
+  faith_client_id_t sender_id = {0};
+  FAITH_DECODE_RETURN(payload, payload_size, offset, sender_id.bytes,
+               sizeof(sender_id.bytes));
   // Recipient (faith_client_id_t -> 16 raw bytes)
-  faith_client_id_t recipient_id;
-  memcpy(recipient_id.bytes, payload + offset, sizeof(recipient_id.bytes));
-  offset += sizeof(recipient_id.bytes);
+  faith_client_id_t recipient_id = {0};
+  FAITH_DECODE_RETURN(payload, payload_size, offset, recipient_id.bytes,
+               sizeof(recipient_id.bytes));
   // Body Size (uint32_t)
   uint32_t body_size = faith_read_u32_be(payload + offset);
 
@@ -427,7 +512,7 @@ faith_status_code_t faith_decode_envelope(const uint8_t    *payload,
     if (!body)
       return FAITH_ERR_NOMEM;
 
-    memcpy(body, payload + offset, body_size);
+    FAITH_DECODE_RETURN(payload, payload_size, offset, body, body_size);
   }
 
   *o_envl = (faith_envelope_t){.body_size = body_size,
@@ -435,6 +520,134 @@ faith_status_code_t faith_decode_envelope(const uint8_t    *payload,
                                .recipient_id = recipient_id,
                                .sender_id = sender_id,
                                .type = type};
+
+  return FAITH_OK;
+}
+
+faith_status_code_t
+faith_encode_device_link_req(uint8_t *out_buf, size_t *out_size,
+                             size_t buf_cap_in_bytes,
+                             const faith_client_device_link_req_t *req) {
+  if(!out_buf || !out_size || !req) return FAITH_ERR_INVALID;
+
+  size_t device_link_req_size = sizeof(faith_client_device_link_req_t);
+
+  if(device_link_req_size < buf_cap_in_bytes) 
+    return FAITH_ERR_OVERFLOW;
+
+  size_t offset = 0;
+
+  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, req->auth_id.bytes,
+               sizeof(req->auth_id.bytes));
+
+  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, req->public_key_new_device,
+               sizeof(req->public_key_new_device));
+
+  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, req->device_id_new.bytes,
+               sizeof(req->device_id_new.bytes));
+
+  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, req->code, sizeof(req->code));
+
+  _FH_CHECK_RETURN(faith_write_u64_be(out_buf + offset, req->expires_at_ms));
+
+  *out_size = device_link_req_size;
+  
+  return FAITH_OK;
+}
+
+faith_status_code_t
+faith_decode_device_link_req(const uint8_t *payload, size_t payload_size,
+                      faith_client_device_link_req_t *o_req) {
+  if (!o_req)
+    return FAITH_ERR_INVALID;
+
+  memset(o_req, 0, sizeof(*o_req));
+
+  if (!payload)
+    return payload_size == 0 ? FAITH_ERR_BAD_FRAME : FAITH_ERR_INVALID;
+
+  if (payload_size < sizeof(faith_client_device_link_req_t))
+    return FAITH_ERR_BAD_FRAME;
+
+  faith_client_id_t auth_id = {0};
+  size_t offset = 0;
+  FAITH_DECODE_RETURN(payload, payload_size, offset, auth_id.bytes,
+               sizeof(auth_id.bytes));
+
+  uint8_t public_key_new_device[FAITH_ED25519_PUBLIC_KEY_SIZE];
+  FAITH_DECODE_RETURN(payload, payload_size, offset, public_key_new_device,
+               sizeof(public_key_new_device));
+
+  faith_device_id_t device_id_new = {0};
+  FAITH_DECODE_RETURN(payload, payload_size, offset, device_id_new.bytes,
+               sizeof(device_id_new.bytes));
+
+  uint8_t code[16];
+  FAITH_DECODE_RETURN(payload, payload_size, offset, code, sizeof(code));
+
+  uint64_t expires_at_ms = faith_read_u64_be(payload + offset) ;
+
+  faith_client_device_link_req_t req = {0};
+  req.auth_id = auth_id,
+  memcpy(req.public_key_new_device, public_key_new_device,
+         sizeof(public_key_new_device));
+  req.device_id_new = device_id_new, memcpy(req.code, code, sizeof(code));
+  req.expires_at_ms = expires_at_ms;
+
+  *o_req = req;
+
+  return FAITH_OK;
+}
+
+faith_status_code_t faith_encode_device_link_approval(
+    uint8_t *out_buf, size_t *out_size, size_t buf_cap_in_bytes,
+    const faith_client_device_link_approval_t *approval) {
+  if (!out_buf || !out_size || !approval)
+    return FAITH_ERR_INVALID;
+
+  const size_t approval_size = sizeof(faith_client_device_link_approval_t);
+
+  if (buf_cap_in_bytes < approval_size)
+    return FAITH_ERR_OVERFLOW;
+
+  size_t offset = 0;
+
+  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset,
+                      approval->signature_approval,
+                      sizeof(approval->signature_approval));
+
+  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset,
+                      approval->device_id_new.bytes,
+                      sizeof(approval->device_id_new.bytes));
+
+  *out_size = approval_size;
+
+  return FAITH_OK;
+}
+
+faith_status_code_t faith_decode_device_link_approval(
+    const uint8_t *payload, size_t payload_size,
+    faith_client_device_link_approval_t *o_approval) {
+  if (!o_approval)
+    return FAITH_ERR_INVALID;
+
+  memset(o_approval, 0, sizeof(*o_approval));
+
+  if (!payload)
+    return payload_size == 0 ? FAITH_ERR_BAD_FRAME : FAITH_ERR_INVALID;
+
+  if (payload_size < sizeof(faith_client_device_link_approval_t))
+    return FAITH_ERR_BAD_FRAME;
+
+  size_t offset = 0;
+
+  FAITH_DECODE_RETURN(payload, payload_size, offset,
+                      o_approval->signature_approval,
+                      sizeof(o_approval->signature_approval));
+
+  FAITH_DECODE_RETURN(payload, payload_size, offset,
+                      o_approval->device_id_new.bytes,
+                      sizeof(o_approval->device_id_new.bytes));
 
   return FAITH_OK;
 }
@@ -595,38 +808,61 @@ cleanup:
 }
 
 faith_status_code_t
-faith_gen_signing_msg_buf(uint8_t *o_buf, size_t buf_cap,
-                          const faith_client_id_t *client_id,
-                          uint8_t  public_key[FAITH_ED25519_PUBLIC_KEY_SIZE],
-                          uint64_t client_nonce, uint64_t server_nonce) {
-  if (!o_buf)
+faith_gen_sign_buf_hello_handshake(uint8_t *o_buf, size_t buf_cap_in_bytes,
+                         const faith_signature_hello_handshake_t* src) {
+  if (!src || !o_buf)
     return FAITH_ERR_INVALID;
-  if (buf_cap < FAITH_HELLO_HANDSHAKE_SIGNATURE_SIZE)
-    return FAITH_ERR_INVALID;
-  if (!public_key)
+
+  if (buf_cap_in_bytes < sizeof(faith_signature_hello_handshake_t))
     return FAITH_ERR_INVALID;
 
   size_t offset = 0;
 
-  memcpy(o_buf, client_id->bytes, sizeof(client_id->bytes));
-  offset += sizeof(client_id->bytes);
-  if (offset > buf_cap)
+  FAITH_APPEND_RETURN(o_buf, buf_cap_in_bytes, offset, src->auth_id.bytes,
+               sizeof(src->auth_id.bytes));
+
+  FAITH_APPEND_RETURN(o_buf, buf_cap_in_bytes, offset, src->public_key,
+               sizeof(src->public_key));
+
+  _FH_CHECK_RETURN(faith_write_u64_be(o_buf + offset, src->client_nonce));
+  offset += sizeof(src->client_nonce);
+
+  _FH_CHECK_RETURN(faith_write_u64_be(o_buf + offset, src->server_nonce));
+  offset += sizeof(src->server_nonce);
+
+  return FAITH_OK;
+}
+
+faith_status_code_t faith_gen_sign_buf_device_link_approval(
+    uint8_t *o_buf, size_t buf_cap_in_bytes,
+    const faith_signature_device_link_approval_t *src) {
+  if (!src || !o_buf)
     return FAITH_ERR_INVALID;
 
-  memcpy(o_buf + offset, public_key, FAITH_ED25519_PUBLIC_KEY_SIZE);
-  offset += FAITH_ED25519_PUBLIC_KEY_SIZE;
-  if (offset > buf_cap)
+  if (buf_cap_in_bytes < sizeof(faith_signature_device_link_approval_t))
     return FAITH_ERR_INVALID;
 
-  memcpy(o_buf + offset, &client_nonce, sizeof(client_nonce));
-  offset += sizeof(client_nonce);
-  if (offset > buf_cap)
-    return FAITH_ERR_INVALID;
+  size_t offset = 0;
 
-  memcpy(o_buf + offset, &server_nonce, sizeof(server_nonce));
-  offset += sizeof(server_nonce);
-  if (offset > buf_cap)
-    return FAITH_ERR_INVALID;
+  FAITH_APPEND_RETURN(o_buf, buf_cap_in_bytes, offset, src->auth_id.bytes,
+                      sizeof(src->auth_id.bytes));
+
+  FAITH_APPEND_RETURN(o_buf, buf_cap_in_bytes, offset, src->device_id_new.bytes,
+                      sizeof(src->device_id_new.bytes));
+
+  FAITH_APPEND_RETURN(o_buf, buf_cap_in_bytes, offset,
+                      src->public_key_new_device,
+                      sizeof(src->public_key_new_device));
+
+  FAITH_APPEND_RETURN(o_buf, buf_cap_in_bytes, offset, src->code,
+                      sizeof(src->code));
+
+  _FH_CHECK_RETURN(faith_write_u64_be(o_buf + offset, src->expires_at_ms));
+  offset += sizeof(src->expires_at_ms);
+
+  FAITH_APPEND_RETURN(o_buf, buf_cap_in_bytes, offset,
+                      src->device_id_approving.bytes,
+                      sizeof(src->device_id_approving.bytes));
 
   return FAITH_OK;
 }
