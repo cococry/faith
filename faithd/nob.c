@@ -4,7 +4,7 @@
 #define NOB_EXPERIMENTAL_DELETE_OLD
 #define NOB_WARN_DEPRECATED
 #define NOB_STRIP_PREFIX 
-#include "nob.h"
+#include "third_party/nob.h"
 
 #define command(arg, commands, name, signature, description) command_loc(__FILE__, __LINE__, (arg), (commands), (name), (signature), (description))
 
@@ -100,7 +100,7 @@ int main(int argc, char **argv)
   SetConsoleOutputCP(CP_UTF8);
 #endif // _WIN32
 
-  GO_REBUILD_URSELF_PLUS(argc, argv, "nob.h"); 
+  GO_REBUILD_URSELF_PLUS(argc, argv, "third_party/nob.h"); 
 
   set_log_handler(cancer_log_handler);
 
