@@ -1433,16 +1433,6 @@ reject: {
 }
 }
 
-static void dump_hex(const char *label, const uint8_t *buf, size_t size)
-{
-  fprintf(stderr, "%s (%zu): ", label, size);
-
-  for (size_t i = 0; i < size; ++i)
-    fprintf(stderr, "%02x", buf[i]);
-
-  fputc('\n', stderr);
-}
-
 static faith_status_code_t
 server_handle_device_link_response(struct server_state_t  *s,
                                    struct client_conn_t   *cl,

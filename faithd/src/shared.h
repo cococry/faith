@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <time.h>
 
-#include "../nob.h"
+#include "../third_party/nob.h"
 
 #define FAITH_PROTO_VERSION    faith_version_pack(0, 0, 1)
 #define FAITH_MAX_FRAME_LEN    256

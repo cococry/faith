@@ -20,8 +20,7 @@
 #include <unistd.h>
 
 #define NOB_IMPLEMENTATION
-#define NOB_STRIP_PREFIX
-#include "../../nob.h"
+#include "../../third_party/nob.h"
 
 #define MAX_QUEUED_EVENTS 512
 
@@ -1070,29 +1069,6 @@ faith_status_code_t faith_client_init_global(int log_enable_tracing) {
 
   return FAITH_OK;
 }
-
-static bool hex_char_to_nibble(char c, uint8_t *out) {
-  if (!out)
-    return false;
-
-  if (c >= '0' && c <= '9') {
-    *out = (uint8_t)(c - '0');
-    return true;
-  }
-
-  if (c >= 'a' && c <= 'f') {
-    *out = (uint8_t)(c - 'a' + 10);
-    return true;
-  }
-
-  if (c >= 'A' && c <= 'F') {
-    *out = (uint8_t)(c - 'A' + 10);
-    return true;
-  }
-
-  return false;
-}
-
 
 static faith_status_code_t client_new_identity(client_identity_t *o_ident) {
   if (!o_ident)
