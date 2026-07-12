@@ -204,41 +204,63 @@ int main(int argc, char **argv) {
       faith_event_t ev;
       while (faith_client_next_event(client, &ev) == FAITH_OK) {
         if (ev.type == FAITH_EVENT_MESSAGE_RECEIVED) {
-          printf("Mista: %s\n", ev.chat_message);
-          printf("> ");
-          fflush(stdout);
-        } else {
-          if (ev.type == FAITH_EVENT_PONG)
-            continue;
+          printf("\rMista: %s\n", ev.chat_message);
 
-          printf("Got event: %s", faith_event_name(ev.type));
-          if (strlen(ev.message) != 0) {
-            printf(" message => %s\n", ev.message);
-          } else {
-            printf("\n");
-          }
-
-          if (ev.type == FAITH_EVENT_DEVICE_LINK_REQUEST) {
-            pending_device_link_request = true;
+          if (pending_device_link_request)
             printf("(y)es/n(o) ? ");
-            fflush(stdout);
-          } else {
+          else
             printf("> ");
-            fflush(stdout);
-          }
+
+          fflush(stdout);
+          faith_client_free_event(&ev);
+          continue;
         }
+
+        if (ev.type == FAITH_EVENT_PONG) {
+          faith_client_free_event(&ev);
+          continue;
+        }
+
+        printf("\rGot event: %s", faith_event_name(ev.type));
+
+        if (strlen(ev.message) != 0)
+          printf(" message => %s\n", ev.message);
+        else
+          printf("\n");
+
+        switch (ev.type) {
+        case FAITH_EVENT_DEVICE_LINK_REQUEST:
+          pending_device_link_request = true;
+          printf("(y)es/n(o) ? ");
+          break;
+
+        case FAITH_EVENT_DEVICE_AUTH_RESPONSE_ACK:
+        case FAITH_EVENT_DEVICE_LINK_CANCELLED:
+          if (pending_device_link_request) {
+            pending_device_link_request = false;
+
+            if (ev.type == FAITH_EVENT_DEVICE_AUTH_RESPONSE_ACK) {
+              printf("Device-link request was answered by another device.\n");
+            } else {
+              printf("Device-link request was cancelled because the requesting "
+                     "device disconnected.\n");
+            }
+          }
+
+          printf("> ");
+          break;
+
+        default:
+          if (pending_device_link_request)
+            printf("(y)es/n(o) ? ");
+          else
+            printf("> ");
+          break;
+        }
+
+        fflush(stdout);
+        faith_client_free_event(&ev);
       }
-      faith_client_free_event(&ev);
-    }
-
-    if (pfds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) {
-      fprintf(stderr, "stdin poll error/hangup\n");
-      break;
-    }
-
-    if (pfds[1].revents & (POLLERR | POLLHUP | POLLNVAL)) {
-      fprintf(stderr, "event_fd poll error/hangup\n");
-      break;
     }
   }
 

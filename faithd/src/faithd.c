@@ -41,7 +41,9 @@ struct server_cfg_t {
   X(CLIENT_HANDSHAKE, 0)                                                       \
   X(CLIENT_OPEN, 1)                                                            \
   X(CLIENT_CLOSING, 2)                                                         \
-  X(CLIENT_WAIT_FOR_HELLO_ACK, 3)
+  X(CLIENT_WAIT_FOR_HELLO, 3)                                                  \
+  X(CLIENT_WAIT_FOR_CHALLENGE_RESPONSE, 4)                                     \
+  X(CLIENT_WAIT_FOR_DEVICE_LINK_RESPONSE, 5)
 
 enum client_state_t {
 #define X(name, value) name = value,
@@ -66,10 +68,11 @@ struct client_conn_t {
   SSL                *ssl;
   enum client_state_t state;
 
-  uint32_t evs_mask_want;
+  uint32_t ev_mask;
 
   uint8_t *out_buf;
   size_t   out_size;
+  size_t   out_cap;
   size_t   out_off;
 
   uint8_t *in_buf;
@@ -81,10 +84,13 @@ struct client_conn_t {
   struct client_conn_t *prev;
 
   struct client_temporary_handshake_params_t temp_handshake_params;
-  faith_client_device_link_req_t            *pending_device_link_req;
+  faith_envl_stc_device_link_req_t          *pending_device_link_req;
   struct client_conn_t                      *pending_device_link_conn;
 
   int authorized;
+
+  int closing;
+  int close_after_flush;
 };
 
 struct client_identity_t {
@@ -170,7 +176,7 @@ static void set_client_state(struct server_state_t *s, struct client_conn_t *cl,
   cl->state = state;
 
   if (s->cfg.verbose_logging) {
-    nob_log(INFO, "[client=%" PRIu64 " fd=%i]: Client changed state to %s",
+    nob_log(INFO, "[client=%" PRIu64 " fd=%i] Client changed state to %s",
             cl->conn_id, cl->fd, client_state_name(state));
   }
 }
@@ -364,53 +370,113 @@ static void routing_destroy(struct routing_state_t *rt) {
   if (!rt)
     return;
 
+  ptrdiff_t user_count = hmlen(rt->active_users);
+
+  for (ptrdiff_t i = 0; i < user_count; ++i) {
+    struct client_route_device_t *devices = rt->active_users[i].value;
+    ptrdiff_t                     device_count = hmlen(devices);
+
+    for (ptrdiff_t j = 0; j < device_count; ++j) {
+      free(devices[j].value);
+      devices[j].value = NULL;
+    }
+
+    hmfree(devices);
+    rt->active_users[i].value = NULL;
+  }
+
   hmfree(rt->active_users);
+  rt->active_users = NULL;
 }
 
+static faith_status_code_t
+server_cancel_pending_device_link(struct server_state_t *s,
+                                  struct client_conn_t  *requesting_cl);
+
 static faith_status_code_t close_client(struct server_state_t *s,
-                                        struct client_conn_t  **cl) {
-  if (!cl)
+                                        struct client_conn_t **cl_ptr) {
+  if (!s || !cl_ptr || !*cl_ptr)
     return FAITH_ERR_INVALID;
 
-  /* Unlink client from linked list of clients */
-  server_remove_client(s, *cl);
+  struct client_conn_t *cl = *cl_ptr;
+  faith_status_code_t   result = FAITH_OK;
 
-  if ((*cl)->authorized) {
-    _FH_CHECK(routing_unregister_session(&s->rt, &(*cl)->auth_id, &(*cl)->device_id));
+  *cl_ptr = NULL;
+
+  if (cl->state == CLIENT_WAIT_FOR_DEVICE_LINK_RESPONSE) {
+    faith_status_code_t rc = server_cancel_pending_device_link(s, cl);
+
+    if (rc != FAITH_OK) {
+      nob_log(ERROR,
+              "[client=%" PRIu64
+              " fd=%d] Failed to cancel pending device-link request: %s",
+              cl->conn_id, cl->fd, faith_status_code_name(rc));
+
+      if (result == FAITH_OK)
+        result = rc;
+    }
   }
 
-  epoll_ctl(s->epoll_fd, EPOLL_CTL_DEL, (*cl)->fd, NULL);
+  server_remove_client(s, cl);
 
-  if ((*cl)->ssl) {
-    SSL_set_shutdown((*cl)->ssl, SSL_SENT_SHUTDOWN | SSL_RECEIVED_SHUTDOWN);
-    SSL_free((*cl)->ssl);
-    (*cl)->ssl = NULL;
+  if (cl->authorized) {
+    faith_status_code_t rc =
+        routing_unregister_session(&s->rt, &cl->auth_id, &cl->device_id);
+
+    if (rc != FAITH_OK) {
+      nob_log(ERROR, "[client=%" PRIu64 "] routing unregister failed: %s (%d)",
+              cl->conn_id, faith_status_code_name(rc), (int)rc);
+
+      result = rc;
+    }
   }
 
-  int log_fd = (*cl)->fd;
-  if ((*cl)->fd >= 0) {
-    close((*cl)->fd);
-    (*cl)->fd = -1;
+  if (cl->fd >= 0) {
+    if (epoll_ctl(s->epoll_fd, EPOLL_CTL_DEL, cl->fd, NULL) < 0 &&
+        errno != ENOENT) {
+      nob_log(ERROR, "[client=%" PRIu64 " fd=%d] epoll delete failed: %s",
+              cl->conn_id, cl->fd, strerror(errno));
+
+      if (result == FAITH_OK)
+        result = FAITH_ERR_IO;
+    }
   }
 
-  if ((*cl)->out_buf != NULL) {
-    free((*cl)->out_buf);
-    (*cl)->out_buf = NULL;
+  if (cl->ssl) {
+    /* Frees the local TLS state. It does not perform a graceful
+     * TLS shutdown exchange with the peer. */
+    SSL_set_shutdown(cl->ssl, SSL_SENT_SHUTDOWN | SSL_RECEIVED_SHUTDOWN);
+    SSL_free(cl->ssl);
+    cl->ssl = NULL;
   }
 
-  if ((*cl)->in_buf != NULL) {
-    free((*cl)->in_buf);
-    (*cl)->in_buf = NULL;
+  const int      log_fd = cl->fd;
+  const uint64_t log_conn_id = cl->conn_id;
+
+  if (cl->fd >= 0) {
+    if (close(cl->fd) < 0) {
+      nob_log(ERROR, "[client=%" PRIu64 " fd=%d] close failed: %s", cl->conn_id,
+              cl->fd, strerror(errno));
+
+      if (result == FAITH_OK)
+        result = FAITH_ERR_IO;
+    }
+
+    cl->fd = -1;
   }
 
-  nob_log(INFO, "[client=%" PRIu64 " fd=%i]: Closed client", (*cl)->conn_id,
+  free(cl->out_buf);
+  cl->out_buf = NULL;
+
+  free(cl->in_buf);
+  cl->in_buf = NULL;
+
+  nob_log(INFO, "[client=%" PRIu64 " fd=%d] Closed client", log_conn_id,
           log_fd);
 
-  free((*cl));
+  free(cl);
 
-  *cl = NULL;
-
-  return FAITH_OK;
+  return result;
 }
 
 static int modify_client_ev_mask(int epoll_fd, struct client_conn_t *cl,
@@ -426,7 +492,7 @@ static int modify_client_ev_mask(int epoll_fd, struct client_conn_t *cl,
   ev.events = mask;
   ev.data.ptr = cl;
 
-  cl->evs_mask_want = mask;
+  cl->ev_mask = mask;
 
   return epoll_ctl(epoll_fd, EPOLL_CTL_MOD, cl->fd, &ev);
 }
@@ -437,17 +503,31 @@ void server_destroy(struct server_state_t *s) {
 
   nob_log(INFO, "Destroying server context...");
 
+  while (s->clients) {
+    struct client_conn_t *cl = s->clients;
+    close_client(s, &cl);
+  }
+
+  routing_destroy(&s->rt);
+
   if (s->listenfd >= 0) {
-    if (close(s->listenfd) < 0) {
-      nob_log(ERROR, "close() on listen FD failed: %s", strerror(errno));
+    if (s->epoll_fd >= 0) {
+      if (epoll_ctl(s->epoll_fd, EPOLL_CTL_DEL, s->listenfd, NULL) < 0 &&
+          errno != ENOENT) {
+        nob_log(ERROR, "epoll delete listen FD failed: %s", strerror(errno));
+      }
     }
+
+    if (close(s->listenfd) < 0)
+      nob_log(ERROR, "close() on listen FD failed: %s", strerror(errno));
+
     s->listenfd = -1;
   }
 
   if (s->epoll_fd >= 0) {
-    if (close(s->epoll_fd) < 0) {
+    if (close(s->epoll_fd) < 0)
       nob_log(ERROR, "close() epoll FD failed: %s", strerror(errno));
-    }
+
     s->epoll_fd = -1;
   }
 
@@ -456,24 +536,17 @@ void server_destroy(struct server_state_t *s) {
     s->ssl_ctx = NULL;
   }
 
-  while (s->clients) {
-    struct client_conn_t *cl = s->clients;
-    close_client(s, &cl);
-  }
-
-  routing_destroy(&s->rt);
-
   nob_log(INFO, "Destroyed server context.");
 }
 
-static faith_status_code_t decode_ping(const uint8_t *payload,
-                                       size_t         payload_size,
-                                       uint64_t      *ping_nonce,
-                                       uint64_t      *server_time_ms) {
+static faith_status_code_t server_decode_ping(const uint8_t *payload,
+                                              size_t         payload_size,
+                                              uint64_t      *ping_nonce,
+                                              uint64_t      *server_time_ms) {
 
   const size_t ping_size = sizeof(uint64_t) * 2;
 
-  if (payload == NULL || ping_nonce == NULL || server_time_ms == NULL)
+  if (!payload || !ping_nonce || !server_time_ms)
     return FAITH_ERR_INVALID;
 
   if (payload_size != ping_size)
@@ -485,43 +558,56 @@ static faith_status_code_t decode_ping(const uint8_t *payload,
   return FAITH_OK;
 }
 
-static faith_status_code_t enqueue_input_bytes(struct client_conn_t *cl,
-                                               const uint8_t        *bytes,
-                                               size_t                n_bytes,
-                                               const struct server_cfg_t *cfg) {
-  if (!cl || !cfg)
+static faith_status_code_t
+server_enqueue_input_bytes(struct client_conn_t *cl, const uint8_t *bytes,
+                           size_t n_bytes, const struct server_cfg_t *cfg) {
+  if (!cl || cl->closing || !cfg || (!bytes && n_bytes != 0))
     return FAITH_ERR_INVALID;
 
   if (cfg->verbose_logging) {
     nob_log(INFO,
-            "[client=%" PRIu64
-            " fd=%i] Trying to enqueue %zu incoming bytes...",
+            "[client=%" PRIu64 " fd=%d] Trying to enqueue %zu input bytes...",
             cl->conn_id, cl->fd, n_bytes);
   }
 
   if (n_bytes == 0) {
     if (cfg->verbose_logging) {
       nob_log(WARNING,
-              "[client=%" PRIu64
-              " fd=%i] Tried to enqueue zero length input bytes",
+              "[client=%" PRIu64 " fd=%d] Tried to enqueue zero-length input",
               cl->conn_id, cl->fd);
     }
+
     return FAITH_OK;
   }
 
-  if (cl->in_size > SIZE_MAX - n_bytes)
-    return FAITH_ERR_INVALID;
+  if (cl->in_size > FAITH_MAX_CLIENT_IN_QUEUE ||
+      n_bytes > FAITH_MAX_CLIENT_IN_QUEUE - cl->in_size)
+    return FAITH_ERR_OVERFLOW;
 
-  size_t needed = cl->in_size + n_bytes;
+  const size_t needed = cl->in_size + n_bytes;
 
   if (needed > cl->in_cap) {
-    size_t new_cap = cl->in_cap ? cl->in_cap : 4096;
+    size_t new_cap = cl->in_cap ? cl->in_cap : 4096u;
 
     while (new_cap < needed) {
-      if (new_cap > SIZE_MAX / 2)
-        return FAITH_ERR_INVALID;
+      if (new_cap >= FAITH_MAX_CLIENT_IN_QUEUE) {
+        new_cap = FAITH_MAX_CLIENT_IN_QUEUE;
+        break;
+      }
+
+      if (new_cap > SIZE_MAX / 2) {
+        new_cap = needed;
+        break;
+      }
+
       new_cap *= 2;
+
+      if (new_cap > FAITH_MAX_CLIENT_IN_QUEUE)
+        new_cap = FAITH_MAX_CLIENT_IN_QUEUE;
     }
+
+    if (new_cap < needed)
+      return FAITH_ERR_OVERFLOW;
 
     uint8_t *p = realloc(cl->in_buf, new_cap);
     if (!p)
@@ -532,91 +618,137 @@ static faith_status_code_t enqueue_input_bytes(struct client_conn_t *cl,
   }
 
   memcpy(cl->in_buf + cl->in_size, bytes, n_bytes);
-  cl->in_size += n_bytes;
+  cl->in_size = needed;
 
   if (cfg->verbose_logging) {
     nob_log(INFO,
-            "[client=%" PRIu64
-            " fd=%i] Successfully enqueued %li incoming bytes...",
+            "[client=%" PRIu64 " fd=%d] Successfully enqueued %zu input bytes",
             cl->conn_id, cl->fd, n_bytes);
   }
 
   return FAITH_OK;
 }
 
-static faith_status_code_t enqueue_output_bytes(struct client_conn_t *cl,
-                                                const uint8_t        *bytes,
-                                                size_t                n_bytes) {
-  if (!cl)
+static faith_status_code_t
+server_enqueue_output_bytes(struct client_conn_t *cl, const uint8_t *bytes,
+                            size_t n_bytes, const struct server_cfg_t *cfg) {
+  if (!cl || cl->closing || !cfg || (!bytes && n_bytes != 0))
     return FAITH_ERR_INVALID;
 
-  if (n_bytes == 0)
+  if (cfg->verbose_logging) {
+    nob_log(INFO,
+            "[client=%" PRIu64 " fd=%d] Trying to enqueue %zu output bytes...",
+            cl->conn_id, cl->fd, n_bytes);
+  }
+
+  if (n_bytes == 0) {
+    if (cfg->verbose_logging) {
+      nob_log(WARNING,
+              "[client=%" PRIu64 " fd=%d] Tried to enqueue zero-length output",
+              cl->conn_id, cl->fd);
+    }
+
     return FAITH_OK;
+  }
 
-  if (cl->out_size > SIZE_MAX - n_bytes)
-    return FAITH_ERR_INVALID;
-
-  uint8_t *p = realloc(cl->out_buf, cl->out_size + n_bytes);
-  if (!p)
-    return FAITH_ERR_NOMEM;
-
-  cl->out_buf = p;
-
-  memcpy(cl->out_buf + cl->out_size, bytes, n_bytes);
-  cl->out_size += n_bytes;
-
-  return FAITH_OK;
-}
-
-static faith_status_code_t encode_pong(uint8_t *out_buf, size_t *out_size,
-                                       size_t buf_cap_in_bytes, uint64_t nonce,
-                                       uint64_t sent_at_ms) {
-  if (!out_buf)
-    return FAITH_ERR_INVALID;
-
-  const size_t pong_size = sizeof(uint64_t) * 2;
-
-  if (buf_cap_in_bytes < pong_size)
+  if (cl->out_size > FAITH_MAX_CLIENT_OUT_QUEUE ||
+      n_bytes > FAITH_MAX_CLIENT_OUT_QUEUE - cl->out_size)
     return FAITH_ERR_OVERFLOW;
 
-  _FH_CHECK_RETURN(faith_write_u64_be(out_buf, nonce));
-  _FH_CHECK_RETURN(faith_write_u64_be(out_buf + sizeof(uint64_t), sent_at_ms));
+  const size_t needed = cl->out_size + n_bytes;
 
-  *out_size = pong_size;
+  if (needed > cl->out_cap) {
+    size_t new_cap = cl->out_cap ? cl->out_cap : 4096u;
+
+    while (new_cap < needed) {
+      if (new_cap >= FAITH_MAX_CLIENT_OUT_QUEUE) {
+        new_cap = FAITH_MAX_CLIENT_OUT_QUEUE;
+        break;
+      }
+
+      if (new_cap > SIZE_MAX / 2) {
+        new_cap = needed;
+        break;
+      }
+
+      new_cap *= 2;
+
+      if (new_cap > FAITH_MAX_CLIENT_OUT_QUEUE)
+        new_cap = FAITH_MAX_CLIENT_OUT_QUEUE;
+    }
+
+    if (new_cap < needed)
+      return FAITH_ERR_OVERFLOW;
+
+    uint8_t *p = realloc(cl->out_buf, new_cap);
+    if (!p)
+      return FAITH_ERR_NOMEM;
+
+    cl->out_buf = p;
+    cl->out_cap = new_cap;
+  }
+
+  memcpy(cl->out_buf + cl->out_size, bytes, n_bytes);
+  cl->out_size = needed;
+
+  if (cfg->verbose_logging) {
+    nob_log(INFO,
+            "[client=%" PRIu64 " fd=%d] Successfully enqueued %zu output bytes",
+            cl->conn_id, cl->fd, n_bytes);
+  }
 
   return FAITH_OK;
 }
 
 static faith_status_code_t
-server_send_over_wire(struct client_conn_t *cl, const uint8_t *payload,
-                      size_t payload_size, faith_frame_msg_type_t msg_type,
-                      int epoll_fd) {
-  if (!cl)
+server_encode_pong(uint8_t out_buf[FAITH_MSG_PONG_PAYLOAD_SIZE], uint64_t nonce,
+                   uint64_t sent_at_ms) {
+  if (!out_buf)
+    return FAITH_ERR_INVALID;
+
+  _FH_CHECK_RETURN(faith_write_u64_be(out_buf, nonce));
+  _FH_CHECK_RETURN(faith_write_u64_be(out_buf + sizeof(uint64_t), sent_at_ms));
+
+  return FAITH_OK;
+}
+
+static faith_status_code_t
+server_send_over_wire(struct server_state_t *s, struct client_conn_t *cl,
+                      const uint8_t *payload, size_t payload_size,
+                      faith_frame_msg_type_t msg_type) {
+  if (!cl || cl->closing || !s || (!payload && payload_size != 0))
     return FAITH_ERR_INVALID;
 
   uint8_t *wire_data = NULL;
   size_t   wire_size = 0;
 
-  faith_status_code_t rc = faith_encode_frame(msg_type, payload, payload_size,
-                                              &wire_data, &wire_size);
+  // Allocates memory on pointer passed to <out_data>, which is <wire_data> here
+  _FH_CHECK_RETURN(faith_encode_frame(msg_type, payload, payload_size,
+                                      &wire_data, &wire_size));
 
-  if (rc != FAITH_OK)
-    return rc;
-
-  rc = enqueue_output_bytes(cl, wire_data, wire_size);
-
-  free(wire_data);
-
-  if (rc != FAITH_OK) {
-    nob_log(ERROR, "enqueue_output_bytes failed: %s (%d)",
-            faith_status_code_name(rc), (int)rc);
-    return rc;
+  if (!wire_data || wire_size == 0) {
+    free(wire_data);
+    return FAITH_ERR_INVALID;
   }
 
-  if (modify_client_ev_mask(epoll_fd, cl,
-                            EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLERR |
-                                EPOLLHUP) < 0) {
+  {
+    _FH_CHECK(server_enqueue_output_bytes(cl, wire_data, wire_size, &s->cfg));
+
+    if (_fh_rc != FAITH_OK) {
+      if (_fh_rc == FAITH_ERR_OVERFLOW || _fh_rc == FAITH_ERR_NOMEM) {
+        cl->closing = 1;
+      }
+      return _fh_rc;
+    }
+  }
+
+  free(wire_data);
+  wire_data = NULL;
+
+  // client now wants EPOLLOUT
+  if (modify_client_ev_mask(s->epoll_fd, cl, cl->ev_mask | EPOLLOUT) < 0) {
     nob_log(ERROR, "failed to enable EPOLLOUT: %s", strerror(errno));
+    cl->closing = 1;
     return FAITH_ERR_IO;
   }
 
@@ -626,58 +758,33 @@ server_send_over_wire(struct client_conn_t *cl, const uint8_t *payload,
   return FAITH_OK;
 }
 
-static faith_status_code_t
-server_send_pong(struct client_conn_t *cl, faith_frame_t *frame, int epoll_fd) {
+static faith_status_code_t server_send_pong(struct server_state_t *s,
+                                            struct client_conn_t  *cl,
+                                            faith_frame_t         *frame) {
+  if (!s || !cl || cl->closing || !frame)
+    return FAITH_ERR_INVALID;
+
   uint64_t nonce;
   uint64_t client_sent_at_ms;
 
-  if (!cl || !frame)
-    return FAITH_ERR_INVALID;
-
-  _FH_CHECK_RETURN(decode_ping(frame->payload, frame->payload_size, &nonce,
-                               &client_sent_at_ms));
+  /* 1. decode PING */
+  _FH_CHECK_RETURN(server_decode_ping(frame->payload, frame->payload_size,
+                                      &nonce, &client_sent_at_ms));
 
   nob_log(INFO,
           "[client=%" PRIu64 " fd=%i] server got PING: nonce=%" PRIu64
           ", client_sent_at_ms=%lu",
           cl->conn_id, cl->fd, nonce, client_sent_at_ms);
 
-  /* Send PONG over wire protocol */
-
+  /* 2. Send PONG over wire protocol */
   uint64_t server_sent_at_ms = faith_now_ms();
 
-  size_t   buf_cap_in_bytes = sizeof(uint64_t) * 2;
-  uint8_t *payload = malloc(buf_cap_in_bytes);
-  if (!payload)
-    return FAITH_ERR_NOMEM;
+  uint8_t payload[FAITH_MSG_PONG_PAYLOAD_SIZE];
 
-  size_t payload_size = 0;
+  _FH_CHECK_RETURN(server_encode_pong(payload, nonce, server_sent_at_ms));
 
-  {
-    _FH_CHECK(encode_pong(payload, &payload_size, buf_cap_in_bytes, nonce,
-                          server_sent_at_ms));
-    if (_fh_rc != FAITH_OK) {
-      free(payload);
-      return _fh_rc;
-    }
-  }
-
-  {
-    _FH_CHECK(server_send_over_wire(cl, payload, payload_size, FAITH_MSG_PONG,
-                                    epoll_fd));
-    if (_fh_rc != FAITH_OK) {
-      free(payload);
-      return _fh_rc;
-    }
-  }
-
-  if (modify_client_ev_mask(epoll_fd, cl,
-                            EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLERR |
-                                EPOLLHUP) < 0) {
-    nob_log(ERROR, "modify_client_ev_mask failed: %s", strerror(errno));
-    free(payload);
-    return FAITH_ERR_IO;
-  }
+  _FH_CHECK_RETURN(
+      server_send_over_wire(s, cl, payload, sizeof(payload), FAITH_MSG_PONG));
 
   nob_log(
       INFO,
@@ -685,15 +792,13 @@ server_send_pong(struct client_conn_t *cl, faith_frame_t *frame, int epoll_fd) {
       " fd=%i] Server sent PONG to client. nonce=%lu, server_sent_at_ms=%lu",
       cl->conn_id, cl->fd, nonce, server_sent_at_ms);
 
-  free(payload);
-
   return FAITH_OK;
 }
 
-static faith_status_code_t server_send_envelope(struct client_conn_t   *cl,
-                                                const faith_envelope_t *envl,
-                                                int epoll_fd) {
-  if (!cl || !envl)
+static faith_status_code_t server_send_envelope(struct server_state_t  *s,
+                                                struct client_conn_t   *cl,
+                                                const faith_envelope_t *envl) {
+  if (!s || !cl || cl->closing || !envl)
     return FAITH_ERR_INVALID;
 
   size_t   cap = FAITH_ENVL_HEADER_SIZE + envl->body_size;
@@ -703,41 +808,114 @@ static faith_status_code_t server_send_envelope(struct client_conn_t   *cl,
 
   size_t payload_size = 0;
 
-  faith_status_code_t rc;
-  {
-    _FH_CHECK(faith_encode_envelope(payload, &payload_size, cap, envl));
-    rc = _fh_rc;
-  }
+  faith_status_code_t _fh_result = FAITH_OK;
+  _FH_CHECK_DEFER(faith_encode_envelope(payload, &payload_size, cap, envl));
 
-  if (rc == FAITH_OK) {
-    _FH_CHECK(server_send_over_wire(cl, payload, payload_size, FAITH_MSG_ENVL,
-                                    epoll_fd));
-    rc = _fh_rc;
-  }
+  _FH_CHECK_DEFER(
+      server_send_over_wire(s, cl, payload, payload_size, FAITH_MSG_ENVL));
 
-  if (rc == FAITH_OK) {
-    nob_log(
-        INFO,
-        "[client=%" PRIu64 " fd=%i] Server sent envelope: type=%s body_size=%u",
-        cl->conn_id, cl->fd, faith_envelope_name(envl->type), envl->body_size);
-  }
+  nob_log(INFO,
+          "[client=%" PRIu64
+          " fd=%i] Server enqueued envelope: type=%s body_size=%u",
+          cl->conn_id, cl->fd, faith_envelope_name(envl->type),
+          envl->body_size);
 
+defer:
   free(payload);
+  return _fh_result;
+}
+
+static faith_status_code_t
+server_send_envelope_or_close(struct server_state_t  *s,
+                              struct client_conn_t   *cl,
+                              const faith_envelope_t *envl) {
+  if (!s || !cl || !envl)
+    return FAITH_ERR_INVALID;
+
+  faith_status_code_t rc = server_send_envelope(s, cl, envl);
+
+  if (rc != FAITH_OK) {
+    nob_log(ERROR, "[client=%" PRIu64 " fd=%i] Failed to send %s: %s",
+            cl->conn_id, cl->fd, faith_envelope_name(envl->type),
+            faith_status_code_name(rc));
+
+    cl->closing = 1;
+  }
+
   return rc;
+}
+
+static faith_status_code_t
+server_cancel_pending_device_link(struct server_state_t *s,
+                                  struct client_conn_t  *requesting_cl) {
+  if (!s || !requesting_cl)
+    return FAITH_ERR_INVALID;
+
+  if (requesting_cl->state != CLIENT_WAIT_FOR_DEVICE_LINK_RESPONSE)
+    return FAITH_OK;
+
+  struct client_temporary_handshake_params_t *params =
+      &requesting_cl->temp_handshake_params;
+
+  struct client_route_device_t *devices = NULL;
+  faith_status_code_t           rc =
+      routing_get_devices(&s->rt, &params->sender_auth_id, &devices);
+
+  if (rc != FAITH_OK)
+    return rc;
+
+  faith_status_code_t result = FAITH_OK;
+  ptrdiff_t           n_devices = hmlen(devices);
+
+  for (ptrdiff_t i = 0; i < n_devices; ++i) {
+    if (!devices[i].value || !devices[i].value->conn) {
+      nob_log(ERROR, "Routing table contains an invalid device entry");
+      continue;
+    }
+
+    struct client_conn_t *authorized_cl = devices[i].value->conn;
+
+    if (authorized_cl->pending_device_link_conn != requesting_cl)
+      continue;
+
+    if (authorized_cl->authorized && !authorized_cl->closing &&
+        authorized_cl->state == CLIENT_OPEN) {
+      faith_envelope_t envl = {0};
+      envl.type = FAITH_ENVELOPE_DEVICE_LINK_CANCELLED;
+      envl.recipient_id = authorized_cl->auth_id;
+      envl.body = NULL;
+      envl.body_size = 0;
+
+      rc = server_send_envelope_or_close(s, authorized_cl, &envl);
+
+      if (rc != FAITH_OK && result == FAITH_OK)
+        result = rc;
+    }
+
+    free(authorized_cl->pending_device_link_req);
+    authorized_cl->pending_device_link_req = NULL;
+    authorized_cl->pending_device_link_conn = NULL;
+  }
+
+  return result;
 }
 
 static faith_status_code_t
 server_accept_hello(struct server_state_t *s, struct client_conn_t *cl,
                     const faith_client_id_t *sender_id,
                     const faith_device_id_t *device_id) {
-  if (!s || !cl || !device_id)
+  if (!s || !cl || cl->closing || !device_id)
     return FAITH_ERR_INVALID;
+
+  if (!cl->authorized)
+    return FAITH_ERR_UNAUTHORIZED;
+
   /* Send HELLO_OK evelope back to client */
   faith_envelope_t hello_ok_envl = {0};
   hello_ok_envl.type = FAITH_ENVELOPE_HELLO_OK;
   hello_ok_envl.recipient_id = *sender_id;
 
-  _FH_CHECK_RETURN(server_send_envelope(cl, &hello_ok_envl, s->epoll_fd));
+  _FH_CHECK_RETURN(server_send_envelope_or_close(s, cl, &hello_ok_envl));
 
   cl->auth_id = *sender_id;
   cl->device_id = *device_id;
@@ -774,16 +952,16 @@ server_handle_hello(struct server_state_t *s, struct client_conn_t *cl,
   //  }
   // }
   //
-  if (!cl || !hello_envl)
+  if (!cl || cl->closing || !hello_envl)
     return FAITH_ERR_INVALID;
   if (hello_envl->type != FAITH_ENVELOPE_HELLO)
     return FAITH_ERR_INVALID;
 
-  if (cl->state != CLIENT_WAIT_FOR_HELLO_ACK) {
+  if (cl->state != CLIENT_WAIT_FOR_HELLO) {
     nob_log(ERROR,
             "[client=%" PRIu64 " fd=%i] Server got invalid HELLO from client.",
             cl->conn_id, cl->fd);
-    return FAITH_ERR_INVALID;
+    return FAITH_ERR_BAD_ENVELOPE;
   }
 
   if (faith_client_id_equal(hello_envl->sender_id, FAITH_CLIENT_ID_NONE)) {
@@ -821,14 +999,16 @@ server_handle_hello(struct server_state_t *s, struct client_conn_t *cl,
       faith_random_bytes((uint8_t *)&server_nonce, sizeof(server_nonce)));
 
   /* Construct temporary handshake parameters for client identity evaluation */
-
   struct client_temporary_handshake_params_t *params =
       &cl->temp_handshake_params;
-  params->nonce = nonce;
-  params->device_id = device_id;
-  memcpy(params->public_key, public_key, sizeof(params->public_key));
-  params->server_nonce = server_nonce;
+
   params->sender_auth_id = hello_envl->sender_id;
+  params->device_id = device_id;
+
+  memcpy(params->public_key, public_key, sizeof(params->public_key));
+
+  params->server_nonce = server_nonce;
+  params->nonce = nonce;
 
   /* Send CHALLENGE envelope */
 
@@ -841,9 +1021,11 @@ server_handle_hello(struct server_state_t *s, struct client_conn_t *cl,
   _FH_CHECK_RETURN(faith_write_u64_be(body, server_nonce));
 
   challenge_envl.body = body;
-  challenge_envl.body_size = sizeof(body);
+  challenge_envl.body_size = (faith_body_size_t)sizeof(body);
 
-  _FH_CHECK_RETURN(server_send_envelope(cl, &challenge_envl, s->epoll_fd));
+  _FH_CHECK_RETURN(server_send_envelope_or_close(s, cl, &challenge_envl));
+
+  set_client_state(s, cl, CLIENT_WAIT_FOR_CHALLENGE_RESPONSE);
 
   return FAITH_OK;
 }
@@ -851,16 +1033,17 @@ server_handle_hello(struct server_state_t *s, struct client_conn_t *cl,
 static faith_status_code_t
 server_send_device_auth_pending(struct server_state_t *s,
                                 struct client_conn_t  *recipient_cl) {
-  if (!s || !recipient_cl)
+  if (!s || !recipient_cl || recipient_cl->closing)
     return FAITH_ERR_INVALID;
 
   faith_envelope_t device_auth_pending_envl = {0};
   device_auth_pending_envl.type = FAITH_ENVELOPE_DEVICE_AUTH_PENDING;
-  _FH_CHECK_RETURN(server_send_envelope(recipient_cl, &device_auth_pending_envl,
-                                        s->epoll_fd));
+  _FH_CHECK_RETURN(server_send_envelope_or_close(s, recipient_cl,
+                                                 &device_auth_pending_envl));
 
   return FAITH_OK;
 }
+
 static faith_status_code_t server_send_device_link_request(
     struct server_state_t *s, struct client_conn_t *recipient_cl,
     struct client_conn_t *request_cl, const faith_client_id_t *auth_id,
@@ -870,6 +1053,10 @@ static faith_status_code_t server_send_device_link_request(
       !recipient_cl) {
     return FAITH_ERR_INVALID;
   }
+  if (recipient_cl->state != CLIENT_OPEN)
+    return FAITH_ERR_INVALID;
+  if (request_cl->closing || recipient_cl->closing)
+    return FAITH_ERR_INVALID;
 
   if (!recipient_cl->authorized) {
     char auth_id_hex[33];
@@ -879,13 +1066,14 @@ static faith_status_code_t server_send_device_link_request(
     _FH_CHECK_RETURN(
         faith_id128_to_hex(recipient_cl->device_id.bytes, device_id_hex));
     nob_log(ERROR,
-            "Not sending device link request to"
+            "Not sending device link request to "
             "device with device_id: %s (auth_id: %s). Client connection is "
             "not authorized.",
             device_id_hex, auth_id_hex);
 
     return FAITH_ERR_UNAUTHORIZED;
   }
+
   if (recipient_cl->pending_device_link_req != NULL) {
     char auth_id_hex[33];
     char device_id_hex[33];
@@ -894,7 +1082,7 @@ static faith_status_code_t server_send_device_link_request(
     _FH_CHECK_RETURN(
         faith_id128_to_hex(recipient_cl->device_id.bytes, device_id_hex));
     nob_log(ERROR,
-            "Not sending device link request to"
+            "Not sending device link request to "
             "device with device_id: %s (auth_id: %s). Another device link "
             "request is already pending.",
             device_id_hex, auth_id_hex);
@@ -903,8 +1091,9 @@ static faith_status_code_t server_send_device_link_request(
   }
 
   /* Allocate device link request */
-
-  faith_client_device_link_req_t *req = calloc(1, sizeof(*req));
+  faith_envl_stc_device_link_req_t *req = calloc(1, sizeof(*req));
+  if (!req)
+    return FAITH_ERR_NOMEM;
 
   req->device_id_new = *new_device_id;
 
@@ -925,10 +1114,10 @@ static faith_status_code_t server_send_device_link_request(
 
   /* Serialize device link reqest */
 
-  uint8_t body[sizeof(faith_client_device_link_req_t)];
-  size_t  body_size = 0;
+  uint8_t           body[FAITH_ENVL_STC_DEVICE_LINK_REQ_BODY_SIZE];
+  faith_body_size_t body_size = 0;
   _FH_CHECK_RETURN(
-      faith_encode_device_link_req(body, &body_size, sizeof(body), req));
+      faith_encode_device_link_req_body(body, &body_size, sizeof(body), req));
 
   faith_envelope_t device_link_req_envl = {0};
   device_link_req_envl.body = body;
@@ -936,8 +1125,8 @@ static faith_status_code_t server_send_device_link_request(
   device_link_req_envl.recipient_id = *auth_id;
   device_link_req_envl.type = FAITH_ENVELOPE_DEVICE_LINK_REQUEST;
 
-  _FH_CHECK(
-      server_send_envelope(recipient_cl, &device_link_req_envl, s->epoll_fd));
+  _FH_CHECK_RETURN(
+      server_send_envelope_or_close(s, recipient_cl, &device_link_req_envl));
 
   return FAITH_OK;
 }
@@ -945,14 +1134,19 @@ static faith_status_code_t server_send_device_link_request(
 static faith_status_code_t server_handle_newly_joined_device(
     struct server_state_t *s, struct client_conn_t *cl,
     const struct client_temporary_handshake_params_t *params) {
-  if (!s || !cl || !params)
+  if (!s || !cl || cl->closing || !params)
     return FAITH_ERR_INVALID;
+
+  if (cl->state != CLIENT_WAIT_FOR_CHALLENGE_RESPONSE)
+    return FAITH_ERR_BAD_ENVELOPE;
 
   if (s->cfg.verbose_logging) {
     char cl_auth_id_hex[33];
     char new_device_id_hex[33];
-    _FH_CHECK_RETURN(faith_id128_to_hex(params->sender_auth_id.bytes, cl_auth_id_hex));
-    _FH_CHECK_RETURN(faith_id128_to_hex(params->device_id.bytes, new_device_id_hex));
+    _FH_CHECK_RETURN(
+        faith_id128_to_hex(params->sender_auth_id.bytes, cl_auth_id_hex));
+    _FH_CHECK_RETURN(
+        faith_id128_to_hex(params->device_id.bytes, new_device_id_hex));
 
     nob_log(
         INFO,
@@ -966,21 +1160,28 @@ static faith_status_code_t server_handle_newly_joined_device(
   _FH_CHECK_RETURN(routing_get_devices(&s->rt, &params->sender_auth_id,
                                        &authorized_devices));
 
-  size_t n_authorized_devices = hmlen(authorized_devices);
+  ptrdiff_t n_authorized_devices = hmlen(authorized_devices);
   if (!authorized_devices || n_authorized_devices < 1) {
     return FAITH_ERR_INVALID;
   }
 
   /* Send device authorization request to every already registered device
    for that auth ID */
-  for (ptrdiff_t i = 0; i < hmlen(authorized_devices); i++) {
+  for (ptrdiff_t i = 0; i < n_authorized_devices; i++) {
+    if (!authorized_devices[i].value || !authorized_devices[i].value->conn) {
+      nob_log(ERROR, "Routing table contains an invalid device entry");
+      continue;
+    }
+    struct client_conn_t *authorized_cl = authorized_devices[i].value->conn;
+    if (!authorized_cl->authorized || authorized_cl->closing ||
+        authorized_cl->state != CLIENT_OPEN)
+      continue;
 
     _FH_CHECK(server_send_device_link_request(
-        s, authorized_devices[i].value->conn, cl, &params->sender_auth_id,
-        params->public_key, &params->device_id));
+        s, authorized_cl, cl, &params->sender_auth_id, params->public_key,
+        &params->device_id));
 
     if (_fh_rc != FAITH_OK) {
-
       char sender_auth_id_hex[33];
       _FH_CHECK_RETURN(
           faith_id128_to_hex(params->sender_auth_id.bytes, sender_auth_id_hex));
@@ -989,7 +1190,7 @@ static faith_status_code_t server_handle_newly_joined_device(
           faith_id128_to_hex(params->device_id.bytes, device_id_hex));
       nob_log(ERROR,
               "Failed to send device link request to authorized "
-              "device with device_id: %s (auth_id: %s)",
+              "device session with device_id: %s (auth_id: %s)",
               device_id_hex, sender_auth_id_hex);
 
       return _fh_rc;
@@ -999,7 +1200,7 @@ static faith_status_code_t server_handle_newly_joined_device(
   /* Send DEVICE_AUTH_PENDING to the connection that requested the
    * new device */
   _FH_CHECK_RETURN(server_send_device_auth_pending(s, cl));
-  set_client_state(s, cl, CLIENT_OPEN);
+  set_client_state(s, cl, CLIENT_WAIT_FOR_DEVICE_LINK_RESPONSE);
 
   return FAITH_OK;
 }
@@ -1008,7 +1209,7 @@ static faith_status_code_t server_authorize_client(
     struct server_state_t *s, struct client_conn_t *cl,
     const faith_client_id_t *auth_id, const faith_device_id_t *device_id,
     uint8_t public_key[FAITH_ED25519_PUBLIC_KEY_SIZE], int register_session) {
-  if (!s || !cl || !auth_id || !device_id || !public_key)
+  if (!s || !cl || cl->closing || !auth_id || !device_id || !public_key)
     return FAITH_ERR_INVALID;
 
   cl->authorized = 1;
@@ -1038,7 +1239,7 @@ static faith_status_code_t server_authorize_client(
 static faith_status_code_t server_handle_challenge_response(
     struct server_state_t *s, struct client_conn_t *cl,
     const faith_envelope_t *challenge_response_envl) {
-  if (!s || !cl || !challenge_response_envl)
+  if (!s || !cl || cl->closing || !challenge_response_envl)
     return FAITH_ERR_INVALID;
 
   if (challenge_response_envl->type != FAITH_ENVELOPE_CHALLENGE_RESPONSE) {
@@ -1050,13 +1251,12 @@ static faith_status_code_t server_handle_challenge_response(
     return FAITH_ERR_INVALID;
   }
 
-  if (cl->state != CLIENT_WAIT_FOR_HELLO_ACK) {
+  if (cl->state != CLIENT_WAIT_FOR_CHALLENGE_RESPONSE) {
     nob_log(ERROR,
             "[client=%" PRIu64
-            " fd=%i] Server got invalid CHALLENGE_RESPONSE from client. Client "
-            "is not in WAIT_FOR_HELLO_ACK state. ",
+            " fd=%i] Server got invalid CHALLENGE_RESPONSE from client.",
             cl->conn_id, cl->fd);
-    return FAITH_ERR_INVALID;
+    return FAITH_ERR_BAD_ENVELOPE;
   }
 
   struct client_temporary_handshake_params_t *params =
@@ -1102,6 +1302,8 @@ static faith_status_code_t server_handle_challenge_response(
     return sess_rc;
   }
 
+  int handle_newly_joined_device = 0;
+
   if (sess_rc == FAITH_ERR_NOT_FOUND) {
     /* Session not registered yet, use sent public key for verification */
     verification_public_key = params->public_key;
@@ -1110,32 +1312,35 @@ static faith_status_code_t server_handle_challenge_response(
     if (!sess) {
       /* This means the auth ID is already registered but this is a new
        * device that wants to join. */
-      _FH_CHECK_RETURN(server_handle_newly_joined_device(s, cl, params));
-      return FAITH_OK;
+      handle_newly_joined_device = 1;
+      verification_public_key = params->public_key;
+    } else {
+      /* Check if the sent public key and the public key of the registered
+       * identity match */
+      if (memcmp(params->public_key, sess->ident.public_key,
+                 FAITH_ED25519_PUBLIC_KEY_SIZE) != 0) {
+
+        char sender_auth_id_hex[33];
+        char device_id_hex[33];
+        _FH_CHECK_RETURN(faith_id128_to_hex(params->sender_auth_id.bytes,
+                                            sender_auth_id_hex));
+        _FH_CHECK_RETURN(
+            faith_id128_to_hex(params->device_id.bytes, device_id_hex));
+        nob_log(ERROR,
+                "[client=%" PRIu64 " fd=%i] Rejected requested routing session "
+                "(auth_id=%s, device_id=%s). "
+                "Invalid public key sent.",
+                cl->conn_id, cl->fd, sender_auth_id_hex, device_id_hex);
+        return FAITH_ERR_UNAUTHORIZED;
+      }
+
+      /* Passed, fine. Use public key of the already verified session identity
+       * for verification. We do not trust the sent public key. */
+      verification_public_key = sess->ident.public_key;
     }
-
-    /* Check if the sent public key and the public key of the registered
-     * identity match */
-    if (memcmp(params->public_key, sess->ident.public_key,
-               FAITH_ED25519_PUBLIC_KEY_SIZE) != 0) {
-
-      char sender_auth_id_hex[33];
-      char device_id_hex[33];
-      _FH_CHECK_RETURN(
-          faith_id128_to_hex(params->sender_auth_id.bytes, sender_auth_id_hex));
-      _FH_CHECK_RETURN(
-          faith_id128_to_hex(params->device_id.bytes, device_id_hex));
-      nob_log(ERROR,
-              "[client=%" PRIu64 " fd=%i] Rejected requested routing session "
-              "(auth_id=%s, device_id=%s). "
-              "Invalid public key sent.",
-              cl->conn_id, cl->fd, sender_auth_id_hex, device_id_hex);
-      return FAITH_ERR_UNAUTHORIZED;
-    }
-
-    /* Passed, fine. Use public key of the already verified session identity for
-     * verification. We do not trust the sent public key. */
-    verification_public_key = sess->ident.public_key;
+  } else {
+    /* Propagate unexpected routing errors. */
+    return sess_rc;
   }
 
   if (!verification_public_key) {
@@ -1151,12 +1356,14 @@ static faith_status_code_t server_handle_challenge_response(
    *      sender_auth_id,
    *      verification_public_key,
    *      client_nonce,
-   *      server_nonce
+   *      server_nonce,
+   *      device_id
    *    } */
 
   faith_signature_hello_handshake_t sign_msg = {0};
 
   sign_msg.auth_id = params->sender_auth_id;
+  sign_msg.device_id = params->device_id;
 
   memcpy(sign_msg.public_key, verification_public_key,
          FAITH_ED25519_PUBLIC_KEY_SIZE);
@@ -1164,7 +1371,7 @@ static faith_status_code_t server_handle_challenge_response(
   sign_msg.client_nonce = params->nonce;
   sign_msg.server_nonce = params->server_nonce;
 
-  uint8_t msg_buf[sizeof(faith_signature_hello_handshake_t)];
+  uint8_t msg_buf[FAITH_SIGNATURE_HELLO_HANDSHAKE_SIZE];
   {
     _FH_CHECK(faith_gen_sign_buf_hello_handshake(msg_buf, sizeof(msg_buf),
                                                  &sign_msg));
@@ -1197,6 +1404,11 @@ static faith_status_code_t server_handle_challenge_response(
   /* Client passed authorization */
   /* =============================== */
 
+  if (handle_newly_joined_device) {
+    _FH_CHECK_RETURN(server_handle_newly_joined_device(s, cl, params));
+    return FAITH_OK;
+  }
+
   _FH_CHECK(server_authorize_client(s, cl, &params->sender_auth_id,
                                     &params->device_id, verification_public_key,
                                     sess == NULL));
@@ -1221,22 +1433,34 @@ reject: {
 }
 }
 
+static void dump_hex(const char *label, const uint8_t *buf, size_t size)
+{
+  fprintf(stderr, "%s (%zu): ", label, size);
+
+  for (size_t i = 0; i < size; ++i)
+    fprintf(stderr, "%02x", buf[i]);
+
+  fputc('\n', stderr);
+}
+
 static faith_status_code_t
 server_handle_device_link_response(struct server_state_t  *s,
                                    struct client_conn_t   *cl,
                                    const faith_envelope_t *response_envl) {
-  if (!s || !cl || !response_envl)
+  if (!s || !cl || cl->closing || !response_envl)
     return FAITH_ERR_INVALID;
+
+  if (cl->state != CLIENT_OPEN)
+    return FAITH_ERR_BAD_ENVELOPE;
 
   faith_status_code_t _fh_result = FAITH_OK;
 
-  faith_client_device_link_req_t *req = cl->pending_device_link_req;
-  struct client_conn_t           *req_cl = cl->pending_device_link_conn;
+  faith_envl_stc_device_link_req_t *req = cl->pending_device_link_req;
+  struct client_conn_t             *req_cl = cl->pending_device_link_conn;
 
   if (!req || !req_cl) {
     nob_log(ERROR,
-            "[client=%" PRIu64
-            " fd=%i] Server got %s but there is no "
+            "[client=%" PRIu64 " fd=%i] Server got %s but there is no "
             "device link request pending. Rejecting envelope.",
             cl->conn_id, cl->fd, faith_envelope_name(response_envl->type));
     return FAITH_ERR_INVALID;
@@ -1253,7 +1477,8 @@ server_handle_device_link_response(struct server_state_t  *s,
   }
 
   if (!response_envl->body ||
-      response_envl->body_size != sizeof(faith_client_device_link_response_t)) {
+      response_envl->body_size !=
+          sizeof(faith_envl_cts_device_link_response_t)) {
     nob_log(ERROR,
             "[client=%" PRIu64
             " fd=%i] Server got invalid %s envelope contents.",
@@ -1261,7 +1486,7 @@ server_handle_device_link_response(struct server_state_t  *s,
     return FAITH_ERR_INVALID;
   }
 
-  if (!req_cl || req_cl->fd < 0 || req_cl->state != CLIENT_OPEN) {
+  if (!req_cl || req_cl->closing) {
     char req_auth_id_hex[33];
     char req_device_id_hex[33];
     _FH_CHECK_RETURN(faith_id128_to_hex(req->auth_id.bytes, req_auth_id_hex));
@@ -1316,8 +1541,8 @@ server_handle_device_link_response(struct server_state_t  *s,
     _FH_RETURN_DEFER(FAITH_ERR_EXPIRED);
   }
 
-  faith_client_device_link_response_t response = {0};
-  _FH_CHECK_RETURN(faith_decode_device_link_response(
+  faith_envl_cts_device_link_response_t response = {0};
+  _FH_CHECK_RETURN(faith_decode_device_link_response_body(
       response_envl->body, response_envl->body_size, &response));
 
   if (!faith_device_id_equal(response.device_id_new, req->device_id_new)) {
@@ -1342,7 +1567,7 @@ server_handle_device_link_response(struct server_state_t  *s,
    *      device_id_approving (device ID of the responding device)
    *    } */
 
-  faith_signature_device_link_approval_t sign_msg = {0};
+  faith_signature_device_link_response_t sign_msg = {0};
   sign_msg.auth_id = req->auth_id;
   sign_msg.device_id_new = req->device_id_new;
 
@@ -1351,11 +1576,15 @@ server_handle_device_link_response(struct server_state_t  *s,
   memcpy(sign_msg.code, req->code, sizeof(req->code));
 
   sign_msg.expires_at_ms = req->expires_at_ms;
-  sign_msg.device_id_approving = cl->device_id;
+  sign_msg.device_id_responding = cl->device_id;
 
-  uint8_t msg_buf[sizeof(faith_signature_device_link_approval_t)];
+  sign_msg.type = response_envl->type == FAITH_ENVELOPE_DEVICE_AUTH_APPROVE
+                      ? FAITH_DEVICE_LINK_APPROVE
+                      : FAITH_DEVICE_LINK_DENY;
+
+  uint8_t msg_buf[FAITH_SIGNATURE_DEVICE_LINK_RESPONSE_SIZE];
   {
-    _FH_CHECK(faith_gen_sign_buf_device_link_approval(msg_buf, sizeof(msg_buf),
+    _FH_CHECK(faith_gen_sign_buf_device_link_response(msg_buf, sizeof(msg_buf),
                                                       &sign_msg));
 
     if (_fh_rc != FAITH_OK) {
@@ -1421,43 +1650,72 @@ server_handle_device_link_response(struct server_state_t  *s,
   /* Client proved their legitimacy to us. */
   /* ======================================== */
 
-  faith_status_code_t rc = FAITH_OK;
-  switch(response_envl->type) {
-    case FAITH_ENVELOPE_DEVICE_AUTH_DENY: 
-      rc = close_client(s, &req_cl);
-      break;
-    case FAITH_ENVELOPE_DEVICE_AUTH_APPROVE:
-      _FH_CHECK_DEFER(server_authorize_client(s, req_cl, &req->auth_id,
-                                              &req->device_id_new,
-                                              req->public_key_new_device, 1));
-      break;
-    default:
-      return FAITH_ERR_UNREACHABLE;
+  switch (response_envl->type) {
+  case FAITH_ENVELOPE_DEVICE_AUTH_DENY:
+    req_cl->closing = 1;
+    break;
+  case FAITH_ENVELOPE_DEVICE_AUTH_APPROVE:
+    _FH_CHECK_DEFER(server_authorize_client(s, req_cl, &req->auth_id,
+                                            &req->device_id_new,
+                                            req->public_key_new_device, 1));
+    break;
+  default:
+    return FAITH_ERR_UNREACHABLE;
   }
 
-  /* Remove the pending device link request */
-  free(cl->pending_device_link_req);
-  cl->pending_device_link_req = NULL;
+  struct client_route_device_t *authorized_devices = NULL;
 
-  return rc;
+  _FH_CHECK_RETURN(
+      routing_get_devices(&s->rt, &cl->auth_id, &authorized_devices));
+
+  ptrdiff_t n_authorized_devices = hmlen(authorized_devices);
+
+  /* Route the response to all other authorized devices
+    for that auth ID */
+  for (ptrdiff_t i = 0; i < n_authorized_devices; i++) {
+    if (!authorized_devices[i].value || !authorized_devices[i].value->conn) {
+      nob_log(ERROR, "Routing table contains an invalid device entry");
+      continue;
+    }
+
+    struct client_conn_t *authorized_cl = authorized_devices[i].value->conn;
+
+    if (authorized_cl->pending_device_link_conn != req_cl)
+      continue;
+
+    if (authorized_cl->authorized && !authorized_cl->closing &&
+        authorized_cl->state == CLIENT_OPEN) {
+      faith_envelope_t ack_envl = {0};
+      ack_envl.type = FAITH_ENVELOPE_DEVICE_AUTH_RESPONSE_ACK;
+
+      _FH_CHECK(server_send_envelope_or_close(s, authorized_cl, &ack_envl));
+    }
+
+    free(authorized_cl->pending_device_link_req);
+    authorized_cl->pending_device_link_req = NULL;
+    authorized_cl->pending_device_link_conn = NULL;
+  }
+
+  return FAITH_OK;
 
 defer: {
   /* ================================================= */
   /* Client failed to proved their legitimacy to us.
-   * This path punishes the pending client that  
+   * This path punishes the pending client that
    * requested to be linked to this auth_id. */
   /* ================================================= */
 
-  /* Copies for logging*/
+  /* Copies for logging */
   faith_client_id_t client_id = req->auth_id;
   faith_device_id_t device_id_new = req->device_id_new;
 
-  /* Close the connection that requested the device link */
-  close_client(s, &req_cl);
+  /* Close the connection that requested the device link: <req_cl> */
+  req_cl->closing = 1;
 
-  /* Remove the pending device link request */
+  /* Remove the pending device link request from <cl> */
   free(cl->pending_device_link_req);
   cl->pending_device_link_req = NULL;
+  cl->pending_device_link_conn = NULL;
 
   char auth_id_hex[33];
   char device_id_hex[33];
@@ -1478,40 +1736,55 @@ defer: {
 static faith_status_code_t server_route_msg_envl(struct server_state_t *s,
                                                  struct client_conn_t  *cl,
                                                  faith_envelope_t      *envl) {
-  if (!cl || !envl)
+  if (!s || !cl || cl->closing || !envl)
     return FAITH_ERR_INVALID;
+
   if (envl->type != FAITH_ENVELOPE_MSG_SEND)
     return FAITH_ERR_INVALID;
 
-  if (cl->state != CLIENT_OPEN) {
-    return FAITH_ERR_IO;
-  }
+  if (cl->state != CLIENT_OPEN)
+    return FAITH_ERR_BAD_ENVELOPE;
 
-  if (envl->body_size == 0)
+  /* Zero size message envelopes are not allowed in the protocol */
+  if (envl->body_size == 0 || !envl->body)
     return FAITH_ERR_INVALID;
+
+  if (!cl->authorized)
+    return FAITH_ERR_UNAUTHORIZED;
 
   struct client_route_device_t *recipient_devices = NULL;
 
-  faith_status_code_t rc =
-      routing_get_devices(&s->rt, &envl->recipient_id, &recipient_devices);
+  {
+    _FH_CHECK(
+        routing_get_devices(&s->rt, &envl->recipient_id, &recipient_devices));
 
-  if (rc == FAITH_ERR_INVALID) {
-    return rc;
-  }
-
-  if (rc == FAITH_ERR_NOT_FOUND) {
-    char recipient_id_hex[33];
-    _FH_CHECK_RETURN(
-        faith_id128_to_hex(envl->recipient_id.bytes, recipient_id_hex));
-    nob_log(INFO,
-            "[client=%" PRIu64
-            " fd=%i] Envelope %s: Recipient (auth_id: %s) is offline.",
-            cl->conn_id, cl->fd, faith_envelope_name(envl->type),
-            recipient_id_hex);
+    if (_fh_rc != FAITH_OK) {
+      if (_fh_rc == FAITH_ERR_NOT_FOUND) {
+        char recipient_id_hex[33];
+        _FH_CHECK_RETURN(
+            faith_id128_to_hex(envl->recipient_id.bytes, recipient_id_hex));
+        nob_log(INFO,
+                "[client=%" PRIu64
+                " fd=%i] Envelope %s: Recipient (auth_id: %s) is "
+                "offline. Will not send message to recipient.",
+                cl->conn_id, cl->fd, faith_envelope_name(envl->type),
+                recipient_id_hex);
+        return FAITH_OK;
+      }
+      return _fh_rc;
+    }
   }
 
   for (ptrdiff_t i = 0; i < hmlen(recipient_devices); i++) {
+    if (!recipient_devices[i].value || !recipient_devices[i].value->conn) {
+      nob_log(ERROR, "Routing table contains an invalid device entry");
+      continue;
+    }
     struct client_conn_t *recipient = recipient_devices[i].value->conn;
+
+    if (recipient->closing || recipient->state != CLIENT_OPEN) {
+      continue;
+    }
 
     char recipient_device_id_hex[33];
     char recipient_id_hex[33];
@@ -1520,21 +1793,20 @@ static faith_status_code_t server_route_msg_envl(struct server_state_t *s,
     _FH_CHECK_RETURN(
         faith_id128_to_hex(envl->recipient_id.bytes, recipient_id_hex));
 
-    if (!faith_client_id_equal(recipient->auth_id, envl->recipient_id)) {
+    if (!recipient->authorized) {
       nob_log(ERROR,
               "[client=%" PRIu64
-              " fd=%i] Envelope %s: Device %s of recipient (auth_id: %s) is "
-              "not authenticated. Will not send message to device.",
+              " fd=%i] Envelope %s: Recipient (auth_id: %s, device_id: %s) is "
+              "not authorized. Will not send message to recipient.",
               cl->conn_id, cl->fd, faith_envelope_name(envl->type),
-              recipient_device_id_hex, recipient_id_hex);
+              recipient_id_hex, recipient_device_id_hex);
       continue;
     }
 
     faith_envelope_t routing_envl = *envl;
-    routing_envl.sender_id = recipient->auth_id;
+    routing_envl.sender_id = cl->auth_id;
 
-    _FH_CHECK(server_send_envelope(recipient_devices[i].value->conn,
-                                   &routing_envl, s->epoll_fd));
+    _FH_CHECK(server_send_envelope_or_close(s, recipient, &routing_envl));
 
     if (_fh_rc != FAITH_OK) {
       nob_log(ERROR,
@@ -1543,6 +1815,7 @@ static faith_status_code_t server_route_msg_envl(struct server_state_t *s,
               "(device_id: %s) of recipient (auth_id: %s).",
               cl->conn_id, cl->fd, faith_envelope_name(envl->type),
               recipient_device_id_hex, recipient_id_hex);
+      continue;
     }
 
     nob_log(INFO,
@@ -1555,76 +1828,63 @@ static faith_status_code_t server_route_msg_envl(struct server_state_t *s,
   return FAITH_OK;
 }
 
-static faith_status_code_t server_handle_envl(struct server_state_t *s,
-                                              struct client_conn_t  *cl,
-                                              faith_frame_t         *frame) {
+static faith_status_code_t server_handle_envelope(struct server_state_t *s,
+                                                  struct client_conn_t  *cl,
+                                                  faith_frame_t *frame) {
 
-  if (!frame || !cl)
+  if (!s || !frame || !cl)
     return FAITH_ERR_INVALID;
 
-  faith_envelope_t envl;
+  faith_envelope_t envl = {0};
 
-  _FH_CHECK_RETURN(
+  faith_status_code_t _fh_result = FAITH_OK;
+
+  _FH_CHECK_DEFER(
       faith_decode_envelope(frame->payload, frame->payload_size, &envl));
 
-  int is_handshake_state = cl->state != CLIENT_OPEN;
+  nob_log(INFO,
+          "[client=%" PRIu64
+          " fd=%i] Server is handling envelope: type=%s body_size=%u",
+          cl->conn_id, cl->fd, faith_envelope_name(envl.type), envl.body_size);
 
-  int is_handshake_envl = envl.type == FAITH_ENVELOPE_HELLO ||
-                          envl.type == FAITH_ENVELOPE_CHALLENGE_RESPONSE;
-  faith_status_code_t rc = FAITH_OK;
-  if (is_handshake_state && !is_handshake_envl) {
-    nob_log(ERROR,
-            "[client=%" PRIu64 " fd=%i] Client is not acknowledged yet. Will "
-            "not handle envelope (%s).",
-            cl->conn_id, cl->fd, faith_envelope_name(envl.type));
+  switch (envl.type) {
+  case FAITH_ENVELOPE_HELLO:
+    _FH_CHECK_DEFER(server_handle_hello(s, cl, &envl));
+    break;
 
-    rc = FAITH_ERR_IO;
-    goto defer;
+  case FAITH_ENVELOPE_CHALLENGE_RESPONSE:
+    _FH_CHECK_DEFER(server_handle_challenge_response(s, cl, &envl));
+    break;
+
+  case FAITH_ENVELOPE_MSG_SEND:
+    _FH_CHECK_DEFER(server_route_msg_envl(s, cl, &envl));
+    break;
+
+  case FAITH_ENVELOPE_DEVICE_AUTH_APPROVE:
+  case FAITH_ENVELOPE_DEVICE_AUTH_DENY:
+    _FH_CHECK_DEFER(server_handle_device_link_response(s, cl, &envl));
+    break;
+
+  default:
+    _FH_RETURN_DEFER(FAITH_ERR_BAD_ENVELOPE);
   }
 
   nob_log(INFO,
           "[client=%" PRIu64
-          " fd=%i] Server got envelope: type=%s body_size=%u",
+          " fd=%i] Server successfully handled envelope: type=%s body_size=%u",
           cl->conn_id, cl->fd, faith_envelope_name(envl.type), envl.body_size);
-
-  switch (envl.type) {
-  case FAITH_ENVELOPE_HELLO: {
-    _FH_CHECK(server_handle_hello(s, cl, &envl));
-    rc = _fh_rc;
-    break;
-  }
-  case FAITH_ENVELOPE_MSG_SEND: {
-    _FH_CHECK(server_route_msg_envl(s, cl, &envl));
-    rc = _fh_rc;
-    break;
-  }
-  case FAITH_ENVELOPE_CHALLENGE_RESPONSE: {
-    _FH_CHECK(server_handle_challenge_response(s, cl, &envl));
-    rc = _fh_rc;
-    break;
-  }
-  case FAITH_ENVELOPE_DEVICE_AUTH_APPROVE: 
-  case FAITH_ENVELOPE_DEVICE_AUTH_DENY: {
-    _FH_CHECK(server_handle_device_link_response(s, cl, &envl));
-    rc = _fh_rc;
-    break;
-  }
-  default:
-    rc = FAITH_ERR_BAD_FRAME;
-    break;
-  }
 
 defer:
   if (envl.body != NULL)
     free(envl.body);
 
-  return rc;
+  return _fh_result;
 }
 
 static faith_status_code_t handle_frame(struct server_state_t *s,
                                         struct client_conn_t  *cl,
-                                        faith_frame_t *frame, int epfd) {
-  if (!cl)
+                                        faith_frame_t         *frame) {
+  if (!s || !cl || !frame)
     return FAITH_ERR_INVALID;
 
   nob_log(INFO,
@@ -1633,20 +1893,12 @@ static faith_status_code_t handle_frame(struct server_state_t *s,
           cl->conn_id, cl->fd, faith_frame_msg_name(frame->msg_type),
           frame->payload_size);
 
-  if (cl->state != CLIENT_OPEN && frame->msg_type != FAITH_MSG_ENVL) {
-    nob_log(ERROR,
-            "[client=%" PRIu64
-            " fd=%i] Client is not acknowledged yet. Rejecting frame (type=%s)",
-            cl->conn_id, cl->fd, faith_frame_msg_name(frame->msg_type));
-    return FAITH_ERR_IO;
-  }
-
   switch (frame->msg_type) {
   case FAITH_MSG_PING:
-    _FH_CHECK_RETURN(server_send_pong(cl, frame, epfd));
+    _FH_CHECK_RETURN(server_send_pong(s, cl, frame));
     break;
   case FAITH_MSG_ENVL:
-    _FH_CHECK_RETURN(server_handle_envl(s, cl, frame));
+    _FH_CHECK_RETURN(server_handle_envelope(s, cl, frame));
     break;
   default:
     return FAITH_ERR_BAD_FRAME;
@@ -1656,7 +1908,8 @@ static faith_status_code_t handle_frame(struct server_state_t *s,
 }
 
 static enum read_frame_result_t
-read_more_ssl_bytes(struct client_conn_t *cl, const struct server_cfg_t *cfg) {
+server_read_more_ssl_bytes(struct client_conn_t      *cl,
+                           const struct server_cfg_t *cfg) {
   if (!cl || !cfg)
     return READ_FRAME_ERROR;
 
@@ -1665,7 +1918,8 @@ read_more_ssl_bytes(struct client_conn_t *cl, const struct server_cfg_t *cfg) {
   int nread = SSL_read(cl->ssl, tmp, sizeof(tmp));
 
   if (nread > 0) {
-    faith_status_code_t rc = enqueue_input_bytes(cl, tmp, (size_t)nread, cfg);
+    faith_status_code_t rc =
+        server_enqueue_input_bytes(cl, tmp, (size_t)nread, cfg);
 
     if (rc != FAITH_OK)
       return READ_FRAME_ERROR;
@@ -1707,8 +1961,22 @@ static faith_status_code_t try_parse_frame_from_buffer(const uint8_t *buf,
 
   uint32_t frame_size = faith_read_u32_be(buf + 0);
 
-  if (frame_size < FAITH_HEADER_SIZE - (sizeof(uint16_t) + sizeof(uint16_t)))
+  const size_t frame_header_size = sizeof(uint16_t) + /* protocol version */
+                                   sizeof(uint16_t);  /* message type */
+
+  if (frame_size < frame_header_size)
     return FAITH_ERR_BAD_FRAME;
+
+  const size_t payload_size = (size_t)frame_size - frame_header_size;
+
+  if (payload_size > FAITH_MAX_PAYLOAD_SIZE) {
+    nob_log(ERROR,
+            "Failed to parse frame from buffer; "
+            "payload_size=%zu MAX_PAYLOAD_SIZE=%zu",
+            payload_size, (size_t)FAITH_MAX_PAYLOAD_SIZE);
+
+    return FAITH_ERR_FRAME_TOO_LARGE;
+  }
 
   if (frame_size > FAITH_MAX_FRAME_LEN) {
     nob_log(ERROR,
@@ -1795,7 +2063,7 @@ try_read_one_frame(struct client_conn_t *cl, faith_frame_t *frame,
                 " fd=%i] Frame incomplete, reading more bytes...",
                 cl->conn_id, cl->fd);
       }
-      enum read_frame_result_t rr = read_more_ssl_bytes(cl, cfg);
+      enum read_frame_result_t rr = server_read_more_ssl_bytes(cl, cfg);
 
       if (rr == READ_FRAME_GOT_BYTES) {
         if (cfg->verbose_logging) {
@@ -1852,67 +2120,70 @@ try_read_one_frame(struct client_conn_t *cl, faith_frame_t *frame,
 
 static int drive_client_read(struct server_state_t *s, struct client_conn_t *cl,
                              const struct server_cfg_t *cfg) {
+  if (!s || !cl || cl->closing || !cfg)
+    return -1;
   faith_frame_t frame;
 
   enum read_frame_result_t rr = try_read_one_frame(cl, &frame, cfg);
 
-  if (rr == READ_FRAME_OK) {
-    _FH_CHECK(handle_frame(s, cl, &frame, s->epoll_fd));
+  switch (rr) {
+  case READ_FRAME_OK: {
+    _FH_CHECK(handle_frame(s, cl, &frame));
+    faith_frame_free(&frame);
     if (_fh_rc != FAITH_OK) {
-      faith_frame_free(&frame);
+      cl->closing = 1;
       return -1;
     }
 
-    faith_frame_free(&frame);
+    if (cl->closing)
+      return -1;
 
     if (cfg->verbose_logging) {
-      nob_log(INFO,
-              "[client=%" PRIu64 " fd=%i]: Success handling client frame.",
+      nob_log(INFO, "[client=%" PRIu64 " fd=%i] Success handling client frame.",
               cl->conn_id, cl->fd);
     }
 
-    uint32_t mask = EPOLLIN | EPOLLRDHUP | EPOLLERR | EPOLLHUP;
+    uint32_t mask = cl->ev_mask | EPOLLIN;
 
     if (cl->out_buf && cl->out_off < cl->out_size) {
       mask |= EPOLLOUT;
     }
 
     if (modify_client_ev_mask(s->epoll_fd, cl, mask) < 0) {
-      return -1;
+      goto fail_ev_mask;
     }
 
     return 0;
   }
-
-  if (rr == READ_FRAME_WANT_READ) {
-    uint32_t mask = EPOLLIN | EPOLLRDHUP | EPOLLERR | EPOLLHUP;
+  case READ_FRAME_WANT_READ: {
+    uint32_t mask = cl->ev_mask | EPOLLIN;
 
     if (cl->out_buf && cl->out_off < cl->out_size) {
       mask |= EPOLLOUT;
     }
 
     if (modify_client_ev_mask(s->epoll_fd, cl, mask) < 0) {
-      return -1;
+      goto fail_ev_mask;
     }
     return 0;
   }
 
-  if (rr == READ_FRAME_WANT_WRITE) {
-    if (modify_client_ev_mask(s->epoll_fd, cl,
-                              EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLERR |
-                                  EPOLLHUP) < 0) {
-      nob_log(ERROR, "modify_client_ev_mask failed: %s", strerror(errno));
-      return -1;
-    }
-    return 0;
-  }
-
-  if (rr == READ_FRAME_CLOSED)
+  case READ_FRAME_CLOSED:
+    cl->closing = 1;
     return -1;
+  default:
+    nob_log(ERROR, "[client=%" PRIu64 " fd=%i] Failed to read client frame.",
+            cl->conn_id, cl->fd);
 
-  nob_log(ERROR, "[client=%" PRIu64 " fd=%i]: Failed to read client frame.",
-          cl->conn_id, cl->fd);
+    cl->closing = 1;
+    return -1;
+  }
 
+fail_ev_mask:
+
+  nob_log(ERROR, "[client=%" PRIu64 " fd=%d] modify_client_ev_mask failed: %s",
+          cl->conn_id, cl->fd, strerror(errno));
+  cl->closing = 1;
   return -1;
 }
 
@@ -1969,9 +2240,9 @@ static void accept_clients(struct server_state_t *s) {
     struct epoll_event ev;
     memset(&ev, 0, sizeof(ev));
 
-    ev.events = EPOLLIN | EPOLLRDHUP | EPOLLERR | EPOLLHUP;
+    ev.events = EPOLLIN | EPOLLRDHUP;
     ev.data.ptr = cl;
-    cl->evs_mask_want = ev.events;
+    cl->ev_mask = ev.events;
 
     if (epoll_ctl(s->epoll_fd, EPOLL_CTL_ADD, client_fd, &ev) < 0) {
       nob_log(ERROR, "epoll_ctl() failed for client (FD: %i): %s", client_fd,
@@ -1986,13 +2257,10 @@ static faith_status_code_t drive_tls_handshake(struct server_state_t *s,
                                                struct client_conn_t  *cl) {
   int rc = SSL_accept(cl->ssl);
 
-  uint32_t base_mask = EPOLLRDHUP | EPOLLERR | EPOLLHUP;
-
   if (rc == 1) {
-    set_client_state(s, cl, CLIENT_WAIT_FOR_HELLO_ACK);
-    base_mask |= EPOLLIN;
+    set_client_state(s, cl, CLIENT_WAIT_FOR_HELLO);
 
-    if (modify_client_ev_mask(s->epoll_fd, cl, base_mask) < 0) {
+    if (modify_client_ev_mask(s->epoll_fd, cl, cl->ev_mask | EPOLLIN) < 0) {
       nob_log(ERROR, "modify_client_ev_mask failed: %s", strerror(errno));
       return FAITH_ERR_IO;
     }
@@ -2003,9 +2271,7 @@ static faith_status_code_t drive_tls_handshake(struct server_state_t *s,
   int err = SSL_get_error(cl->ssl, rc);
 
   if (err == SSL_ERROR_WANT_READ) {
-    base_mask |= EPOLLIN;
-
-    if (modify_client_ev_mask(s->epoll_fd, cl, base_mask) < 0) {
+    if (modify_client_ev_mask(s->epoll_fd, cl, cl->ev_mask | EPOLLIN) < 0) {
       nob_log(ERROR, "modify_client_ev_mask failed: %s", strerror(errno));
       return FAITH_ERR_IO;
     }
@@ -2014,9 +2280,7 @@ static faith_status_code_t drive_tls_handshake(struct server_state_t *s,
   }
 
   if (err == SSL_ERROR_WANT_WRITE) {
-    base_mask |= EPOLLOUT;
-
-    if (modify_client_ev_mask(s->epoll_fd, cl, base_mask) < 0) {
+    if (modify_client_ev_mask(s->epoll_fd, cl, cl->ev_mask | EPOLLOUT) < 0) {
       nob_log(ERROR, "modify_client_ev_mask failed: %s", strerror(errno));
       return FAITH_ERR_IO;
     }
@@ -2045,7 +2309,7 @@ static faith_status_code_t flush_client_output(int                   epoll_fd,
     int clamped = remaining > INT_MAX ? INT_MAX : (int)remaining;
 
     int nwrite = SSL_write(cl->ssl, cl->out_buf + cl->out_off, clamped);
-    nob_log(INFO, "[client=%" PRIu64 " fd=%i]: wrote %i bytes over the wire.",
+    nob_log(INFO, "[client=%" PRIu64 " fd=%i] wrote %i bytes over the wire.",
             cl->conn_id, cl->fd, nwrite);
 
     if (nwrite > 0) {
@@ -2075,6 +2339,7 @@ static faith_status_code_t flush_client_output(int                   epoll_fd,
   free(cl->out_buf);
   cl->out_buf = NULL;
   cl->out_size = 0;
+  cl->out_cap = 0;
   cl->out_off = 0;
 
   if (modify_client_ev_mask(epoll_fd, cl,
@@ -2084,6 +2349,13 @@ static faith_status_code_t flush_client_output(int                   epoll_fd,
   }
 
   return FAITH_OK;
+}
+
+static int client_output_empty(const struct client_conn_t *cl) {
+  if (!cl || !cl->ssl)
+    return 0;
+
+  return cl->out_size == 0 && BIO_ctrl_pending(SSL_get_wbio(cl->ssl)) == 0;
 }
 
 int loop(struct server_state_t *s) {
@@ -2111,6 +2383,9 @@ int loop(struct server_state_t *s) {
 
       struct client_conn_t *cl = events[i].data.ptr;
 
+      if (!cl)
+        continue;
+
       if (revents & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
         _FH_CHECK(close_client(s, &cl));
         continue;
@@ -2122,7 +2397,9 @@ int loop(struct server_state_t *s) {
         if (drive_tls_handshake(s, cl) < 0)
           dead = 1;
       } else if (cl->state == CLIENT_OPEN ||
-                 cl->state == CLIENT_WAIT_FOR_HELLO_ACK) {
+                 cl->state == CLIENT_WAIT_FOR_HELLO ||
+                 cl->state == CLIENT_WAIT_FOR_CHALLENGE_RESPONSE ||
+                 cl->state == CLIENT_WAIT_FOR_DEVICE_LINK_RESPONSE) {
         if ((revents & EPOLLIN) && drive_client_read(s, cl, &s->cfg) < 0)
           dead = 1;
 
@@ -2131,8 +2408,14 @@ int loop(struct server_state_t *s) {
           dead = 1;
       }
 
-      if (dead) {
+      if (dead || cl->closing) {
         _FH_CHECK(close_client(s, &cl));
+        continue;
+      }
+
+      if (cl->close_after_flush && client_output_empty(cl)) {
+        _FH_CHECK(close_client(s, &cl));
+        continue;
       }
     }
   }
@@ -2384,7 +2667,7 @@ int main(int argc, char **argv) {
 
   int arg_rc = parse_args(argc, argv, &s);
 
-  // User only wanted to print help message
+  /* User only wanted to print help message */
   if (arg_rc == 2) {
     return 0;
   }
