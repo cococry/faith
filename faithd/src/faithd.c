@@ -1347,7 +1347,7 @@ static faith_status_code_t server_handle_challenge_response(
     return FAITH_ERR_INVALID;
   }
 
-  uint8_t client_signature[FAITH_ED25519_SIGNATURE_SIZE];
+  uint8_t client_signature[FAITH_ED25519_SIGNATURE_SIZE] = {0};
   memcpy(client_signature, challenge_response_envl->body,
          sizeof(client_signature));
 
