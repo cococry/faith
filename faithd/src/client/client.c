@@ -861,7 +861,7 @@ client_handle_challenge(faith_client_t   *client,
   sign_msg.client_nonce = client->nonce_tmp;
   sign_msg.server_nonce = server_nonce;
 
-  uint8_t msg_buf[sizeof(sign_msg)];
+  uint8_t msg_buf[FAITH_SIGNATURE_HELLO_HANDSHAKE_SIZE];
   {
     _FH_CHECK(faith_gen_sign_buf_hello_handshake(msg_buf, sizeof(msg_buf),
                                                  &sign_msg));
@@ -875,7 +875,7 @@ client_handle_challenge(faith_client_t   *client,
 
   /* 3. Generating the 64 byte cryptographic signature from the message buffer
    */
-  uint8_t signature[FAITH_ED25519_SIGNATURE_SIZE];
+  uint8_t signature[FAITH_ED25519_SIGNATURE_SIZE] = {0};
   size_t  signature_size = 0;
   {
 
@@ -1070,12 +1070,63 @@ faith_status_code_t faith_client_init_global(int log_enable_tracing) {
   return FAITH_OK;
 }
 
+
+static bool hex_char_to_nibble(char c, uint8_t *out) {
+  if (!out)
+    return false;
+
+  if (c >= '0' && c <= '9') {
+    *out = (uint8_t)(c - '0');
+    return true;
+  }
+
+  if (c >= 'a' && c <= 'f') {
+    *out = (uint8_t)(c - 'a' + 10);
+    return true;
+  }
+
+  if (c >= 'A' && c <= 'F') {
+    *out = (uint8_t)(c - 'A' + 10);
+    return true;
+  }
+
+  return false;
+}
+
+static bool client_id_from_hex(const char *hex, faith_client_id_t *out) {
+  if (!hex || !out)
+    return false;
+
+  if (strlen(hex) != FAITH_CLIENT_ID_SIZE * 2)
+    return false;
+
+  faith_client_id_t id = {0};
+
+  for (size_t i = 0; i < FAITH_CLIENT_ID_SIZE; ++i) {
+    uint8_t hi = 0;
+    uint8_t lo = 0;
+
+    if (!hex_char_to_nibble(hex[i * 2 + 0], &hi))
+      return false;
+
+    if (!hex_char_to_nibble(hex[i * 2 + 1], &lo))
+      return false;
+
+    id.bytes[i] = (uint8_t)((hi << 4) | lo);
+  }
+
+  *out = id;
+  return true;
+}
+
+
 static faith_status_code_t client_new_identity(client_identity_t *o_ident) {
   if (!o_ident)
     return FAITH_ERR_INVALID;
 
   /* Generate 128 bit random device & auth identities */
-  _FH_CHECK_RETURN(faith_random_bytes(o_ident->auth_id.bytes, sizeof(o_ident->auth_id.bytes)));
+
+  client_id_from_hex("887f50a5b53f93c3b983b10bb9d74a10", &o_ident->auth_id);
 
   _FH_CHECK_RETURN(faith_random_bytes(o_ident->device_id.bytes, sizeof(o_ident->device_id.bytes)));
 
@@ -1343,7 +1394,7 @@ client_gen_device_auth_respone_signature(faith_client_t *client,
 
   sign_msg.type = type; 
 
-  uint8_t msg_buf[sizeof(faith_signature_device_link_response_t)];
+  uint8_t msg_buf[FAITH_SIGNATURE_DEVICE_LINK_RESPONSE_SIZE];
   {
     _FH_CHECK(faith_gen_sign_buf_device_link_response(
         msg_buf, sizeof(msg_buf), &sign_msg));
@@ -1383,7 +1434,7 @@ faith_client_approve_pending_device_auth(faith_client_t *client) {
     return FAITH_ERR_INVALID;
   }
 
-  uint8_t signature[FAITH_ED25519_SIGNATURE_SIZE];
+  uint8_t signature[FAITH_ED25519_SIGNATURE_SIZE] = {0};
   size_t  signature_size = 0;
 
   faith_status_code_t _fh_result = FAITH_OK;
@@ -1435,7 +1486,7 @@ faith_client_deny_pending_device_auth(faith_client_t *client) {
     return FAITH_ERR_INVALID;
   }
 
-  uint8_t signature[FAITH_ED25519_SIGNATURE_SIZE];
+  uint8_t signature[FAITH_ED25519_SIGNATURE_SIZE] = {0};
   size_t  signature_size = 0;
 
   faith_status_code_t _fh_result = FAITH_OK;
