@@ -5,6 +5,345 @@
 #include <stdint.h>
 #include <string.h>
 
+#define _FH_LOG_CODEC_FAILURE(operation, reason, details_fmt, ...)             \
+  nob_log(ERROR,                                                               \
+          "%s failed:\n"                                                       \
+          "  reason   : %s\n"                                                  \
+          "  function : %s\n"                                                  \
+          "  location : %s:%d\n" details_fmt,                                  \
+          (operation), (reason), __func__, __FILE__, __LINE__, __VA_ARGS__)
+
+#define FAITH_APPEND_RETURN(buf, cap, off, ptr, len)                           \
+  do {                                                                         \
+    const size_t _fh_cap = (size_t)(cap);                                      \
+    const size_t _fh_off = (size_t)(off);                                      \
+    const size_t _fh_len = (size_t)(len);                                      \
+                                                                               \
+    if (!(buf)) {                                                              \
+      _FH_LOG_CODEC_FAILURE("Buffer append", "destination buffer is NULL",     \
+                            "  buffer   : %s\n"                                \
+                            "  source   : %s\n"                                \
+                            "  offset   : %zu\n"                               \
+                            "  length   : %zu\n"                               \
+                            "  capacity : %zu",                                \
+                            #buf, #ptr, _fh_off, _fh_len, _fh_cap);            \
+      return FAITH_ERR_INVALID;                                                \
+    }                                                                          \
+                                                                               \
+    if (_fh_len > 0 && !(ptr)) {                                               \
+      _FH_LOG_CODEC_FAILURE("Buffer append",                                   \
+                            "source is NULL for a non-empty copy",             \
+                            "  buffer   : %s\n"                                \
+                            "  source   : %s\n"                                \
+                            "  offset   : %zu\n"                               \
+                            "  length   : %zu\n"                               \
+                            "  capacity : %zu",                                \
+                            #buf, #ptr, _fh_off, _fh_len, _fh_cap);            \
+      return FAITH_ERR_INVALID;                                                \
+    }                                                                          \
+                                                                               \
+    if (_fh_off > _fh_cap) {                                                   \
+      _FH_LOG_CODEC_FAILURE("Buffer append",                                   \
+                            "offset exceeds destination capacity",             \
+                            "  buffer   : %s\n"                                \
+                            "  source   : %s\n"                                \
+                            "  offset   : %zu\n"                               \
+                            "  length   : %zu\n"                               \
+                            "  capacity : %zu",                                \
+                            #buf, #ptr, _fh_off, _fh_len, _fh_cap);            \
+      return FAITH_ERR_OVERFLOW;                                               \
+    }                                                                          \
+                                                                               \
+    if (_fh_len > _fh_cap - _fh_off) {                                         \
+      _FH_LOG_CODEC_FAILURE(                                                   \
+          "Buffer append", "insufficient destination capacity",                \
+          "  buffer    : %s\n"                                                 \
+          "  source    : %s\n"                                                 \
+          "  offset    : %zu\n"                                                \
+          "  length    : %zu\n"                                                \
+          "  remaining : %zu\n"                                                \
+          "  capacity  : %zu",                                                 \
+          #buf, #ptr, _fh_off, _fh_len, _fh_cap - _fh_off, _fh_cap);           \
+      return FAITH_ERR_OVERFLOW;                                               \
+    }                                                                          \
+                                                                               \
+    if (_fh_len > 0)                                                           \
+      memcpy((buf) + _fh_off, (ptr), _fh_len);                                 \
+                                                                               \
+    (off) += _fh_len;                                                          \
+  } while (0)
+
+#define FAITH_DECODE_RETURN(payload, payload_size, offset, dst, size)          \
+  do {                                                                         \
+    const size_t _fh_payload_size = (size_t)(payload_size);                    \
+    const size_t _fh_offset = (size_t)(offset);                                \
+    const size_t _fh_size = (size_t)(size);                                    \
+                                                                               \
+    if (!(payload)) {                                                          \
+      _FH_LOG_CODEC_FAILURE("Buffer decode", "payload is NULL",                \
+                            "  payload      : %s\n"                            \
+                            "  destination  : %s\n"                            \
+                            "  offset       : %zu\n"                           \
+                            "  length       : %zu\n"                           \
+                            "  payload size : %zu",                            \
+                            #payload, #dst, _fh_offset, _fh_size,              \
+                            _fh_payload_size);                                 \
+      return FAITH_ERR_INVALID;                                                \
+    }                                                                          \
+                                                                               \
+    if (_fh_size > 0 && !(dst)) {                                              \
+      _FH_LOG_CODEC_FAILURE(                                                   \
+          "Buffer decode", "destination is NULL for a non-empty copy",         \
+          "  payload      : %s\n"                                              \
+          "  destination  : %s\n"                                              \
+          "  offset       : %zu\n"                                             \
+          "  length       : %zu\n"                                             \
+          "  payload size : %zu",                                              \
+          #payload, #dst, _fh_offset, _fh_size, _fh_payload_size);             \
+      return FAITH_ERR_INVALID;                                                \
+    }                                                                          \
+                                                                               \
+    if (_fh_offset > _fh_payload_size) {                                       \
+      _FH_LOG_CODEC_FAILURE("Buffer decode", "offset exceeds payload size",    \
+                            "  payload      : %s\n"                            \
+                            "  destination  : %s\n"                            \
+                            "  offset       : %zu\n"                           \
+                            "  length       : %zu\n"                           \
+                            "  payload size : %zu",                            \
+                            #payload, #dst, _fh_offset, _fh_size,              \
+                            _fh_payload_size);                                 \
+      return FAITH_ERR_BAD_FRAME;                                              \
+    }                                                                          \
+                                                                               \
+    if (_fh_size > _fh_payload_size - _fh_offset) {                            \
+      _FH_LOG_CODEC_FAILURE("Buffer decode", "payload is truncated",           \
+                            "  payload      : %s\n"                            \
+                            "  destination  : %s\n"                            \
+                            "  offset       : %zu\n"                           \
+                            "  length       : %zu\n"                           \
+                            "  remaining    : %zu\n"                           \
+                            "  payload size : %zu",                            \
+                            #payload, #dst, _fh_offset, _fh_size,              \
+                            _fh_payload_size - _fh_offset, _fh_payload_size);  \
+      return FAITH_ERR_BAD_FRAME;                                              \
+    }                                                                          \
+                                                                               \
+    if (_fh_size > 0)                                                          \
+      memcpy((dst), (payload) + _fh_offset, _fh_size);                         \
+                                                                               \
+    (offset) += _fh_size;                                                      \
+  } while (0)
+
+#define _FAITH_DECODE_INT_BE_RETURN(payload, payload_size, offset, out, type,  \
+                                    read_fn)                                   \
+  do {                                                                         \
+    const size_t _fh_payload_size = (size_t)(payload_size);                    \
+    const size_t _fh_offset = (size_t)(offset);                                \
+    const size_t _fh_int_size = sizeof(type);                                  \
+                                                                               \
+    if (!(payload)) {                                                          \
+      _FH_LOG_CODEC_FAILURE("Integer decode", "payload is NULL",               \
+                            "  reader       : %s\n"                            \
+                            "  output       : %s\n"                            \
+                            "  integer size : %zu\n"                           \
+                            "  offset       : %zu\n"                           \
+                            "  payload size : %zu",                            \
+                            #read_fn, #out, _fh_int_size, _fh_offset,          \
+                            _fh_payload_size);                                 \
+      return FAITH_ERR_INVALID;                                                \
+    }                                                                          \
+                                                                               \
+    if (_fh_offset > _fh_payload_size) {                                       \
+      _FH_LOG_CODEC_FAILURE("Integer decode", "offset exceeds payload size",   \
+                            "  reader       : %s\n"                            \
+                            "  output       : %s\n"                            \
+                            "  integer size : %zu\n"                           \
+                            "  offset       : %zu\n"                           \
+                            "  payload size : %zu",                            \
+                            #read_fn, #out, _fh_int_size, _fh_offset,          \
+                            _fh_payload_size);                                 \
+      return FAITH_ERR_BAD_FRAME;                                              \
+    }                                                                          \
+                                                                               \
+    if (_fh_int_size > _fh_payload_size - _fh_offset) {                        \
+      _FH_LOG_CODEC_FAILURE("Integer decode", "payload is truncated",          \
+                            "  reader       : %s\n"                            \
+                            "  output       : %s\n"                            \
+                            "  integer size : %zu\n"                           \
+                            "  offset       : %zu\n"                           \
+                            "  remaining    : %zu\n"                           \
+                            "  payload size : %zu",                            \
+                            #read_fn, #out, _fh_int_size, _fh_offset,          \
+                            _fh_payload_size - _fh_offset, _fh_payload_size);  \
+      return FAITH_ERR_BAD_FRAME;                                              \
+    }                                                                          \
+                                                                               \
+    (out) = read_fn((payload) + _fh_offset);                                   \
+    (offset) += _fh_int_size;                                                  \
+  } while (0)
+
+#define FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset, out)         \
+  _FAITH_DECODE_INT_BE_RETURN(payload, payload_size, offset, out, uint32_t,    \
+                              faith_read_u32_be)
+
+#define FAITH_DECODE_U64_BE_RETURN(payload, payload_size, offset, out)         \
+  _FAITH_DECODE_INT_BE_RETURN(payload, payload_size, offset, out, uint64_t,    \
+                              faith_read_u64_be)
+
+#define _FAITH_ENCODE_INT_BE_RETURN(buf, buf_cap, offset, value, type,         \
+                                    write_fn)                                  \
+  do {                                                                         \
+    const size_t _fh_cap = (size_t)(buf_cap);                                  \
+    const size_t _fh_offset = (size_t)(offset);                                \
+    const size_t _fh_int_size = sizeof(type);                                  \
+                                                                               \
+    if (!(buf)) {                                                              \
+      _FH_LOG_CODEC_FAILURE("Integer encode", "destination buffer is NULL",    \
+                            "  writer       : %s\n"                            \
+                            "  value        : %s\n"                            \
+                            "  integer size : %zu\n"                           \
+                            "  offset       : %zu\n"                           \
+                            "  capacity     : %zu",                            \
+                            #write_fn, #value, _fh_int_size, _fh_offset,       \
+                            _fh_cap);                                          \
+      return FAITH_ERR_INVALID;                                                \
+    }                                                                          \
+                                                                               \
+    if (_fh_offset > _fh_cap) {                                                \
+      _FH_LOG_CODEC_FAILURE(                                                   \
+          "Integer encode", "offset exceeds destination capacity",             \
+          "  writer       : %s\n"                                              \
+          "  value        : %s\n"                                              \
+          "  integer size : %zu\n"                                             \
+          "  offset       : %zu\n"                                             \
+          "  capacity     : %zu",                                              \
+          #write_fn, #value, _fh_int_size, _fh_offset, _fh_cap);               \
+      return FAITH_ERR_OVERFLOW;                                               \
+    }                                                                          \
+                                                                               \
+    if (_fh_int_size > _fh_cap - _fh_offset) {                                 \
+      _FH_LOG_CODEC_FAILURE("Integer encode",                                  \
+                            "insufficient destination capacity",               \
+                            "  writer       : %s\n"                            \
+                            "  value        : %s\n"                            \
+                            "  integer size : %zu\n"                           \
+                            "  offset       : %zu\n"                           \
+                            "  remaining    : %zu\n"                           \
+                            "  capacity     : %zu",                            \
+                            #write_fn, #value, _fh_int_size, _fh_offset,       \
+                            _fh_cap - _fh_offset, _fh_cap);                    \
+      return FAITH_ERR_OVERFLOW;                                               \
+    }                                                                          \
+                                                                               \
+    _FH_CHECK_RETURN(write_fn((buf) + _fh_offset, (type)(value)));             \
+    (offset) += _fh_int_size;                                                  \
+  } while (0)
+
+#define FAITH_ENCODE_U32_BE_RETURN(buf, buf_cap, offset, value)                \
+  _FAITH_ENCODE_INT_BE_RETURN(buf, buf_cap, offset, value, uint32_t,           \
+                              faith_write_u32_be)
+
+#define FAITH_ENCODE_U64_BE_RETURN(buf, buf_cap, offset, value)                \
+  _FAITH_ENCODE_INT_BE_RETURN(buf, buf_cap, offset, value, uint64_t,           \
+                              faith_write_u64_be)
+
+#define FAITH_ENVL_DECODE_PROLOGUE(envl_size)                                  \
+  do {                                                                         \
+    const size_t _fh_expected_size = (size_t)(envl_size);                      \
+                                                                               \
+    if (!out) {                                                                \
+      _FH_LOG_CODEC_FAILURE("Envelope decode", "output pointer is NULL",       \
+                            "  expected size : %zu", _fh_expected_size);       \
+      return FAITH_ERR_INVALID;                                                \
+    }                                                                          \
+                                                                               \
+    memset(out, 0, sizeof(*out));                                              \
+                                                                               \
+    if (!payload) {                                                            \
+      const faith_status_code_t _fh_rc =                                       \
+          payload_size == 0 ? FAITH_ERR_BAD_FRAME : FAITH_ERR_INVALID;         \
+                                                                               \
+      _FH_LOG_CODEC_FAILURE("Envelope decode", "payload pointer is NULL",      \
+                            "  payload       : payload\n"                      \
+                            "  payload size  : %zu\n"                          \
+                            "  expected size : %zu\n"                          \
+                            "  status        : %s (%d)",                       \
+                            (size_t)payload_size, _fh_expected_size,           \
+                            faith_status_code_name(_fh_rc), (int)_fh_rc);      \
+      return _fh_rc;                                                           \
+    }                                                                          \
+                                                                               \
+    if ((size_t)payload_size != _fh_expected_size) {                           \
+      _FH_LOG_CODEC_FAILURE("Envelope decode",                                 \
+                            "payload size does not match wire size",           \
+                            "  payload size  : %zu\n"                          \
+                            "  expected size : %zu",                           \
+                            (size_t)payload_size, _fh_expected_size);          \
+      return FAITH_ERR_BAD_FRAME;                                              \
+    }                                                                          \
+  } while (0)
+
+#define FAITH_ENVL_DECODE_EPILOGUE(envl_size)                                  \
+  do {                                                                         \
+    const size_t _fh_expected_size = (size_t)(envl_size);                      \
+    const size_t _fh_offset = (size_t)offset;                                  \
+    const size_t _fh_payload_size = (size_t)payload_size;                      \
+                                                                               \
+    if (_fh_offset != _fh_expected_size || _fh_offset != _fh_payload_size) {   \
+      _FH_LOG_CODEC_FAILURE("Envelope decode",                                 \
+                            "final decode offset is inconsistent",             \
+                            "  offset        : %zu\n"                          \
+                            "  payload size  : %zu\n"                          \
+                            "  expected size : %zu",                           \
+                            _fh_offset, _fh_payload_size, _fh_expected_size);  \
+      return FAITH_ERR_BAD_FRAME;                                              \
+    }                                                                          \
+  } while (0)
+
+#define FAITH_ENVL_ENCODE_PROLOGUE(envl_size)                                  \
+  do {                                                                         \
+    const size_t _fh_expected_size = (size_t)(envl_size);                      \
+                                                                               \
+    if (!out_buf || !out_size || !in) {                                        \
+      _FH_LOG_CODEC_FAILURE("Envelope encode", "required argument is NULL",    \
+                            "  out_buf       : %p\n"                           \
+                            "  out_size      : %p\n"                           \
+                            "  input         : %p\n"                           \
+                            "  expected size : %zu",                           \
+                            (void *)out_buf, (void *)out_size,                 \
+                            (const void *)in, _fh_expected_size);              \
+      return FAITH_ERR_INVALID;                                                \
+    }                                                                          \
+                                                                               \
+    *out_size = 0;                                                             \
+                                                                               \
+    if ((size_t)buf_cap_in_bytes < _fh_expected_size) {                        \
+      _FH_LOG_CODEC_FAILURE("Envelope encode",                                 \
+                            "insufficient destination capacity",               \
+                            "  capacity      : %zu\n"                          \
+                            "  required size : %zu",                           \
+                            (size_t)buf_cap_in_bytes, _fh_expected_size);      \
+      return FAITH_ERR_OVERFLOW;                                               \
+    }                                                                          \
+  } while (0)
+
+#define FAITH_ENVL_ENCODE_EPILOGUE(envl_size)                                  \
+  do {                                                                         \
+    const size_t _fh_expected_size = (size_t)(envl_size);                      \
+    const size_t _fh_offset = (size_t)offset;                                  \
+                                                                               \
+    if (_fh_offset != _fh_expected_size) {                                     \
+      _FH_LOG_CODEC_FAILURE("Envelope encode",                                 \
+                            "final encoded size is inconsistent",              \
+                            "  encoded size  : %zu\n"                          \
+                            "  expected size : %zu",                           \
+                            _fh_offset, _fh_expected_size);                    \
+      return FAITH_ERR_INVALID;                                                \
+    }                                                                          \
+                                                                               \
+    *out_size = (faith_body_size_t)_fh_offset;                                 \
+  } while (0)
+
 inline uint16_t faith_version_pack(uint8_t major, uint8_t minor,
                                    uint8_t patch) {
   return ((uint16_t)(major & 0x1f) << 11) | ((uint16_t)(minor & 0x1f) << 6) |
@@ -22,32 +361,6 @@ inline uint8_t faith_version_minor(uint16_t v) {
 inline uint8_t faith_version_patch(uint16_t v) { return (uint8_t)(v & 0x3f); }
 
 const char *faith_strerror(int code) { return strerror(code); }
-
-int faith_buf_append(uint8_t *buf, size_t cap, size_t *offset, const void *src,
-                     size_t len) {
-  if (!buf || !offset || !src)
-    return 0;
-
-  if (*offset > cap || len > cap - *offset)
-    return 0;
-
-  memcpy(buf + *offset, src, len);
-  *offset += len;
-  return 1;
-}
-
-int faith_buf_decode(const uint8_t *buf, size_t size, size_t *offset, void *dst,
-                     size_t len) {
-  if (!buf || !offset || !dst)
-    return 0;
-
-  if (*offset > size || len > size - *offset)
-    return 0;
-
-  memcpy(dst, buf + *offset, len);
-  *offset += len;
-  return 1;
-}
 
 faith_status_code_t faith_write_bytes_sync(SSL *ssl, const uint8_t *buf,
                                            size_t size) {
@@ -152,9 +465,9 @@ faith_status_code_t faith_read_frame_sync(SSL *ssl, faith_frame_t *out) {
 
   _FH_CHECK_RETURN(faith_read_bytes_sync(ssl, len_buf, sizeof(len_buf)));
 
-  uint32_t frame_size = faith_read_u32_be(len_buf);
+  const uint32_t frame_size = faith_read_u32_be(len_buf);
 
-  if (frame_size < sizeof(hdr_buf))
+  if (frame_size < FAITH_FRAME_METADATA_SIZE)
     return FAITH_ERR_BAD_FRAME;
 
   if (frame_size > FAITH_MAX_FRAME_LEN) {
@@ -170,7 +483,7 @@ faith_status_code_t faith_read_frame_sync(SSL *ssl, faith_frame_t *out) {
   out->frame_size = frame_size;
   out->proto_ver = faith_read_u16_be(hdr_buf);
   out->msg_type = faith_read_u16_be(hdr_buf + sizeof(uint16_t));
-  out->payload_size = frame_size - sizeof(hdr_buf);
+  out->payload_size = frame_size - FAITH_FRAME_METADATA_SIZE;
 
   if (out->proto_ver != FAITH_PROTO_VERSION)
     return FAITH_ERR_UNSUPPORTED_VER;
@@ -184,18 +497,19 @@ faith_status_code_t faith_read_frame_sync(SSL *ssl, faith_frame_t *out) {
     return FAITH_ERR_FRAME_TOO_LARGE;
   }
 
-  if (out->payload_size > 0) {
-    out->payload = malloc(out->payload_size);
-    if (!out->payload)
-      return FAITH_ERR_NOMEM;
+  if (out->payload_size == 0)
+    return FAITH_OK;
 
-    faith_status_code_t rc =
-        faith_read_bytes_sync(ssl, out->payload, out->payload_size);
+  out->payload = malloc(out->payload_size);
+  if (!out->payload)
+    return FAITH_ERR_NOMEM;
 
-    if (rc != FAITH_OK) {
-      faith_frame_free(out);
-      return rc;
-    }
+  faith_status_code_t rc =
+      faith_read_bytes_sync(ssl, out->payload, out->payload_size);
+
+  if (rc != FAITH_OK) {
+    faith_frame_free(out);
+    return rc;
   }
 
   return FAITH_OK;
@@ -243,68 +557,53 @@ faith_status_code_t faith_encode_frame(faith_frame_msg_type_t type,
   if (payload_size > 0 && !payload)
     return FAITH_ERR_INVALID;
 
-  if (payload_size > FAITH_MAX_PAYLOAD_SIZE) {
-    nob_log(ERROR,
-            "Failed to encode frame to buffer; Frame is too large, "
-            "frame_size=%zu MAX_FRAME_LEN=%i",
-            payload_size, (int32_t)FAITH_MAX_FRAME_LEN);
+  if (payload_size > FAITH_MAX_PAYLOAD_SIZE)
     return FAITH_ERR_FRAME_TOO_LARGE;
-  }
 
-  const size_t header_size_bytes = FAITH_HEADER_SIZE;
-
-  if (payload_size > SIZE_MAX - header_size_bytes) {
-    nob_log(ERROR,
-            "Failed to encode frame to buffer; Frame is too large, "
-            "frame_size=%zu MAX_FRAME_LEN=%i",
-            payload_size, (int32_t)FAITH_MAX_FRAME_LEN);
-
+  if (payload_size > SIZE_MAX - FAITH_FRAME_METADATA_SIZE)
     return FAITH_ERR_FRAME_TOO_LARGE;
-  }
 
-  size_t frame_size_size_t = sizeof(uint16_t) + sizeof(uint16_t) + payload_size;
+  const size_t frame_size = FAITH_FRAME_METADATA_SIZE + payload_size;
 
-  if (frame_size_size_t > UINT32_MAX) {
-    nob_log(ERROR,
-            "Failed to encode frame to buffer; Frame is too large, "
-            "frame_size=%zu MAX_FRAME_LEN=%i",
-            frame_size_size_t, (int32_t)FAITH_MAX_FRAME_LEN);
-
+  if (frame_size > UINT32_MAX || frame_size > FAITH_MAX_FRAME_LEN)
     return FAITH_ERR_FRAME_TOO_LARGE;
-  }
 
-  if (frame_size_size_t > FAITH_MAX_FRAME_LEN) {
-    nob_log(ERROR,
-            "Failed to encode frame to buffer; Frame is too large, "
-            "frame_size=%zu MAX_FRAME_LEN=%i",
-            frame_size_size_t, (int32_t)FAITH_MAX_FRAME_LEN);
-
+  if (frame_size > SIZE_MAX - FAITH_FRAME_LENGTH_SIZE)
     return FAITH_ERR_FRAME_TOO_LARGE;
-  }
 
-  size_t data_size = header_size_bytes + payload_size;
+  const size_t data_size = FAITH_FRAME_LENGTH_SIZE + frame_size;
 
   uint8_t *data = malloc(data_size);
   if (!data)
     return FAITH_ERR_NOMEM;
 
-  faith_status_code_t rc = FAITH_OK;
+  size_t offset = 0;
 
-  rc = faith_write_u32_be(data, (uint32_t)frame_size_size_t);
+  faith_status_code_t rc =
+      faith_write_u32_be(data + offset, (uint32_t)frame_size);
   if (rc != FAITH_OK)
     goto fail;
+  offset += sizeof(uint32_t);
 
-  rc = faith_write_u16_be(data + sizeof(uint32_t), FAITH_PROTO_VERSION);
+  rc = faith_write_u16_be(data + offset, FAITH_PROTO_VERSION);
   if (rc != FAITH_OK)
     goto fail;
+  offset += sizeof(uint16_t);
 
-  rc = faith_write_u16_be(data + sizeof(uint32_t) + sizeof(uint16_t),
-                          (uint16_t)type);
+  rc = faith_write_u16_be(data + offset, (uint16_t)type);
   if (rc != FAITH_OK)
     goto fail;
+  offset += sizeof(uint16_t);
 
-  if (payload_size > 0)
-    memcpy(data + header_size_bytes, payload, payload_size);
+  if (payload_size > 0) {
+    memcpy(data + offset, payload, payload_size);
+    offset += payload_size;
+  }
+
+  if (offset != data_size) {
+    rc = FAITH_ERR_INVALID;
+    goto fail;
+  }
 
   *out_data = data;
   *out_size = data_size;
@@ -431,48 +730,74 @@ const char *faith_envelope_name(faith_envelope_type_t env) {
   }
 }
 
+const char *
+faith_client_reconnect_policy_name(faith_client_reconnect_policy_t policy) {
+  switch (policy) {
+#define X(name, value)                                                         \
+  case name:                                                                   \
+    return #name;
+    FAITH_CLIENT_DISCONNECT_POLICIES(X)
+#undef X
+  default:
+    return "FAITH_CLIENT_RECONNECT_POLICY_UNKNOWN";
+  }
+}
+const char *
+faith_client_disconnect_reason_name(faith_client_disconnect_reason_t reason) {
+  switch (reason) {
+#define X(name, value)                                                         \
+  case name:                                                                   \
+    return #name;
+    FAITH_CLIENT_DISCONNECT_REASONS(X)
+#undef X
+  default:
+    return "FAITH_CLIENT_DISCONNECT_REASON_UNKNOWN";
+  }
+}
+
 faith_status_code_t faith_encode_envelope(uint8_t *out_buf, size_t *out_size,
                                           size_t buf_cap_in_bytes,
                                           const faith_envelope_t *env) {
   if (!out_buf || !out_size || !env)
     return FAITH_ERR_INVALID;
 
-  const size_t env_size = FAITH_ENVL_HEADER_SIZE + env->body_size;
+  *out_size = 0;
+
+  if (env->body_size > 0 && !env->body)
+    return FAITH_ERR_INVALID;
+
+  const size_t env_size = FAITH_ENVL_HEADER_SIZE + (size_t)env->body_size;
 
   if (buf_cap_in_bytes < env_size)
     return FAITH_ERR_OVERFLOW;
 
   size_t offset = 0;
-  // Type (faith_envelope_type_t -> uint32_t)
-  _FH_CHECK_RETURN(faith_write_u32_be(out_buf + offset, env->type));
-  offset += sizeof(uint32_t);
-  // Sender (faith_client_id_t -> 16 raw bytes)
+
+  FAITH_ENCODE_U32_BE_RETURN(out_buf, buf_cap_in_bytes, offset, env->type);
+
   FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, env->sender_id.bytes,
                       sizeof(env->sender_id.bytes));
-  // Recipient (faith_client_id_t -> 16 raw bytes)
+
   FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset,
                       env->recipient_id.bytes, sizeof(env->recipient_id.bytes));
-  // Body Size (uint32_t)
-  _FH_CHECK_RETURN(faith_write_u32_be(out_buf + offset, env->body_size));
 
-  if (env->body_size > 0 && env->body != NULL) {
-    offset += sizeof(uint32_t);
+  FAITH_ENCODE_U32_BE_RETURN(out_buf, buf_cap_in_bytes, offset, env->body_size);
 
-    if (offset + env->body_size > buf_cap_in_bytes)
-      return FAITH_ERR_OVERFLOW;
+  if (env->body_size > 0) {
     FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, env->body,
                         env->body_size);
   }
 
-  *out_size = env_size;
+  if (offset != env_size)
+    return FAITH_ERR_INVALID;
 
+  *out_size = offset;
   return FAITH_OK;
 }
 
 faith_status_code_t faith_decode_envelope(const uint8_t    *payload,
                                           size_t            payload_size,
                                           faith_envelope_t *o_envl) {
-
   if (!o_envl)
     return FAITH_ERR_INVALID;
 
@@ -481,80 +806,73 @@ faith_status_code_t faith_decode_envelope(const uint8_t    *payload,
   if (!payload)
     return payload_size == 0 ? FAITH_ERR_BAD_FRAME : FAITH_ERR_INVALID;
 
-  if (payload_size < FAITH_ENVL_HEADER_SIZE)
+  if (payload_size < FAITH_ENVL_HEADER_SIZE) {
     return FAITH_ERR_BAD_FRAME;
+  }
 
   size_t offset = 0;
-  // Type (faith_envelope_type_t -> uint32_t)
-  uint32_t type = faith_read_u32_be(payload + offset);
-  offset += sizeof(uint32_t);
-  // Sender (faith_client_id_t -> 16 raw bytes)
-  faith_client_id_t sender_id = {0};
-  FAITH_DECODE_RETURN(payload, payload_size, offset, sender_id.bytes,
-                      sizeof(sender_id.bytes));
-  // Recipient (faith_client_id_t -> 16 raw bytes)
-  faith_client_id_t recipient_id = {0};
-  FAITH_DECODE_RETURN(payload, payload_size, offset, recipient_id.bytes,
-                      sizeof(recipient_id.bytes));
-  // Body Size (uint32_t)
-  uint32_t body_size = faith_read_u32_be(payload + offset);
 
-  offset += sizeof(uint32_t);
+  FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset, o_envl->type);
 
-  if (body_size > payload_size - offset)
+  FAITH_DECODE_RETURN(payload, payload_size, offset, o_envl->sender_id.bytes,
+                      sizeof(o_envl->sender_id.bytes));
+
+  FAITH_DECODE_RETURN(payload, payload_size, offset, o_envl->recipient_id.bytes,
+                      sizeof(o_envl->recipient_id.bytes));
+
+  FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset, o_envl->body_size);
+
+  if (o_envl->body_size != payload_size - offset) {
     return FAITH_ERR_BAD_FRAME;
-
-  if (body_size != payload_size - offset)
-    return FAITH_ERR_BAD_FRAME;
+  }
 
   uint8_t *body = NULL;
-  if (body_size != 0) {
-    body = malloc(body_size);
+  if (o_envl->body_size != 0) {
+    body = malloc(o_envl->body_size);
     if (!body)
       return FAITH_ERR_NOMEM;
 
-    FAITH_DECODE_RETURN(payload, payload_size, offset, body, body_size);
+    memcpy(body, payload + offset, o_envl->body_size);
+    offset += o_envl->body_size;
   }
 
-  *o_envl = (faith_envelope_t){.body_size = body_size,
-                               .body = body,
-                               .recipient_id = recipient_id,
-                               .sender_id = sender_id,
-                               .type = type};
+  if (offset != payload_size) {
+    free(body);
+    return FAITH_ERR_BAD_FRAME;
+  }
+
+  o_envl->body = body;
 
   return FAITH_OK;
 }
 
 faith_status_code_t
 faith_encode_device_link_req_body(uint8_t *out_buf, faith_body_size_t *out_size,
-                                  size_t buf_cap,
-                                  const faith_envl_stc_device_link_req_t *req) {
-  if (!out_buf || !out_size || !req)
-    return FAITH_ERR_INVALID;
+                                  size_t buf_cap_in_bytes,
+                                  const faith_envl_stc_device_link_req_t *in) {
 
-  if (buf_cap < FAITH_ENVL_STC_DEVICE_LINK_REQ_BODY_SIZE)
-    return FAITH_ERR_OVERFLOW;
+  FAITH_ENVL_ENCODE_PROLOGUE(FAITH_ENVL_STC_DEVICE_LINK_REQ_BODY_SIZE);
 
   size_t offset = 0;
 
-  FAITH_APPEND_RETURN(out_buf, buf_cap, offset, req->auth_id.bytes,
-                      sizeof(req->auth_id.bytes));
+  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, in->auth_id.bytes,
+                      sizeof(in->auth_id.bytes));
 
-  FAITH_APPEND_RETURN(out_buf, buf_cap, offset, req->public_key_new_device,
-                      sizeof(req->public_key_new_device));
+  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset,
+                      in->public_key_new_device,
+                      sizeof(in->public_key_new_device));
 
-  FAITH_APPEND_RETURN(out_buf, buf_cap, offset, req->device_id_new.bytes,
-                      sizeof(req->device_id_new.bytes));
+  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset,
+                      in->device_id_new.bytes, sizeof(in->device_id_new.bytes));
 
-  FAITH_APPEND_RETURN(out_buf, buf_cap, offset, req->code, sizeof(req->code));
+  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, in->code,
+                      sizeof(in->code));
 
-  _FH_CHECK_RETURN(faith_write_u64_be(out_buf + offset, req->expires_at_ms));
-  offset += sizeof(uint64_t);
+  FAITH_ENCODE_U64_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
+                             in->expires_at_ms);
 
-  if (offset != FAITH_ENVL_STC_DEVICE_LINK_REQ_BODY_SIZE)
-    return FAITH_ERR_INVALID;
+  FAITH_ENVL_ENCODE_EPILOGUE(FAITH_ENVL_STC_DEVICE_LINK_REQ_BODY_SIZE);
 
-  *out_size = (faith_body_size_t)offset;
   return FAITH_OK;
 }
 
@@ -562,16 +880,7 @@ faith_status_code_t
 faith_decode_device_link_req_body(const uint8_t    *payload,
                                   faith_body_size_t payload_size,
                                   faith_envl_stc_device_link_req_t *out) {
-  if (!out)
-    return FAITH_ERR_INVALID;
-
-  memset(out, 0, sizeof(*out));
-
-  if (!payload)
-    return FAITH_ERR_INVALID;
-
-  if (payload_size != FAITH_ENVL_STC_DEVICE_LINK_REQ_BODY_SIZE)
-    return FAITH_ERR_BAD_FRAME;
+  FAITH_ENVL_DECODE_PROLOGUE(FAITH_ENVL_STC_DEVICE_LINK_REQ_BODY_SIZE);
 
   size_t offset = 0;
 
@@ -587,69 +896,103 @@ faith_decode_device_link_req_body(const uint8_t    *payload,
   FAITH_DECODE_RETURN(payload, payload_size, offset, out->code,
                       sizeof(out->code));
 
-  if (offset > payload_size || sizeof(uint64_t) > payload_size - offset)
-    return FAITH_ERR_BAD_FRAME;
+  FAITH_DECODE_U64_BE_RETURN(payload, payload_size, offset, out->expires_at_ms);
 
-  out->expires_at_ms = faith_read_u64_be(payload + offset);
-  offset += sizeof(uint64_t);
+  FAITH_ENVL_DECODE_EPILOGUE(FAITH_ENVL_STC_DEVICE_LINK_REQ_BODY_SIZE);
 
-  return offset == payload_size ? FAITH_OK : FAITH_ERR_BAD_FRAME;
+  return FAITH_OK;
 }
 
 faith_status_code_t faith_encode_device_link_response_body(
     uint8_t *out_buf, faith_body_size_t *out_size, size_t buf_cap_in_bytes,
-    const faith_envl_cts_device_link_response_t *response) {
-  if (!out_buf || !out_size || !response)
-    return FAITH_ERR_INVALID;
-
-  if (sizeof(faith_envl_cts_device_link_response_t) >
-      (size_t)FAITH_BODY_SIZE_T_MAX)
-    return FAITH_ERR_OVERFLOW;
-
-  const faith_body_size_t response_size =
-      (faith_body_size_t)sizeof(faith_envl_cts_device_link_response_t);
-
-  if (buf_cap_in_bytes < response_size)
-    return FAITH_ERR_OVERFLOW;
+    const faith_envl_cts_device_link_response_t *in) {
+  FAITH_ENVL_ENCODE_PROLOGUE(FAITH_ENVL_CTS_DEVICE_LINK_RESPONSE_BODY_SIZE);
 
   size_t offset = 0;
 
-  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset,
-                      response->signature_response,
-                      sizeof(response->signature_response));
+  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, in->signature_response,
+                      sizeof(in->signature_response));
 
   FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset,
-                      response->device_id_new.bytes,
-                      sizeof(response->device_id_new.bytes));
+                      in->device_id_new.bytes, sizeof(in->device_id_new.bytes));
 
-  *out_size = response_size;
+  FAITH_ENVL_ENCODE_EPILOGUE(FAITH_ENVL_CTS_DEVICE_LINK_RESPONSE_BODY_SIZE);
 
   return FAITH_OK;
 }
 
 faith_status_code_t faith_decode_device_link_response_body(
     const uint8_t *payload, faith_body_size_t payload_size,
-    faith_envl_cts_device_link_response_t *o_response) {
-  if (!o_response)
-    return FAITH_ERR_INVALID;
+    faith_envl_cts_device_link_response_t *out) {
 
-  memset(o_response, 0, sizeof(*o_response));
-
-  if (!payload)
-    return payload_size == 0 ? FAITH_ERR_BAD_FRAME : FAITH_ERR_INVALID;
-
-  if (payload_size < sizeof(faith_envl_cts_device_link_response_t))
-    return FAITH_ERR_BAD_FRAME;
+  FAITH_ENVL_DECODE_PROLOGUE(FAITH_ENVL_CTS_DEVICE_LINK_RESPONSE_BODY_SIZE);
 
   size_t offset = 0;
 
-  FAITH_DECODE_RETURN(payload, payload_size, offset,
-                      o_response->signature_response,
-                      sizeof(o_response->signature_response));
+  FAITH_DECODE_RETURN(payload, payload_size, offset, out->signature_response,
+                      sizeof(out->signature_response));
 
-  FAITH_DECODE_RETURN(payload, payload_size, offset,
-                      o_response->device_id_new.bytes,
-                      sizeof(o_response->device_id_new.bytes));
+  FAITH_DECODE_RETURN(payload, payload_size, offset, out->device_id_new.bytes,
+                      sizeof(out->device_id_new.bytes));
+
+  FAITH_ENVL_DECODE_EPILOGUE(FAITH_ENVL_CTS_DEVICE_LINK_RESPONSE_BODY_SIZE);
+
+  return FAITH_OK;
+}
+
+faith_status_code_t
+faith_encode_client_disconnect(uint8_t *out_buf, faith_body_size_t *out_size,
+                               size_t buf_cap_in_bytes,
+                               const faith_envl_stc_client_disconnect_t *in) {
+
+  FAITH_ENVL_ENCODE_PROLOGUE(FAITH_ENVL_STC_CLIENT_DISCONNECT_BODY_SIZE);
+
+  size_t offset = 0;
+
+  FAITH_ENCODE_U32_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
+                             (uint32_t)in->reconnect_policy);
+
+  FAITH_ENCODE_U32_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
+                             (uint32_t)in->reason);
+
+  FAITH_ENCODE_U64_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
+                             in->retry_after_ms);
+
+  FAITH_ENCODE_U64_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
+                             in->banned_until_ms);
+
+  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, in->msg,
+                      sizeof(in->msg));
+
+  FAITH_ENVL_ENCODE_EPILOGUE(FAITH_ENVL_STC_CLIENT_DISCONNECT_BODY_SIZE);
+
+  return FAITH_OK;
+}
+
+faith_status_code_t
+faith_decode_client_disconnect(const uint8_t                      *payload,
+                               faith_body_size_t                   payload_size,
+                               faith_envl_stc_client_disconnect_t *out) {
+
+  FAITH_ENVL_DECODE_PROLOGUE(FAITH_ENVL_STC_CLIENT_DISCONNECT_BODY_SIZE);
+
+  size_t offset = 0;
+
+  FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset,
+                             out->reconnect_policy);
+
+  FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset, out->reason);
+
+  FAITH_DECODE_U64_BE_RETURN(payload, payload_size, offset,
+                             out->retry_after_ms);
+
+  FAITH_DECODE_U64_BE_RETURN(payload, payload_size, offset,
+                             out->banned_until_ms);
+
+  FAITH_DECODE_RETURN(payload, payload_size, offset, out->msg,
+                      sizeof(out->msg));
+
+  FAITH_ENVL_DECODE_EPILOGUE(FAITH_ENVL_STC_CLIENT_DISCONNECT_BODY_SIZE);
 
   return FAITH_OK;
 }
