@@ -134,7 +134,23 @@ int main(int argc, char **argv) {
       line[strcspn(line, "\n")] = '\0';
 
       if (strcmp(line, "/quit") == 0) {
+        printf("Quitting...\n");
         break;
+      }
+
+      if (strcmp(line, "/reconnect") == 0) {
+        faith_status_code_t reconnect_rc = faith_client_reconnect(client);
+
+        if (reconnect_rc != FAITH_OK) {
+          fprintf(stderr, "Reconnect failed: %s\n",
+                  faith_status_code_name(reconnect_rc));
+        } else {
+          printf("Reconnect requested.\n");
+        }
+
+        printf("> ");
+        fflush(stdout);
+        continue;
       }
 
       if (pending_device_link_request) {
@@ -266,6 +282,8 @@ int main(int argc, char **argv) {
 
   faith_client_stop(client);
   faith_client_destroy(client);
+
+  printf("Client stopped.\n");
 
   return EXIT_SUCCESS;
 }
