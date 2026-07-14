@@ -1048,7 +1048,8 @@ static faith_status_code_t server_send_device_link_request(
     struct server_state_t *s, struct client_conn_t *recipient_cl,
     struct client_conn_t *request_cl, const faith_client_id_t *auth_id,
     const uint8_t public_key_new_device[FAITH_ED25519_PUBLIC_KEY_SIZE],
-    const faith_device_id_t *new_device_id) {
+    const faith_device_id_t          *new_device_id,
+    faith_envl_stc_device_link_req_t **o_req) {
   if (!s || !auth_id || !public_key_new_device || !new_device_id ||
       !recipient_cl) {
     return FAITH_ERR_INVALID;
@@ -1107,11 +1108,6 @@ static faith_status_code_t server_send_device_link_request(
   req->expires_at_ms =
       faith_now_ms() + FAITH_DEVICE_LINK_REQ_EXPIRATION_TIME_MS;
 
-  /* Set pending device link request of receiving client connection. We also
-   * store the client connection that sent the device link request. */
-  recipient_cl->pending_device_link_req = req;
-  recipient_cl->pending_device_link_conn = request_cl;
-
   /* Serialize device link reqest */
 
   uint8_t           body[FAITH_ENVL_STC_DEVICE_LINK_REQ_BODY_SIZE];
@@ -1127,6 +1123,8 @@ static faith_status_code_t server_send_device_link_request(
 
   _FH_CHECK_RETURN(
       server_send_envelope_or_close(s, recipient_cl, &device_link_req_envl));
+
+  *o_req = req;
 
   return FAITH_OK;
 }
@@ -1177,11 +1175,12 @@ static faith_status_code_t server_handle_newly_joined_device(
         authorized_cl->state != CLIENT_OPEN)
       continue;
 
+    faith_envl_stc_device_link_req_t* req = NULL;
     _FH_CHECK(server_send_device_link_request(
         s, authorized_cl, cl, &params->sender_auth_id, params->public_key,
-        &params->device_id));
+        &params->device_id, &req));
 
-    if (_fh_rc != FAITH_OK) {
+    if (_fh_rc != FAITH_OK || !req) {
       char sender_auth_id_hex[33];
       _FH_CHECK_RETURN(
           faith_id128_to_hex(params->sender_auth_id.bytes, sender_auth_id_hex));
@@ -1195,6 +1194,11 @@ static faith_status_code_t server_handle_newly_joined_device(
 
       return _fh_rc;
     }
+
+    /* Set pending device link request of receiving client connection. We also
+     * store the client connection that sent the device link request. */
+    authorized_cl->pending_device_link_req = req;
+    authorized_cl->pending_device_link_conn = cl;
   }
 
   /* Send DEVICE_AUTH_PENDING to the connection that requested the
@@ -1642,7 +1646,7 @@ server_handle_device_link_response(struct server_state_t  *s,
 
   switch (response_envl->type) {
   case FAITH_ENVELOPE_DEVICE_AUTH_DENY:
-    req_cl->closing = 1;
+    req_cl->close_after_flush= 1;
     break;
   case FAITH_ENVELOPE_DEVICE_AUTH_APPROVE:
     _FH_CHECK_DEFER(server_authorize_client(s, req_cl, &req->auth_id,
@@ -1945,19 +1949,16 @@ static faith_status_code_t try_parse_frame_from_buffer(const uint8_t *buf,
     return FAITH_ERR_INVALID;
   }
 
-  if (size < FAITH_HEADER_SIZE) {
+  if (size < FAITH_FRAME_HEADER_SIZE) {
     return FAITH_ERR_INCOMPLETE;
   }
 
   uint32_t frame_size = faith_read_u32_be(buf + 0);
 
-  const size_t frame_header_size = sizeof(uint16_t) + /* protocol version */
-                                   sizeof(uint16_t);  /* message type */
-
-  if (frame_size < frame_header_size)
+  if (frame_size < FAITH_FRAME_METADATA_SIZE)
     return FAITH_ERR_BAD_FRAME;
 
-  const size_t payload_size = (size_t)frame_size - frame_header_size;
+  const size_t payload_size = (size_t)frame_size - FAITH_FRAME_METADATA_SIZE;
 
   if (payload_size > FAITH_MAX_PAYLOAD_SIZE) {
     nob_log(ERROR,
@@ -2001,7 +2002,7 @@ static faith_status_code_t try_parse_frame_from_buffer(const uint8_t *buf,
     if (!frame->payload)
       return FAITH_ERR_NOMEM;
 
-    memcpy(frame->payload, buf + FAITH_HEADER_SIZE, frame->payload_size);
+    memcpy(frame->payload, buf + FAITH_FRAME_HEADER_SIZE, frame->payload_size);
   }
 
   *consumed_out = frame_size + sizeof(uint32_t);

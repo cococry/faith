@@ -23,9 +23,14 @@
 #define FAITH_MAX_CLIENT_OUT_QUEUE (1024u * 1024u)
 #define FAITH_MAX_CLIENT_IN_QUEUE  (1024u * 1024u)
 
-#define FAITH_HEADER_SIZE                                                      \
-  (sizeof(uint32_t) /* frame size    */ +                                      \
-   sizeof(uint16_t) /* proto version */ + sizeof(uint16_t)) /* message type */
+#define FAITH_FRAME_LENGTH_SIZE sizeof(uint32_t)
+
+#define FAITH_FRAME_METADATA_SIZE                                              \
+  (sizeof(uint16_t) /* protocol version */ +                                   \
+   sizeof(uint16_t) /* message type */)
+
+#define FAITH_FRAME_HEADER_SIZE                                                \
+  (FAITH_FRAME_LENGTH_SIZE + FAITH_FRAME_METADATA_SIZE)
 
 #define FAITH_ENVL_HEADER_SIZE                                                 \
   (sizeof(uint32_t) /* envelope type */ +                                      \
@@ -35,7 +40,7 @@
 
 #define _FAITH_BODY_SIZE(X) ((faith_body_size_t)((X)))
 
-#define FAITH_BODY_SIZE_T_MAX UINT32_MAX 
+#define FAITH_BODY_SIZE_T_MAX UINT32_MAX
 
 #define FAITH_MSG_PONG_PAYLOAD_SIZE                                            \
   _FAITH_BODY_SIZE(sizeof(uint64_t) /* client-server nonce */ +                \
@@ -50,17 +55,26 @@
   _FAITH_BODY_SIZE(sizeof(uint64_t) /* server nonce */)
 
 #define FAITH_ENVL_CTS_DEVICE_LINK_RESPONSE_BODY_SIZE                          \
-  (sizeof(((faith_envl_cts_device_link_response_t *)0)->signature_response) +  \
-   sizeof(((faith_envl_cts_device_link_response_t *)0)->device_id_new.bytes))
-
-#define FAITH_ENVL_STC_DEVICE_LINK_REQ_BODY_SIZE                               \
-  (sizeof(((faith_envl_stc_device_link_req_t *)0)->auth_id) +                  \
-   sizeof(((faith_envl_stc_device_link_req_t *)0)->public_key_new_device) +    \
-   sizeof(((faith_envl_stc_device_link_req_t *)0)->device_id_new.bytes) +      \
-   sizeof(((faith_envl_stc_device_link_req_t *)0)->code) +                     \
-   sizeof(((faith_envl_stc_device_link_req_t *)0)->expires_at_ms))
+  _FAITH_BODY_SIZE(FAITH_ED25519_SIGNATURE_SIZE /* signature response */ +     \
+                   FAITH_DEVICE_ID_SIZE /*device ID new*/)
 
 #define FAITH_DEVICE_LINK_CODE_SIZE 16
+
+#define FAITH_ENVL_STC_DEVICE_LINK_REQ_BODY_SIZE                               \
+  _FAITH_BODY_SIZE(FAITH_CLIENT_ID_SIZE /* auth ID */ +                        \
+                   FAITH_ED25519_PUBLIC_KEY_SIZE /*public key new device */ +  \
+                   FAITH_DEVICE_ID_SIZE /* device ID new */ +                  \
+                   FAITH_DEVICE_LINK_CODE_SIZE /* code */ +                    \
+                   sizeof(uint64_t) /* expires_at_ms*/)
+
+#define FAITH_CLIENT_DISCONNECT_MSG_MAX 128
+
+#define FAITH_ENVL_STC_CLIENT_DISCONNECT_BODY_SIZE                             \
+  (sizeof(uint32_t) /* reason */ + sizeof(uint32_t) /* reconnect policy */ +   \
+   sizeof(uint64_t) /* retry after milliseconds */ +                           \
+   sizeof(uint64_t) /* ban expiration timestamp */ +                           \
+   sizeof(uint16_t) /* message length */ +                                     \
+   FAITH_CLIENT_DISCONNECT_MSG_MAX /* message bytes */)
 
 #define FAITH_SIGNATURE_DEVICE_LINK_RESPONSE_SIZE                              \
   (sizeof(faith_client_id_t) /* auth ID */ +                                   \
@@ -81,8 +95,14 @@
   do {                                                                         \
     faith_status_code_t _fh_rc = (expr);                                       \
     if (_fh_rc != FAITH_OK) {                                                  \
-      nob_log(ERROR, "%s failed: %s (%d)", #expr,                              \
-              faith_status_code_name(_fh_rc), (int)_fh_rc);                    \
+      nob_log(ERROR,                                                           \
+              "_FH_CHECK_RETURN failed:\n"                                          \
+              "  expression : %s\n"                                            \
+              "  status     : %s (%d)\n"                                       \
+              "  function   : %s\n"                                            \
+              "  location   : %s:%d",                                          \
+              #expr, faith_status_code_name(_fh_rc), (int)_fh_rc, __func__,    \
+              __FILE__, __LINE__);                                             \
       return _fh_rc;                                                           \
     }                                                                          \
   } while (0)
@@ -92,8 +112,14 @@
     faith_status_code_t _fh_rc = (expr);                                       \
     result = _fh_rc;                                                           \
     if (_fh_rc != FAITH_OK) {                                                  \
-      nob_log(ERROR, "%s failed: %s (%d)", #expr,                              \
-              faith_status_code_name(_fh_rc), (int)_fh_rc);                    \
+      nob_log(ERROR,                                                           \
+              "_FH_CHECK_GOTO failed:\n"                                          \
+              "  expression : %s\n"                                            \
+              "  status     : %s (%d)\n"                                       \
+              "  function   : %s\n"                                            \
+              "  location   : %s:%d",                                          \
+              #expr, faith_status_code_name(_fh_rc), (int)_fh_rc, __func__,    \
+              __FILE__, __LINE__);                                             \
       goto label;                                                              \
     }                                                                          \
   } while (0)
@@ -110,21 +136,15 @@
   faith_status_code_t _fh_rc = (expr);                                         \
   do {                                                                         \
     if (_fh_rc != FAITH_OK) {                                                  \
-      nob_log(ERROR, "%s failed: %s (%d)", #expr,                              \
-              faith_status_code_name(_fh_rc), (int)_fh_rc);                    \
+      nob_log(ERROR,                                                           \
+              "_FH_CHECK failed:\n"                                          \
+              "  expression : %s\n"                                            \
+              "  status     : %s (%d)\n"                                       \
+              "  function   : %s\n"                                            \
+              "  location   : %s:%d",                                          \
+              #expr, faith_status_code_name(_fh_rc), (int)_fh_rc, __func__,    \
+              __FILE__, __LINE__);                                             \
     }                                                                          \
-  } while (0)
-
-#define FAITH_APPEND_RETURN(buf, cap, off, ptr, len)                           \
-  do {                                                                         \
-    if (!faith_buf_append((buf), (cap), &(off), (ptr), (len)))                 \
-      return FAITH_ERR_INVALID;                                                \
-  } while (0)
-
-#define FAITH_DECODE_RETURN(buf, size, off, dst, len)                          \
-  do {                                                                         \
-    if (!faith_buf_decode((buf), (size), &(off), (dst), (len)))                \
-      return FAITH_ERR_BAD_FRAME;                                              \
   } while (0)
 
 typedef struct {
@@ -134,7 +154,7 @@ typedef struct {
 
   void  *payload;
   size_t payload_size;
-} faith_frame_t;
+      } faith_frame_t;
 
 #define FAITH_STATUS_CODES(X)                                                  \
   X(FAITH_OK, 0)                                                               \
@@ -211,7 +231,44 @@ typedef enum {
   X(FAITH_ENVELOPE_DEVICE_AUTH_APPROVE, 10)                                    \
   X(FAITH_ENVELOPE_DEVICE_AUTH_DENY, 11)                                       \
   X(FAITH_ENVELOPE_DEVICE_AUTH_RESPONSE_ACK, 12)                               \
-  X(FAITH_ENVELOPE_DEVICE_LINK_CANCELLED, 13)
+  X(FAITH_ENVELOPE_DEVICE_LINK_CANCELLED, 13)                                  \
+  X(FAITH_ENVELOPE_CLIENT_DISCONNECT, 14)
+
+#define FAITH_CLIENT_DISCONNECT_REASONS(X)                                     \
+  X(FAITH_DISCONNECT_REASON_NONE, 0)                                           \
+  /* Temporary transport/server conditions */                                  \
+  X(FAITH_DISCONNECT_SERVER_SHUTDOWN, 1)                                       \
+  X(FAITH_DISCONNECT_SERVER_BUSY, 2)                                           \
+  X(FAITH_DISCONNECT_RATE_LIMITED, 3)                                          \
+  X(FAITH_DISCONNECT_TEMPORARY_FAILURE, 4)                                     \
+  /* Protocol/auth failures */                                                 \
+  X(FAITH_DISCONNECT_BAD_PROTOCOL, 5)                                          \
+  X(FAITH_DISCONNECT_UNSUPPORTED_VERSION, 6)                                   \
+  X(FAITH_DISCONNECT_AUTH_FAILED, 7)                                           \
+  X(FAITH_DISCONNECT_DEVICE_REJECTED, 8)                                       \
+  X(FAITH_DISCONNECT_DUPLICATE_SESSION, 9)                                     \
+  /* Administrative/security actions */                                        \
+  X(FAITH_DISCONNECT_IDENTITY_BANNED, 10)                                      \
+  X(FAITH_DISCONNECT_DEVICE_BANNED, 11)                                        \
+  X(FAITH_DISCONNECT_IP_BANNED, 12)                                            \
+  X(FAITH_DISCONNECT_ABUSE, 13)
+
+typedef enum {
+#define X(name, value) name = value,
+  FAITH_CLIENT_DISCONNECT_REASONS(X)
+#undef X
+} faith_client_disconnect_reason_t;
+
+#define FAITH_CLIENT_DISCONNECT_POLICIES(X)                                    \
+  X(FAITH_CLIENT_RECONNECT_ALLOWED, 0)                                         \
+  X(FAITH_CLIENT_RECONNECT_FORBIDDEN, 1)                                       \
+  X(FAITH_CLIENT_RECONNECT_AFTER_DELAY, 2)
+
+typedef enum {
+#define X(name, value) name = value,
+  FAITH_CLIENT_DISCONNECT_POLICIES(X)
+#undef X
+} faith_client_reconnect_policy_t;
 
 #define FAITH_DEVICE_LINK_REQ_EXPIRATION_TIME_MS 1000 * 30 // 30 seconds
 
@@ -268,12 +325,22 @@ typedef struct {
 } faith_envl_cts_device_link_response_t;
 
 typedef struct {
+  faith_client_reconnect_policy_t  reconnect_policy;
+  faith_client_disconnect_reason_t reason;
+
+  uint64_t retry_after_ms;
+  uint64_t banned_until_ms;
+
+  char msg[FAITH_CLIENT_DISCONNECT_MSG_MAX];
+} faith_envl_stc_client_disconnect_t;
+
+typedef struct {
   faith_client_id_t auth_id;
   faith_device_id_t device_id;
 
-  uint8_t           public_key[FAITH_ED25519_PUBLIC_KEY_SIZE];
-  uint64_t          client_nonce;
-  uint64_t          server_nonce;
+  uint8_t  public_key[FAITH_ED25519_PUBLIC_KEY_SIZE];
+  uint64_t client_nonce;
+  uint64_t server_nonce;
 
 } faith_signature_hello_handshake_t;
 
@@ -282,10 +349,10 @@ typedef struct {
   faith_device_id_t device_id_new;
   uint8_t           public_key_new_device[FAITH_ED25519_PUBLIC_KEY_SIZE];
 
-  uint8_t           code[FAITH_DEVICE_LINK_CODE_SIZE];
-  uint64_t          expires_at_ms;
+  uint8_t  code[FAITH_DEVICE_LINK_CODE_SIZE];
+  uint64_t expires_at_ms;
 
-  faith_device_id_t device_id_responding;
+  faith_device_id_t                 device_id_responding;
   faith_device_link_response_type_t type;
 
 } faith_signature_device_link_response_t;
@@ -296,12 +363,6 @@ uint8_t  faith_version_minor(uint16_t v);
 uint8_t  faith_version_patch(uint16_t v);
 
 const char *faith_strerror(int code);
-
-int faith_buf_append(uint8_t *buf, size_t cap, size_t *offset, const void *src,
-                     size_t len);
-
-int faith_buf_decode(const uint8_t *buf, size_t size, size_t *offset, void *dst,
-                     size_t len);
 
 faith_status_code_t faith_write_bytes_sync(SSL *ssl, const uint8_t *buf,
                                            size_t size);
@@ -334,6 +395,10 @@ const char *faith_status_code_name(faith_status_code_t code);
 const char *faith_event_name(faith_event_type_t ev);
 const char *faith_frame_msg_name(faith_frame_msg_type_t msg);
 const char *faith_envelope_name(faith_envelope_type_t env);
+const char *
+faith_client_reconnect_policy_name(faith_client_reconnect_policy_t policy);
+const char *
+faith_client_disconnect_reason_name(faith_client_disconnect_reason_t reason);
 
 faith_status_code_t faith_encode_envelope(uint8_t *out_buf, size_t *out_size,
                                           size_t buf_cap_in_bytes,
@@ -346,21 +411,30 @@ faith_status_code_t faith_decode_envelope(const uint8_t    *payload,
 faith_status_code_t
 faith_encode_device_link_req_body(uint8_t *out_buf, faith_body_size_t *out_size,
                                   size_t buf_cap_in_bytes,
-                                  const faith_envl_stc_device_link_req_t *req);
+                                  const faith_envl_stc_device_link_req_t *in);
 
 faith_status_code_t
 faith_decode_device_link_req_body(const uint8_t    *payload,
                                   faith_body_size_t payload_size,
-                                  faith_envl_stc_device_link_req_t *o_req);
+                                  faith_envl_stc_device_link_req_t *out);
 
 faith_status_code_t faith_encode_device_link_response_body(
     uint8_t *out_buf, faith_body_size_t *out_size, size_t buf_cap_in_bytes,
-    const faith_envl_cts_device_link_response_t *response);
+    const faith_envl_cts_device_link_response_t *in);
 
 faith_status_code_t faith_decode_device_link_response_body(
     const uint8_t *payload, faith_body_size_t payload_size,
-    faith_envl_cts_device_link_response_t *o_response);
+    faith_envl_cts_device_link_response_t *out);
 
+faith_status_code_t
+faith_encode_client_disconnect(uint8_t *out_buf, faith_body_size_t *out_size,
+                               size_t buf_cap_in_bytes,
+                               const faith_envl_stc_client_disconnect_t *in);
+
+faith_status_code_t
+     faith_decode_client_disconnect(const uint8_t                      *payload,
+                                    faith_body_size_t                   payload_size,
+                                    faith_envl_stc_client_disconnect_t *out);
 void faith_log_handler(Nob_Log_Level level, const char *fmt, va_list args);
 
 int faith_client_id_equal(faith_client_id_t a, faith_client_id_t b);

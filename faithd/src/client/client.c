@@ -1007,7 +1007,7 @@ static void *faith_client_thread_routine(void *arg) {
       _FH_CHECK(client_init_ssl(client));
       if (_fh_rc != FAITH_OK) {
         ERR_print_errors_fp(stderr);
-        goto fail;
+        goto disconnect;
       }
     }
 
@@ -1019,7 +1019,7 @@ static void *faith_client_thread_routine(void *arg) {
     {
       _FH_CHECK(client_make_handshake(client));
       if (_fh_rc != FAITH_OK) {
-        goto fail;
+        goto disconnect;
       }
     }
 
@@ -1033,11 +1033,11 @@ static void *faith_client_thread_routine(void *arg) {
       _FH_CHECK(client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
                                   "connection closed"));
       if (_fh_rc != FAITH_OK) {
-        goto fail;
+        goto disconnect;
       }
     }
 
-  fail:
+  disconnect:
     client_cleanup_connection(client);
 
     if (client_is_running(client)) {
