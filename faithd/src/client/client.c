@@ -26,6 +26,12 @@
 
 static int g_log_enable_tracing = true;
 
+typedef enum {
+  CLIENT_RECONNECT_STOP = 0,
+  CLIENT_RECONNECT_AUTOMATIC,
+  CLIENT_RECONNECT_MANUAL,
+} client_reconnect_action_t;
+
 typedef struct {
   EVP_PKEY *keypair;
   uint8_t   public_key[FAITH_ED25519_PUBLIC_KEY_SIZE];
@@ -76,7 +82,20 @@ struct faith_client {
 
   faith_envl_stc_device_link_req_t *pending_device_link_req;
 
+  uint64_t server_reconnect_after;
+
   uint64_t nonce_tmp;
+
+  faith_client_reconnect_policy_t  reconnect_policy;
+  faith_client_disconnect_reason_t disconnect_reason;
+
+  uint64_t reconnect_after_ms;
+  uint64_t banned_until_ms;
+
+  int manual_reconnect_requested, auto_reconnect_allowed;
+  
+  pthread_mutex_t reconnect_lock;
+  pthread_cond_t  reconnect_cond;
 };
 
 static faith_status_code_t
@@ -494,6 +513,62 @@ static void client_handle_pong(faith_client_t *client, faith_frame_t *frame) {
   }
 }
 
+static faith_status_code_t
+client_handle_disconnect(faith_client_t *client, const faith_envelope_t *envl) {
+  if (!client || !envl)
+    return FAITH_ERR_INVALID;
+
+  if (envl->body_size < FAITH_ENVL_STC_CLIENT_DISCONNECT_BODY_SIZE_FIXED ||
+      envl->body_size > FAITH_ENVL_STC_CLIENT_DISCONNECT_BODY_SIZE_MAX) {
+    nob_log(ERROR,
+            "[client] Invalid CLIENT_DISCONNECT body size: "
+            "body_size=%" PRIu32 ", min=%zu, max=%zu",
+            envl->body_size,
+            (size_t)FAITH_ENVL_STC_CLIENT_DISCONNECT_BODY_SIZE_FIXED,
+            (size_t)FAITH_ENVL_STC_CLIENT_DISCONNECT_BODY_SIZE_MAX);
+
+    return FAITH_ERR_BAD_ENVELOPE;
+  }
+
+  faith_envl_stc_client_disconnect_t disconnect = {0};
+
+  _FH_CHECK_RETURN(faith_decode_client_disconnect_body(
+      envl->body, envl->body_size, &disconnect));
+
+  pthread_mutex_lock(&client->reconnect_lock);
+
+  client->reconnect_policy = disconnect.reconnect_policy;
+  client->disconnect_reason = disconnect.reason;
+  client->reconnect_after_ms = disconnect.retry_after_ms;
+  client->manual_reconnect_requested = false;
+  client->auto_reconnect_allowed =
+      disconnect.reconnect_policy != FAITH_CLIENT_RECONNECT_FORBIDDEN;
+
+  pthread_mutex_unlock(&client->reconnect_lock);
+
+  _FH_CHECK_RETURN(client_push_event(client, FAITH_EVENT_SERVER_DISCONNECT,
+                                     (uint64_t)disconnect.reconnect_policy,
+                                     (uint64_t)disconnect.reason,
+                                     disconnect.msg));
+
+  atomic_store(&client->connected, false);
+
+  pthread_mutex_lock(&client->lock);
+  int fd = client->sockfd;
+  pthread_mutex_unlock(&client->lock);
+
+  if (fd >= 0 && shutdown(fd, SHUT_RDWR) < 0) {
+    if (errno != ENOTCONN && errno != EINVAL && errno != EBADF) {
+      nob_log(WARNING,
+              "[client] Failed to shut down socket after server disconnect: "
+              "fd=%d, errno=%d (%s)",
+              fd, errno, strerror(errno));
+    }
+  }
+
+  return FAITH_OK;
+}
+
 static faith_status_code_t client_handle_envelope(faith_client_t *client,
                                                   faith_frame_t  *frame) {
   faith_envelope_t envl;
@@ -622,6 +697,9 @@ static faith_status_code_t client_handle_envelope(faith_client_t *client,
         "device disconnected."));
     break;
   }
+  case FAITH_ENVELOPE_CLIENT_DISCONNECT:
+    client_handle_disconnect(client, &envl);
+    break;
   default:
     break;
   }
@@ -648,7 +726,6 @@ static void *reader(void *arg) {
       break;
     }
     case FAITH_MSG_ENVL: {
-      printf("HANDLING ENVELOPE.\n");
       client_handle_envelope(client, &frame);
       break;
     }
@@ -902,7 +979,11 @@ client_handle_challenge(faith_client_t   *client,
   return client_send_envelope_locked(client, &envl);
 }
 
-static faith_status_code_t client_make_handshake(faith_client_t *client) {
+static faith_status_code_t client_make_handshake(faith_client_t *client, int* authorized) {
+  if (!authorized)
+    return FAITH_ERR_INVALID;
+  *authorized = 0;
+
   if (!client)
     return FAITH_ERR_INVALID;
 
@@ -963,6 +1044,8 @@ static faith_status_code_t client_make_handshake(faith_client_t *client) {
     _FH_CHECK_RETURN(
         client_push_event(client, FAITH_EVENT_AUTHORIZED, 0, 0,
                           "The client was successfully authorized."));
+
+    *authorized = 1;
     _FH_RETURN_DEFER(FAITH_OK);
   }
   case FAITH_ENVELOPE_DEVICE_AUTH_PENDING: {
@@ -978,6 +1061,10 @@ static faith_status_code_t client_make_handshake(faith_client_t *client) {
         "Client is waiting for device-link response by authorized device."));
     _FH_RETURN_DEFER(FAITH_OK);
   }
+  case FAITH_ENVELOPE_CLIENT_DISCONNECT: {
+    client_handle_disconnect(client, &envl);
+    _FH_RETURN_DEFER(FAITH_ERR_IO);
+  }
   default:
     nob_log(ERROR,
             "Received invalid server envelope response to "
@@ -991,6 +1078,33 @@ static faith_status_code_t client_make_handshake(faith_client_t *client) {
 defer:
   faith_frame_free(&frame);
   return _fh_result;
+}
+
+static client_reconnect_action_t
+client_wait_for_reconnect_permission(faith_client_t *client) {
+  pthread_mutex_lock(&client->reconnect_lock);
+
+  while (client_is_running(client) &&
+         !client->auto_reconnect_allowed &&
+         !client->manual_reconnect_requested) {
+    pthread_cond_wait(&client->reconnect_cond, &client->reconnect_lock);
+  }
+
+  client_reconnect_action_t action = CLIENT_RECONNECT_STOP;
+
+  if (client_is_running(client)) {
+    if (client->manual_reconnect_requested)
+      action = CLIENT_RECONNECT_MANUAL;
+    else if (client->auto_reconnect_allowed)
+      action = CLIENT_RECONNECT_AUTOMATIC;
+  }
+
+  /*A manual request permits one connection attempt. It does not permanently
+   * override the server's automatic-reconnect policy. */
+  client->manual_reconnect_requested = false;
+
+  pthread_mutex_unlock(&client->reconnect_lock);
+  return action;
 }
 
 static void *faith_client_thread_routine(void *arg) {
@@ -1013,13 +1127,16 @@ static void *faith_client_thread_routine(void *arg) {
 
     atomic_store(&client->connected, true);
 
-    backoff_ms = 250;
-
     /* Make protocol handshake with server */
     {
-      _FH_CHECK(client_make_handshake(client));
+      int authorized = 0;
+      _FH_CHECK(client_make_handshake(client, &authorized));
       if (_fh_rc != FAITH_OK) {
         goto disconnect;
+      } 
+      if(authorized) {
+        backoff_ms =
+            client->reconnect_after_ms == 0 ? 250 : client->reconnect_after_ms;
       }
     }
 
@@ -1028,21 +1145,31 @@ static void *faith_client_thread_routine(void *arg) {
 
     atomic_store(&client->connected, false);
 
-    /* Send DISCONNECTED event when client closed */
-    {
-      _FH_CHECK(client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
-                                  "connection closed"));
-      if (_fh_rc != FAITH_OK) {
-        goto disconnect;
-      }
-    }
+    _FH_CHECK(client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
+                                "Connection closed."));
 
   disconnect:
     client_cleanup_connection(client);
 
-    if (client_is_running(client)) {
-      _sleep_ms(backoff_ms);
-      backoff_ms = client_next_backoff_ms(backoff_ms);
+    client_reconnect_action_t action =
+        client_wait_for_reconnect_permission(client);
+
+    if (action == CLIENT_RECONNECT_STOP)
+      break;
+
+    if (action == CLIENT_RECONNECT_AUTOMATIC) {
+      // When <reconnect_after_ms> is 0, it means the server does not 
+      // care when we reconnect. This client uses a backoff timer to 
+      // reconnect in that case.
+      if (client->reconnect_after_ms == 0) {
+        _sleep_ms(backoff_ms);
+        backoff_ms = client_next_backoff_ms(backoff_ms);
+      } else {
+        backoff_ms = client->reconnect_after_ms;
+      }
+    } else {
+      backoff_ms =
+          client->reconnect_after_ms == 0 ? 250 : client->reconnect_after_ms;
     }
 
     continue;
@@ -1140,8 +1267,9 @@ static faith_status_code_t client_new_identity(client_identity_t *o_ident) {
     _FH_CHECK_RETURN(faith_id128_to_hex(o_ident->auth_id.bytes, auth_id_hex));
     _FH_CHECK_RETURN(
         faith_id128_to_hex(o_ident->device_id.bytes, device_id_hex));
-    nob_log(INFO, "[faith] Generated new client identity (auth_id=%s, device_id=%s).",
-        auth_id_hex, device_id_hex);
+    nob_log(INFO,
+            "[faith] Generated new client identity (auth_id=%s, device_id=%s).",
+            auth_id_hex, device_id_hex);
   }
 
   return FAITH_OK;
@@ -1192,8 +1320,21 @@ faith_client_t *faith_client_create(const faith_client_config_t *cfg) {
     goto fail_event_fd;
   }
 
+  if (pthread_mutex_init(&client->reconnect_lock, NULL) != 0)
+    goto fail_event_fd;
+
+  if (pthread_cond_init(&client->reconnect_cond, NULL) != 0)
+    goto fail_reconnect_lock;
+
+  client->auto_reconnect_allowed = true;
+  client->manual_reconnect_requested = false;
+  client->reconnect_policy = FAITH_CLIENT_RECONNECT_ALLOWED;
+  client->disconnect_reason = FAITH_DISCONNECT_REASON_NONE;
+
   return client;
 
+fail_reconnect_lock:
+  pthread_mutex_destroy(&client->reconnect_lock);
 fail_event_fd:
   close(client->event_fd);
 
@@ -1232,6 +1373,9 @@ void faith_client_destroy(faith_client_t *client) {
   pthread_mutex_destroy(&client->write_lock);
   pthread_mutex_destroy(&client->ping_lock);
   pthread_mutex_destroy(&client->lock);
+  pthread_mutex_destroy(&client->reconnect_lock);
+  
+  pthread_cond_destroy(&client->reconnect_cond);
 
   free(client);
   client = NULL;
@@ -1433,6 +1577,9 @@ faith_client_approve_pending_device_auth(faith_client_t *client) {
                    "authorization pending.");
     return FAITH_ERR_INVALID;
   }
+  if(faith_now_ms() > req->expires_at_ms) {
+    return FAITH_ERR_EXPIRED;
+  }
 
   uint8_t signature[FAITH_ED25519_SIGNATURE_SIZE] = {0};
   size_t  signature_size = 0;
@@ -1485,6 +1632,9 @@ faith_client_deny_pending_device_auth(faith_client_t *client) {
                    "authorization pending.");
     return FAITH_ERR_INVALID;
   }
+  if (faith_now_ms() > req->expires_at_ms) {
+    return FAITH_ERR_EXPIRED;
+  }
 
   uint8_t signature[FAITH_ED25519_SIGNATURE_SIZE] = {0};
   size_t  signature_size = 0;
@@ -1517,4 +1667,24 @@ defer:
   client_clear_pending_device_link_request(client);
 
   return _fh_result;
+}
+
+faith_status_code_t faith_client_reconnect(faith_client_t *client) {
+  if (!client)
+    return FAITH_ERR_INVALID;
+
+  if (!client_is_running(client))
+    return FAITH_ERR_NOT_STARTED;
+
+  if (atomic_load(&client->connected))
+    return FAITH_ERR_ALREADY_CONNECTED;
+
+  pthread_mutex_lock(&client->reconnect_lock);
+
+  client->manual_reconnect_requested = true;
+  pthread_cond_signal(&client->reconnect_cond);
+
+  pthread_mutex_unlock(&client->reconnect_lock);
+
+  return FAITH_OK;
 }

@@ -50,3 +50,5 @@ faith_status_code_t faith_client_free_event(faith_event_t *ev);
 faith_status_code_t faith_client_approve_pending_device_auth(faith_client_t* client);
 
 faith_status_code_t faith_client_deny_pending_device_auth(faith_client_t* client);
+
+faith_status_code_t faith_client_reconnect(faith_client_t *client);

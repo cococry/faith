@@ -182,6 +182,10 @@
     (offset) += _fh_int_size;                                                  \
   } while (0)
 
+#define FAITH_DECODE_U16_BE_RETURN(payload, payload_size, offset, out)         \
+  _FAITH_DECODE_INT_BE_RETURN(payload, payload_size, offset, out, uint16_t,    \
+                              faith_read_u16_be)
+
 #define FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset, out)         \
   _FAITH_DECODE_INT_BE_RETURN(payload, payload_size, offset, out, uint32_t,    \
                               faith_read_u32_be)
@@ -239,6 +243,10 @@
     (offset) += _fh_int_size;                                                  \
   } while (0)
 
+#define FAITH_ENCODE_U16_BE_RETURN(buf, buf_cap, offset, value)                \
+  _FAITH_ENCODE_INT_BE_RETURN(buf, buf_cap, offset, value, uint16_t,           \
+                              faith_write_u16_be)
+
 #define FAITH_ENCODE_U32_BE_RETURN(buf, buf_cap, offset, value)                \
   _FAITH_ENCODE_INT_BE_RETURN(buf, buf_cap, offset, value, uint32_t,           \
                               faith_write_u32_be)
@@ -247,7 +255,7 @@
   _FAITH_ENCODE_INT_BE_RETURN(buf, buf_cap, offset, value, uint64_t,           \
                               faith_write_u64_be)
 
-#define FAITH_ENVL_DECODE_PROLOGUE(envl_size)                                  \
+#define FAITH_ENVL_DECODE_PROLOGUE(envl_size, sign)                            \
   do {                                                                         \
     const size_t _fh_expected_size = (size_t)(envl_size);                      \
                                                                                \
@@ -273,7 +281,7 @@
       return _fh_rc;                                                           \
     }                                                                          \
                                                                                \
-    if ((size_t)payload_size != _fh_expected_size) {                           \
+    if ((size_t)payload_size sign _fh_expected_size) {                         \
       _FH_LOG_CODEC_FAILURE("Envelope decode",                                 \
                             "payload size does not match wire size",           \
                             "  payload size  : %zu\n"                          \
@@ -283,13 +291,14 @@
     }                                                                          \
   } while (0)
 
-#define FAITH_ENVL_DECODE_EPILOGUE(envl_size)                                  \
+#define FAITH_ENVL_DECODE_EPILOGUE(envl_size, sign)                                  \
   do {                                                                         \
     const size_t _fh_expected_size = (size_t)(envl_size);                      \
     const size_t _fh_offset = (size_t)offset;                                  \
     const size_t _fh_payload_size = (size_t)payload_size;                      \
                                                                                \
-    if (_fh_offset != _fh_expected_size || _fh_offset != _fh_payload_size) {   \
+    if (_fh_offset sign _fh_expected_size ||                                   \
+        _fh_offset sign _fh_payload_size) {                                    \
       _FH_LOG_CODEC_FAILURE("Envelope decode",                                 \
                             "final decode offset is inconsistent",             \
                             "  offset        : %zu\n"                          \
@@ -327,12 +336,12 @@
     }                                                                          \
   } while (0)
 
-#define FAITH_ENVL_ENCODE_EPILOGUE(envl_size)                                  \
+#define FAITH_ENVL_ENCODE_EPILOGUE(envl_size, sign)                            \
   do {                                                                         \
     const size_t _fh_expected_size = (size_t)(envl_size);                      \
     const size_t _fh_offset = (size_t)offset;                                  \
                                                                                \
-    if (_fh_offset != _fh_expected_size) {                                     \
+    if (_fh_offset sign _fh_expected_size) {                                   \
       _FH_LOG_CODEC_FAILURE("Envelope encode",                                 \
                             "final encoded size is inconsistent",              \
                             "  encoded size  : %zu\n"                          \
@@ -410,11 +419,6 @@ faith_status_code_t faith_read_bytes_sync(SSL *ssl, uint8_t *buf, size_t size) {
 
     int err = SSL_get_error(ssl, 0);
 
-    nob_log(ERROR,
-            "SSL_read_ex failed: ssl_err=%d, nread=%zu, total=%zu, want=%zu, "
-            "errno=%d (%s)\n",
-            err, nread, total, size - total, errno, strerror(errno));
-
     switch (err) {
     case SSL_ERROR_WANT_READ:
     case SSL_ERROR_WANT_WRITE:
@@ -434,12 +438,22 @@ faith_status_code_t faith_read_bytes_sync(SSL *ssl, uint8_t *buf, size_t size) {
         return FAITH_ERR_CLOSED;
       }
 
+      nob_log(ERROR,
+              "SSL_read_ex failed: ssl_err=%d, nread=%zu, total=%zu, want=%zu, "
+              "errno=%d (%s)\n",
+              err, nread, total, size - total, errno, strerror(errno));
       ERR_print_errors_fp(stderr);
       return FAITH_ERR_SSL;
     }
 
-    default:
+    default: {
+
+      nob_log(ERROR,
+              "SSL_read_ex failed: ssl_err=%d, nread=%zu, total=%zu, want=%zu, "
+              "errno=%d (%s)\n",
+              err, nread, total, size - total, errno, strerror(errno));
       return FAITH_ERR_IO;
+    }
     }
   }
 
@@ -463,7 +477,15 @@ faith_status_code_t faith_read_frame_sync(SSL *ssl, faith_frame_t *out) {
 
   memset(out, 0, sizeof(*out));
 
-  _FH_CHECK_RETURN(faith_read_bytes_sync(ssl, len_buf, sizeof(len_buf)));
+  faith_status_code_t read_rc =
+      faith_read_bytes_sync(ssl, len_buf, sizeof(len_buf));
+
+  if (read_rc == FAITH_ERR_SSL || read_rc == FAITH_ERR_INVALID ||
+      read_rc == FAITH_ERR_IO)
+    return read_rc;
+  else if (read_rc == FAITH_ERR_CLOSED) {
+    return FAITH_OK;
+  }
 
   const uint32_t frame_size = faith_read_u32_be(len_buf);
 
@@ -557,19 +579,19 @@ faith_status_code_t faith_encode_frame(faith_frame_msg_type_t type,
   if (payload_size > 0 && !payload)
     return FAITH_ERR_INVALID;
 
-  if (payload_size > FAITH_MAX_PAYLOAD_SIZE)
-    return FAITH_ERR_FRAME_TOO_LARGE;
-
-  if (payload_size > SIZE_MAX - FAITH_FRAME_METADATA_SIZE)
-    return FAITH_ERR_FRAME_TOO_LARGE;
-
   const size_t frame_size = FAITH_FRAME_METADATA_SIZE + payload_size;
 
+  if (payload_size > FAITH_MAX_PAYLOAD_SIZE)
+    goto payload_too_large;
+
+  if (payload_size > SIZE_MAX - FAITH_FRAME_METADATA_SIZE)
+    goto frame_too_large;
+
   if (frame_size > UINT32_MAX || frame_size > FAITH_MAX_FRAME_LEN)
-    return FAITH_ERR_FRAME_TOO_LARGE;
+    goto frame_too_large;
 
   if (frame_size > SIZE_MAX - FAITH_FRAME_LENGTH_SIZE)
-    return FAITH_ERR_FRAME_TOO_LARGE;
+    goto frame_too_large;
 
   const size_t data_size = FAITH_FRAME_LENGTH_SIZE + frame_size;
 
@@ -613,6 +635,18 @@ faith_status_code_t faith_encode_frame(faith_frame_msg_type_t type,
 fail:
   free(data);
   return rc;
+frame_too_large:
+  nob_log(ERROR,
+          "Failed to encode frame; Frame is too large, "
+          "frame_size=%zu, MAX_FRAME_LEN=%i",
+          frame_size, (int32_t)FAITH_MAX_FRAME_LEN);
+  return FAITH_ERR_FRAME_TOO_LARGE;
+payload_too_large:
+  nob_log(ERROR,
+          "Failed to encode frame; Payload is too large, "
+          "payload_size=%zu, MAX_PAYLOAD_SIZE=%i",
+          payload_size, (int32_t)FAITH_MAX_PAYLOAD_SIZE);
+  return FAITH_ERR_FRAME_TOO_LARGE;
 }
 
 uint64_t faith_now_ms() {
@@ -871,7 +905,7 @@ faith_encode_device_link_req_body(uint8_t *out_buf, faith_body_size_t *out_size,
   FAITH_ENCODE_U64_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
                              in->expires_at_ms);
 
-  FAITH_ENVL_ENCODE_EPILOGUE(FAITH_ENVL_STC_DEVICE_LINK_REQ_BODY_SIZE);
+  FAITH_ENVL_ENCODE_EPILOGUE(FAITH_ENVL_STC_DEVICE_LINK_REQ_BODY_SIZE, !=);
 
   return FAITH_OK;
 }
@@ -880,7 +914,7 @@ faith_status_code_t
 faith_decode_device_link_req_body(const uint8_t    *payload,
                                   faith_body_size_t payload_size,
                                   faith_envl_stc_device_link_req_t *out) {
-  FAITH_ENVL_DECODE_PROLOGUE(FAITH_ENVL_STC_DEVICE_LINK_REQ_BODY_SIZE);
+  FAITH_ENVL_DECODE_PROLOGUE(FAITH_ENVL_STC_DEVICE_LINK_REQ_BODY_SIZE, !=);
 
   size_t offset = 0;
 
@@ -898,7 +932,7 @@ faith_decode_device_link_req_body(const uint8_t    *payload,
 
   FAITH_DECODE_U64_BE_RETURN(payload, payload_size, offset, out->expires_at_ms);
 
-  FAITH_ENVL_DECODE_EPILOGUE(FAITH_ENVL_STC_DEVICE_LINK_REQ_BODY_SIZE);
+  FAITH_ENVL_DECODE_EPILOGUE(FAITH_ENVL_STC_DEVICE_LINK_REQ_BODY_SIZE, !=);
 
   return FAITH_OK;
 }
@@ -916,7 +950,7 @@ faith_status_code_t faith_encode_device_link_response_body(
   FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset,
                       in->device_id_new.bytes, sizeof(in->device_id_new.bytes));
 
-  FAITH_ENVL_ENCODE_EPILOGUE(FAITH_ENVL_CTS_DEVICE_LINK_RESPONSE_BODY_SIZE);
+  FAITH_ENVL_ENCODE_EPILOGUE(FAITH_ENVL_CTS_DEVICE_LINK_RESPONSE_BODY_SIZE, !=);
 
   return FAITH_OK;
 }
@@ -925,7 +959,7 @@ faith_status_code_t faith_decode_device_link_response_body(
     const uint8_t *payload, faith_body_size_t payload_size,
     faith_envl_cts_device_link_response_t *out) {
 
-  FAITH_ENVL_DECODE_PROLOGUE(FAITH_ENVL_CTS_DEVICE_LINK_RESPONSE_BODY_SIZE);
+  FAITH_ENVL_DECODE_PROLOGUE(FAITH_ENVL_CTS_DEVICE_LINK_RESPONSE_BODY_SIZE, !=);
 
   size_t offset = 0;
 
@@ -935,17 +969,19 @@ faith_status_code_t faith_decode_device_link_response_body(
   FAITH_DECODE_RETURN(payload, payload_size, offset, out->device_id_new.bytes,
                       sizeof(out->device_id_new.bytes));
 
-  FAITH_ENVL_DECODE_EPILOGUE(FAITH_ENVL_CTS_DEVICE_LINK_RESPONSE_BODY_SIZE);
+  FAITH_ENVL_DECODE_EPILOGUE(FAITH_ENVL_CTS_DEVICE_LINK_RESPONSE_BODY_SIZE, !=);
 
   return FAITH_OK;
 }
 
-faith_status_code_t
-faith_encode_client_disconnect(uint8_t *out_buf, faith_body_size_t *out_size,
-                               size_t buf_cap_in_bytes,
-                               const faith_envl_stc_client_disconnect_t *in) {
+faith_status_code_t faith_encode_client_disconnect_body(
+    uint8_t *out_buf, faith_body_size_t *out_size, size_t buf_cap_in_bytes,
+    const faith_envl_stc_client_disconnect_t *in) {
 
-  FAITH_ENVL_ENCODE_PROLOGUE(FAITH_ENVL_STC_CLIENT_DISCONNECT_BODY_SIZE);
+  const size_t msg_len = strnlen(in->msg, sizeof(in->msg));
+
+  FAITH_ENVL_ENCODE_PROLOGUE(FAITH_ENVL_STC_CLIENT_DISCONNECT_BODY_SIZE_FIXED +
+                             msg_len);
 
   size_t offset = 0;
 
@@ -961,20 +997,24 @@ faith_encode_client_disconnect(uint8_t *out_buf, faith_body_size_t *out_size,
   FAITH_ENCODE_U64_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
                              in->banned_until_ms);
 
-  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, in->msg,
-                      sizeof(in->msg));
+  FAITH_ENCODE_U16_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
+                             (uint16_t)msg_len);
 
-  FAITH_ENVL_ENCODE_EPILOGUE(FAITH_ENVL_STC_CLIENT_DISCONNECT_BODY_SIZE);
+  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, in->msg, msg_len);
+
+  FAITH_ENVL_ENCODE_EPILOGUE(
+      FAITH_ENVL_STC_CLIENT_DISCONNECT_BODY_SIZE_FIXED + msg_len, !=);
 
   return FAITH_OK;
 }
 
 faith_status_code_t
-faith_decode_client_disconnect(const uint8_t                      *payload,
-                               faith_body_size_t                   payload_size,
-                               faith_envl_stc_client_disconnect_t *out) {
+faith_decode_client_disconnect_body(const uint8_t    *payload,
+                                    faith_body_size_t payload_size,
+                                    faith_envl_stc_client_disconnect_t *out) {
 
-  FAITH_ENVL_DECODE_PROLOGUE(FAITH_ENVL_STC_CLIENT_DISCONNECT_BODY_SIZE);
+  FAITH_ENVL_DECODE_PROLOGUE(FAITH_ENVL_STC_CLIENT_DISCONNECT_BODY_SIZE_FIXED,
+                             <);
 
   size_t offset = 0;
 
@@ -989,10 +1029,19 @@ faith_decode_client_disconnect(const uint8_t                      *payload,
   FAITH_DECODE_U64_BE_RETURN(payload, payload_size, offset,
                              out->banned_until_ms);
 
-  FAITH_DECODE_RETURN(payload, payload_size, offset, out->msg,
-                      sizeof(out->msg));
+  FAITH_DECODE_U16_BE_RETURN(payload, payload_size, offset, out->msg_size);
 
-  FAITH_ENVL_DECODE_EPILOGUE(FAITH_ENVL_STC_CLIENT_DISCONNECT_BODY_SIZE);
+  if (out->msg_size > FAITH_MAX_CLIENT_DISCONNECT_MSG)
+    return FAITH_ERR_BAD_FRAME;
+
+  if ((size_t)out->msg_size != (size_t)payload_size - offset)
+    return FAITH_ERR_BAD_FRAME;
+
+  FAITH_DECODE_RETURN(payload, payload_size, offset, out->msg, out->msg_size);
+
+  out->msg[out->msg_size] = '\0';
+
+  FAITH_ENVL_DECODE_EPILOGUE(FAITH_ENVL_STC_CLIENT_DISCONNECT_BODY_SIZE_FIXED, <);
 
   return FAITH_OK;
 }
