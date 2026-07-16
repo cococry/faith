@@ -26,6 +26,8 @@
 
 static int g_log_enable_tracing = true;
 
+typedef atomic_uint_fast64_t client_request_id_t; 
+
 typedef enum {
   CLIENT_RECONNECT_STOP = 0,
   CLIENT_RECONNECT_AUTOMATIC,
@@ -96,6 +98,8 @@ struct faith_client {
   
   pthread_mutex_t reconnect_lock;
   pthread_cond_t  reconnect_cond;
+
+  client_request_id_t next_request_id;
 };
 
 static faith_status_code_t
@@ -569,6 +573,22 @@ client_handle_disconnect(faith_client_t *client, const faith_envelope_t *envl) {
   return FAITH_OK;
 }
 
+static faith_status_code_t
+client_next_request_id(faith_client_t       *client,
+                             client_request_id_t *request_id_out) {
+  if (!client || !request_id_out)
+    return FAITH_ERR_INVALID;
+
+  client_request_id_t id = atomic_fetch_add(&client->next_request_id, 1);
+
+  if (id == 0) {
+    id = atomic_fetch_add(&client->next_request_id, 1);
+  }
+
+  *request_id_out = id;
+  return FAITH_OK;
+}
+
 static faith_status_code_t client_handle_envelope(faith_client_t *client,
                                                   faith_frame_t  *frame) {
   faith_envelope_t envl;
@@ -585,8 +605,7 @@ static faith_status_code_t client_handle_envelope(faith_client_t *client,
     break;
   }
   case FAITH_ENVELOPE_MSG_SEND: {
-    if (!faith_client_id_equal(envl.recipient_id, client->ident.auth_id) ||
-        faith_client_id_equal(envl.sender_id, FAITH_CLIENT_ID_NONE)) {
+    if (!faith_client_id_equal(envl.recipient_id, client->ident.auth_id)) {
       nob_log(ERROR, "[client - reader] Got sent invalid MESSAGE envelope.");
       return _fh_rc;
     }
@@ -872,7 +891,9 @@ static faith_status_code_t faith_client_send_hello(faith_client_t *client) {
   envl.body = body;
   envl.body_size = sizeof(body);
 
-  return client_send_envelope_locked(client, &envl);
+  _FH_CHECK(client_send_envelope_locked(client, &envl));
+
+  return _fh_rc;
 }
 
 static faith_status_code_t
@@ -938,9 +959,10 @@ client_handle_challenge(faith_client_t   *client,
   sign_msg.client_nonce = client->nonce_tmp;
   sign_msg.server_nonce = server_nonce;
 
+  size_t msg_size = 0;
   uint8_t msg_buf[FAITH_SIGNATURE_HELLO_HANDSHAKE_SIZE];
   {
-    _FH_CHECK(faith_gen_sign_buf_hello_handshake(msg_buf, sizeof(msg_buf),
+    _FH_CHECK(faith_gen_sign_buf_hello_handshake(msg_buf, &msg_size, sizeof(msg_buf),
                                                  &sign_msg));
 
     if (_fh_rc != FAITH_OK) {
@@ -976,7 +998,9 @@ client_handle_challenge(faith_client_t   *client,
   envl.body = signature;
   envl.body_size = sizeof(signature);
 
-  return client_send_envelope_locked(client, &envl);
+  _FH_CHECK(client_send_envelope_locked(client, &envl));
+
+  return _fh_rc;
 }
 
 static faith_status_code_t client_make_handshake(faith_client_t *client, int* authorized) {
@@ -1253,7 +1277,8 @@ static faith_status_code_t client_new_identity(client_identity_t *o_ident) {
 
   /* Generate 128 bit random device & auth identities */
 
-  client_id_from_hex("887f50a5b53f93c3b983b10bb9d74a10", &o_ident->auth_id);
+  _FH_CHECK_RETURN(faith_random_bytes(o_ident->auth_id.bytes,
+                                      sizeof(o_ident->auth_id.bytes)));
 
   _FH_CHECK_RETURN(faith_random_bytes(o_ident->device_id.bytes, sizeof(o_ident->device_id.bytes)));
 
@@ -1282,6 +1307,8 @@ faith_client_t *faith_client_create(const faith_client_config_t *cfg) {
   faith_client_t *client = calloc(1, sizeof(*client));
   if (!client)
     return NULL;
+
+  atomic_init(&client->next_request_id, 1);
 
   nob_set_log_handler(faith_log_handler);
 
@@ -1446,11 +1473,10 @@ faith_status_code_t faith_client_stop(faith_client_t *client) {
 }
 
 faith_status_code_t
-faith_client_send_message(faith_client_t   *client,
+faith_client_send_msg(faith_client_t   *client,
                           faith_client_id_t recipient_auth_id,
                           const char       *msg) {
-  if (!client ||
-      faith_client_id_equal(recipient_auth_id, FAITH_CLIENT_ID_NONE) || !msg)
+  if (!client || !msg)
     return FAITH_ERR_INVALID;
 
   /* This does not include the null terminator of the string. */
@@ -1462,10 +1488,102 @@ faith_client_send_message(faith_client_t   *client,
   faith_envelope_t envl = {0};
   envl.type = FAITH_ENVELOPE_MSG_SEND;
   envl.recipient_id = recipient_auth_id;
+
   envl.body_size = msg_size;
   envl.body = (uint8_t *)msg;
 
-  return client_send_envelope_locked(client, &envl);
+  _FH_CHECK(client_send_envelope_locked(client, &envl));
+
+  return _fh_rc;
+}
+
+faith_status_code_t
+faith_client_send_msg_request(faith_client_t   *client,
+                                  faith_client_id_t recipient_auth_id) {
+  if (!client)
+    return FAITH_ERR_INVALID;
+
+  faith_envl_cts_msg_request_t req = {0};
+  req.auth_id_recv = recipient_auth_id;
+  _FH_CHECK_RETURN(client_next_request_id(client, &client->next_request_id));
+
+  faith_body_size_t body_size = 0;
+  uint8_t           body[FAITH_ENVL_CTS_MSG_REQUEST_BODY_SIZE];
+  _FH_CHECK_RETURN(
+      faith_encode_msg_request_body(body, &body_size, sizeof(body), &req));
+
+  faith_envelope_t envl = {0};
+  envl.type = FAITH_ENVELOPE_MSG_REQUEST;
+  envl.recipient_id = recipient_auth_id;
+  envl.body = body;
+  envl.body_size = body_size;
+
+  _FH_CHECK(client_send_envelope_locked(client, &envl));
+
+  return _fh_rc;
+}
+
+static faith_status_code_t client_gen_msg_request_respone_signature(
+    faith_client_t *client, const faith_msg_request_t *req,
+    uint8_t o_signature[FAITH_ED25519_SIGNATURE_SIZE], size_t *o_signature_size,
+    faith_msg_request_response_type_t type);
+
+static faith_status_code_t
+client_msg_request_response(faith_client_t                   *client,
+                                const faith_msg_request_t        *req,
+                                faith_msg_request_response_type_t type) {
+  if (!client || !req)
+    return FAITH_ERR_INVALID;
+
+  uint8_t signature[FAITH_ED25519_SIGNATURE_SIZE] = {0};
+  size_t  signature_size = 0;
+
+  _FH_CHECK_RETURN(client_gen_msg_request_respone_signature(
+      client, req, signature, &signature_size, type));
+
+  faith_envl_cts_msg_request_response_t response = {0};
+
+  memcpy(response.signature_response, signature, signature_size);
+
+  client_request_id_t req_id = 0;
+  _FH_CHECK_RETURN(client_next_request_id(client, &req_id));
+  response.cl_req_id = req_id;
+
+  memcpy(response.srv_req_id.bytes, req->srv_req_id.bytes, FAITH_REQUEST_ID_SIZE);
+
+  response.type = type;
+
+  faith_body_size_t body_size = 0;
+  uint8_t           body[FAITH_ENVL_CTS_MSG_REQUEST_RESPONSE_BODY_SIZE] = {0};
+
+  _FH_CHECK_RETURN(faith_encode_msg_request_response_body(body, &body_size,
+                                                     sizeof(body), &response));
+
+  faith_envelope_t response_envl = {0};
+  response_envl.type = FAITH_ENVELOPE_MSG_REQUEST_RESPONSE;
+
+  response_envl.body = body;
+  response_envl.body_size = body_size;
+
+  _FH_CHECK_RETURN(client_send_envelope_locked(client, &response_envl));
+
+  return FAITH_OK;
+}
+
+faith_status_code_t
+faith_client_msg_request_accept(faith_client_t            *client,
+                                    const faith_msg_request_t *req) {
+  _FH_CHECK_RETURN(
+      client_msg_request_response(client, req, FAITH_MSG_REQUEST_ACCEPT));
+  return FAITH_OK;
+}
+
+faith_status_code_t
+faith_client_msg_request_deny(faith_client_t            *client,
+                                  const faith_msg_request_t *req) {
+  _FH_CHECK_RETURN(
+      client_msg_request_response(client, req, FAITH_MSG_REQUEST_DENY));
+  return FAITH_OK;
 }
 
 int faith_client_event_fd(faith_client_t *client) {
@@ -1506,6 +1624,60 @@ faith_status_code_t faith_client_free_event(faith_event_t *ev) {
   return FAITH_OK;
 }
 
+static faith_status_code_t client_gen_msg_request_respone_signature(
+    faith_client_t *client, const faith_msg_request_t *req,
+    uint8_t o_signature[FAITH_ED25519_SIGNATURE_SIZE], size_t *o_signature_size,
+    faith_msg_request_response_type_t type) {
+  if (!client || !req || !o_signature || !o_signature_size)
+    return FAITH_ERR_INVALID;
+
+  /* Construct message buffer for signature generation
+   *    Message Buffer {
+   *    auth_id_req,
+   *    auth_id_recv,
+   *    srv_req_id,
+   *    type
+   *    } */
+
+  faith_signature_msg_request_response_t sign_msg = {0};
+
+  sign_msg.auth_id_req = req->auth_id_req;
+  sign_msg.auth_id_recv = client->ident.auth_id;
+
+  sign_msg.device_id_recv = client->ident.device_id;
+
+  memcpy(sign_msg.srv_req_id.bytes, req->srv_req_id.bytes, FAITH_REQUEST_ID_SIZE);
+
+  sign_msg.type = type;
+
+  size_t  msg_size = 0;
+  uint8_t msg_buf[FAITH_SIGNATURE_MSG_REQUEST_RESPONSE_SIZE];
+  {
+    _FH_CHECK(faith_gen_sign_buf_msg_request_response(
+        msg_buf, &msg_size, sizeof(msg_buf), &sign_msg));
+
+    if (_fh_rc != FAITH_OK) {
+      nob_log(ERROR, "Failed to generate signing message buffer for message"
+                     "request response.");
+
+      return _fh_rc;
+    }
+  }
+
+  /* Generating the 64 byte cryptographic signature from the message buffer */
+
+  /* This returns FAITH_ERR_SSL if signature_size !=
+   * FAITH_ED25519_SIGNATURE_SIZE */
+  _FH_CHECK(faith_gen_signature(client->ident.keypair, o_signature,
+                                o_signature_size, msg_buf, sizeof(msg_buf)));
+  if (_fh_rc != FAITH_OK) {
+    nob_log(ERROR, "Failed to generate signature for MSG_REQUEST_ACCEPT.");
+    return _fh_rc;
+  }
+
+  return FAITH_OK;
+}
+
 static faith_status_code_t 
 client_gen_device_auth_respone_signature(faith_client_t *client,
                                          const faith_envl_stc_device_link_req_t* req,
@@ -1538,10 +1710,11 @@ client_gen_device_auth_respone_signature(faith_client_t *client,
 
   sign_msg.type = type; 
 
+  size_t msg_size = 0;
   uint8_t msg_buf[FAITH_SIGNATURE_DEVICE_LINK_RESPONSE_SIZE];
   {
     _FH_CHECK(faith_gen_sign_buf_device_link_response(
-        msg_buf, sizeof(msg_buf), &sign_msg));
+        msg_buf, &msg_size, sizeof(msg_buf), &sign_msg));
 
     if (_fh_rc != FAITH_OK) {
       nob_log(ERROR, "Failed to generate signing message buffer for device "

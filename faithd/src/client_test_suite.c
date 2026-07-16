@@ -74,7 +74,7 @@ int main(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 
-  faith_client_id_t recipient_id = FAITH_CLIENT_ID_NONE;
+  faith_client_id_t recipient_id = {0}; 
 
   if (argc >= 2) {
     if (!client_id_from_hex(argv[1], &recipient_id)) {
@@ -194,7 +194,7 @@ int main(int argc, char **argv) {
 
       if (line[0] != '\0') {
         faith_status_code_t send_rc =
-            faith_client_send_message(client, recipient_id, line);
+            faith_client_send_msg(client, recipient_id, line);
 
         if (send_rc != FAITH_OK) {
           fprintf(stderr, "faith_client_send_message() failed: %s\n",
@@ -250,6 +250,19 @@ int main(int argc, char **argv) {
           printf("(y)es/n(o) ? ");
           break;
 
+        case FAITH_EVENT_AUTHORIZED: 
+          if (argc > 1) {
+          faith_status_code_t rc =
+              faith_client_send_msg_request(client, recipient_id);
+          if (rc == FAITH_OK) {
+            printf("Sent message request to %s\n", argv[1]);
+          } else {
+
+            printf("Failed to sent message request to %s (Error: %s)\n",
+                   argv[1], faith_status_code_name(rc));
+          }
+        }
+          break;
         case FAITH_EVENT_DEVICE_AUTH_RESPONSE_ACK:
         case FAITH_EVENT_DEVICE_LINK_CANCELLED:
           if (pending_device_link_request) {
