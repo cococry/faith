@@ -319,13 +319,14 @@ faith_status_code_t faith_decode_frame(const uint8_t *payload,
 
   size_t offset = 0;
 
-  uint32_t frame_size = 0; 
+  uint32_t frame_size = 0;
   FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset, frame_size);
 
   if (frame_size < FAITH_FRAME_METADATA_SIZE)
     return FAITH_ERR_BAD_FRAME;
 
-  const size_t frame_payload_size = (size_t)frame_size - FAITH_FRAME_METADATA_SIZE;
+  const size_t frame_payload_size =
+      (size_t)frame_size - FAITH_FRAME_METADATA_SIZE;
 
   if (frame_payload_size > FAITH_MAX_PAYLOAD_SIZE) {
     nob_log(ERROR,
@@ -358,7 +359,7 @@ faith_status_code_t faith_decode_frame(const uint8_t *payload,
 
   if (proto_ver != FAITH_PROTO_VERSION)
     return FAITH_ERR_UNSUPPORTED_VER;
-  
+
   FAITH_ENVL_DECODE_EPILOGUE_DNY(FAITH_FRAME_HEADER_SIZE, <);
 
   out->proto_ver = proto_ver;
@@ -456,18 +457,6 @@ const char *faith_status_code_name(faith_status_code_t code) {
   }
 }
 
-const char *faith_event_name(faith_event_type_t ev) {
-  switch (ev) {
-#define X(name, value)                                                         \
-  case name:                                                                   \
-    return #name;
-    FAITH_EVENT_TYPES(X)
-#undef X
-  default:
-    return "FAITH_EVENT_UNKNOWN";
-  }
-}
-
 const char *faith_frame_msg_name(faith_frame_msg_type_t msg) {
   switch (msg) {
 #define X(name, value)                                                         \
@@ -530,6 +519,30 @@ faith_msg_request_fail_reason_name(faith_msg_request_fail_reason_t reason) {
     return "FAITH_MSG_REQUEST_FAIL_REASON_UNKNOWN";
   }
 }
+const char *faith_msg_request_response_fail_reason_name(
+    faith_msg_request_response_fail_reason_t reason) {
+  switch (reason) {
+#define X(name, value)                                                         \
+  case name:                                                                   \
+    return #name;
+    FAITH_MSG_REQUEST_RESPONSE_FAIL_REASONS(X)
+#undef X
+  default:
+    return "FAITH_MSG_REQUEST_RESPONSE_FAIL_REASON_UNKNOWN";
+  }
+}
+const char *
+faith_msg_request_response_type_name(faith_msg_request_response_type_t type) {
+  switch (type) {
+#define X(name, value)                                                         \
+  case name:                                                                   \
+    return #name;
+    FAITH_MSG_REQUEST_RESPONSE_TYPES(X)
+#undef X
+  default:
+    return "FAITH_MSG_REQUEST_RESPONSE_TYPE_UNKNOWN";
+  }
+}
 
 faith_status_code_t faith_encode_envelope(uint8_t *out_buf, size_t *out_size,
                                           size_t buf_cap_in_bytes,
@@ -554,8 +567,8 @@ faith_status_code_t faith_encode_envelope(uint8_t *out_buf, size_t *out_size,
   FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, in->sender_id.bytes,
                       sizeof(in->sender_id.bytes));
 
-  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset,
-                      in->recipient_id.bytes, sizeof(in->recipient_id.bytes));
+  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, in->recipient_id.bytes,
+                      sizeof(in->recipient_id.bytes));
 
   FAITH_ENCODE_U32_BE_RETURN(out_buf, buf_cap_in_bytes, offset, in->body_size);
 
@@ -587,7 +600,7 @@ faith_status_code_t faith_decode_envelope(const uint8_t    *payload,
                       sizeof(out->recipient_id.bytes));
 
   FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset, out->body_size);
-  
+
   FAITH_ENVL_DECODE_EPILOGUE_DNY(FAITH_ENVL_HEADER_SIZE, <);
 
   if (out->body_size != payload_size - offset) {
@@ -719,11 +732,31 @@ faith_status_code_t faith_encode_client_disconnect_body(
 
   size_t offset = 0;
 
+  switch (in->reconnect_policy) {
+#define X(name, value) case name:
+    FAITH_CLIENT_DISCONNECT_POLICIES(X)
+#undef X
+    break;
+
+  default:
+    return FAITH_ERR_BAD_FRAME;
+  }
+
   FAITH_ENCODE_U32_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
                              (uint32_t)in->reconnect_policy);
 
   FAITH_ENCODE_U32_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
                              (uint32_t)in->reason);
+
+  switch (in->reason) {
+#define X(name, value) case name:
+    FAITH_CLIENT_DISCONNECT_REASONS(X)
+#undef X
+    break;
+
+  default:
+    return FAITH_ERR_BAD_FRAME;
+  }
 
   FAITH_ENCODE_U64_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
                              in->retry_after_ms);
@@ -752,9 +785,28 @@ faith_decode_client_disconnect_body(const uint8_t    *payload,
 
   size_t offset = 0;
 
+  switch (out->reconnect_policy) {
+#define X(name, value) case name:
+    FAITH_CLIENT_DISCONNECT_POLICIES(X)
+#undef X
+    break;
+
+  default:
+    return FAITH_ERR_BAD_FRAME;
+  }
+
   FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset,
                              out->reconnect_policy);
 
+  switch (out->reason) {
+#define X(name, value) case name:
+    FAITH_CLIENT_DISCONNECT_REASONS(X)
+#undef X
+    break;
+
+  default:
+    return FAITH_ERR_BAD_FRAME;
+  }
   FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset, out->reason);
 
   FAITH_DECODE_U64_BE_RETURN(payload, payload_size, offset,
@@ -775,38 +827,39 @@ faith_decode_client_disconnect_body(const uint8_t    *payload,
 
   out->msg[out->msg_size] = '\0';
 
-  FAITH_ENVL_DECODE_EPILOGUE(FAITH_ENVL_STC_CLIENT_DISCONNECT_BODY_SIZE_FIXED, <);
+  FAITH_ENVL_DECODE_EPILOGUE(FAITH_ENVL_STC_CLIENT_DISCONNECT_BODY_SIZE_FIXED,
+                             <);
 
   return FAITH_OK;
 }
 
 faith_status_code_t
 faith_encode_msg_request_body(uint8_t *out_buf, faith_body_size_t *out_size,
-                         size_t                            buf_cap_in_bytes,
-                         const faith_envl_cts_msg_request_t *in) {
+                              size_t buf_cap_in_bytes,
+                              const faith_envl_cts_msg_request_t *in) {
   FAITH_ENVL_ENCODE_PROLOGUE(FAITH_ENVL_CTS_MSG_REQUEST_BODY_SIZE);
-  
+
   size_t offset = 0;
 
-  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset,
-                      in->auth_id_recv.bytes, sizeof(in->auth_id_recv.bytes));
+  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, in->auth_id_recv.bytes,
+                      sizeof(in->auth_id_recv.bytes));
 
-  FAITH_ENCODE_U64_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
-                             in->cl_req_id);
+  FAITH_ENCODE_U64_BE_RETURN(out_buf, buf_cap_in_bytes, offset, in->cl_req_id);
 
   FAITH_ENVL_ENCODE_EPILOGUE(FAITH_ENVL_CTS_MSG_REQUEST_BODY_SIZE, !=);
 
   return FAITH_OK;
 }
 
-faith_status_code_t faith_decode_msg_request_body(const uint8_t    *payload,
-                                             faith_body_size_t payload_size,
-                                             faith_envl_cts_msg_request_t *out) {
+faith_status_code_t
+faith_decode_msg_request_body(const uint8_t                *payload,
+                              faith_body_size_t             payload_size,
+                              faith_envl_cts_msg_request_t *out) {
 
   FAITH_ENVL_DECODE_PROLOGUE(FAITH_ENVL_CTS_MSG_REQUEST_BODY_SIZE, !=);
 
   size_t offset = 0;
-  
+
   FAITH_DECODE_RETURN(payload, payload_size, offset, out->auth_id_recv.bytes,
                       sizeof(out->auth_id_recv.bytes));
 
@@ -817,23 +870,25 @@ faith_status_code_t faith_decode_msg_request_body(const uint8_t    *payload,
   return FAITH_OK;
 }
 
-faith_status_code_t
-faith_encode_msg_request_response_body(uint8_t *out_buf, faith_body_size_t *out_size,
-                         size_t                            buf_cap_in_bytes,
-                         const faith_envl_cts_msg_request_response_t *in) {
+faith_status_code_t faith_encode_msg_request_response_body(
+    uint8_t *out_buf, faith_body_size_t *out_size, size_t buf_cap_in_bytes,
+    const faith_envl_cts_msg_request_response_t *in) {
 
   FAITH_ENVL_ENCODE_PROLOGUE(FAITH_ENVL_CTS_MSG_REQUEST_RESPONSE_BODY_SIZE);
 
   size_t offset = 0;
 
-  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset,
-                      in->signature_response, sizeof(in->signature_response));
-  
-  FAITH_ENCODE_U64_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
-                             in->cl_req_id);
+  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, in->signature_response,
+                      sizeof(in->signature_response));
+
+  FAITH_ENCODE_U64_BE_RETURN(out_buf, buf_cap_in_bytes, offset, in->cl_req_id);
 
   FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, in->srv_req_id.bytes,
                       sizeof(in->srv_req_id.bytes));
+
+  if (in->type != FAITH_MSG_REQUEST_RESPONSE_ACCEPT &&
+      in->type != FAITH_MSG_REQUEST_RESPONSE_DENY)
+    return FAITH_ERR_BAD_FRAME;
 
   FAITH_ENCODE_U32_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
                              (uint32_t)in->type);
@@ -843,10 +898,9 @@ faith_encode_msg_request_response_body(uint8_t *out_buf, faith_body_size_t *out_
   return FAITH_OK;
 }
 
-faith_status_code_t
-faith_decode_msg_request_response_body(const uint8_t    *payload,
-                                  faith_body_size_t payload_size,
-                                  faith_envl_cts_msg_request_response_t *out) {
+faith_status_code_t faith_decode_msg_request_response_body(
+    const uint8_t *payload, faith_body_size_t payload_size,
+    faith_envl_cts_msg_request_response_t *out) {
 
   FAITH_ENVL_DECODE_PROLOGUE(FAITH_ENVL_CTS_MSG_REQUEST_RESPONSE_BODY_SIZE, !=);
 
@@ -858,6 +912,10 @@ faith_decode_msg_request_response_body(const uint8_t    *payload,
 
   FAITH_DECODE_RETURN(payload, payload_size, offset, out->srv_req_id.bytes,
                       sizeof(out->srv_req_id.bytes));
+
+  if (out->type != FAITH_MSG_REQUEST_RESPONSE_ACCEPT &&
+      out->type != FAITH_MSG_REQUEST_RESPONSE_DENY)
+    return FAITH_ERR_BAD_FRAME;
 
   FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset, out->type);
 
@@ -874,24 +932,44 @@ faith_status_code_t faith_encode_msg_request_failed_body(
 
   size_t offset = 0;
 
+  switch (in->reason) {
+#define X(name, value) case name:
+    FAITH_MSG_REQUEST_FAIL_REASONS(X)
+#undef X
+    break;
+
+  default:
+    return FAITH_ERR_BAD_FRAME;
+  }
+
   FAITH_ENCODE_U32_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
                              (uint32_t)in->reason);
 
-  FAITH_ENCODE_U64_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
-                             in->cl_req_id);
+  FAITH_ENCODE_U64_BE_RETURN(out_buf, buf_cap_in_bytes, offset, in->cl_req_id);
 
   FAITH_ENVL_ENCODE_EPILOGUE(FAITH_ENVL_STC_MSG_REQUEST_FAILED_BODY_SIZE, !=);
 
   return FAITH_OK;
 }
 
-faith_status_code_t faith_decode_msg_request_failed_body(
-    const uint8_t *payload, faith_body_size_t payload_size,
-    faith_envl_stc_msg_request_failed_t *out) {
+faith_status_code_t
+faith_decode_msg_request_failed_body(const uint8_t    *payload,
+                                     faith_body_size_t payload_size,
+                                     faith_envl_stc_msg_request_failed_t *out) {
 
   FAITH_ENVL_DECODE_PROLOGUE(FAITH_ENVL_STC_MSG_REQUEST_FAILED_BODY_SIZE, !=);
 
   size_t offset = 0;
+
+  switch (out->reason) {
+#define X(name, value) case name:
+    FAITH_MSG_REQUEST_FAIL_REASONS(X)
+#undef X
+    break;
+
+  default:
+    return FAITH_ERR_BAD_FRAME;
+  }
 
   FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset, out->reason);
 
@@ -902,16 +980,16 @@ faith_status_code_t faith_decode_msg_request_failed_body(
   return FAITH_OK;
 }
 
-faith_status_code_t faith_encode_msg_request_ack_body(
-    uint8_t *out_buf, faith_body_size_t *out_size, size_t buf_cap_in_bytes,
-    const faith_envl_stc_msg_request_ack_t *in) {
+faith_status_code_t
+faith_encode_msg_request_ack_body(uint8_t *out_buf, faith_body_size_t *out_size,
+                                  size_t buf_cap_in_bytes,
+                                  const faith_envl_stc_msg_request_ack_t *in) {
 
   FAITH_ENVL_ENCODE_PROLOGUE(FAITH_ENVL_STC_MSG_REQUEST_ACK_BODY_SIZE);
 
   size_t offset = 0;
 
-  FAITH_ENCODE_U64_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
-                             in->cl_req_id);
+  FAITH_ENCODE_U64_BE_RETURN(out_buf, buf_cap_in_bytes, offset, in->cl_req_id);
 
   FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, in->srv_req_id.bytes,
                       sizeof(in->srv_req_id.bytes));
@@ -921,9 +999,10 @@ faith_status_code_t faith_encode_msg_request_ack_body(
   return FAITH_OK;
 }
 
-faith_status_code_t faith_decode_msg_request_ack_body(
-    const uint8_t *payload, faith_body_size_t payload_size,
-    faith_envl_stc_msg_request_ack_t *out) {
+faith_status_code_t
+faith_decode_msg_request_ack_body(const uint8_t    *payload,
+                                  faith_body_size_t payload_size,
+                                  faith_envl_stc_msg_request_ack_t *out) {
 
   FAITH_ENVL_DECODE_PROLOGUE(FAITH_ENVL_STC_MSG_REQUEST_ACK_BODY_SIZE, !=);
 
@@ -943,8 +1022,7 @@ faith_status_code_t faith_encode_msg_request_received_body(
     uint8_t *out_buf, faith_body_size_t *out_size, size_t buf_cap_in_bytes,
     const faith_envl_stc_msg_request_received_t *in) {
 
-  FAITH_ENVL_ENCODE_PROLOGUE(
-      FAITH_ENVL_STC_MSG_REQUEST_RECEIVED_BODY_SIZE);
+  FAITH_ENVL_ENCODE_PROLOGUE(FAITH_ENVL_STC_MSG_REQUEST_RECEIVED_BODY_SIZE);
 
   size_t offset = 0;
 
@@ -952,12 +1030,10 @@ faith_status_code_t faith_encode_msg_request_received_body(
                       in->auth_id_sender.bytes,
                       sizeof(in->auth_id_sender.bytes));
 
-  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset,
-                      in->srv_req_id.bytes,
+  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, in->srv_req_id.bytes,
                       sizeof(in->srv_req_id.bytes));
 
-  FAITH_ENVL_ENCODE_EPILOGUE(
-      FAITH_ENVL_STC_MSG_REQUEST_RECEIVED_BODY_SIZE, !=);
+  FAITH_ENVL_ENCODE_EPILOGUE(FAITH_ENVL_STC_MSG_REQUEST_RECEIVED_BODY_SIZE, !=);
 
   return FAITH_OK;
 }
@@ -966,24 +1042,198 @@ faith_status_code_t faith_decode_msg_request_received_body(
     const uint8_t *payload, faith_body_size_t payload_size,
     faith_envl_stc_msg_request_received_t *out) {
 
-  FAITH_ENVL_DECODE_PROLOGUE(
-      FAITH_ENVL_STC_MSG_REQUEST_RECEIVED_BODY_SIZE, !=);
+  FAITH_ENVL_DECODE_PROLOGUE(FAITH_ENVL_STC_MSG_REQUEST_RECEIVED_BODY_SIZE, !=);
 
   size_t offset = 0;
 
-  FAITH_DECODE_RETURN(payload, payload_size, offset,
-                      out->auth_id_sender.bytes,
+  FAITH_DECODE_RETURN(payload, payload_size, offset, out->auth_id_sender.bytes,
                       sizeof(out->auth_id_sender.bytes));
+
+  FAITH_DECODE_RETURN(payload, payload_size, offset, out->srv_req_id.bytes,
+                      sizeof(out->srv_req_id.bytes));
+
+  FAITH_ENVL_DECODE_EPILOGUE(FAITH_ENVL_STC_MSG_REQUEST_RECEIVED_BODY_SIZE, !=);
+
+  return FAITH_OK;
+}
+
+faith_status_code_t faith_encode_msg_request_response_ack_body(
+    uint8_t *out_buf, faith_body_size_t *out_size, size_t buf_cap_in_bytes,
+    const faith_envl_stc_msg_request_response_ack_t *in) {
+
+  FAITH_ENVL_ENCODE_PROLOGUE(FAITH_ENVL_STC_MSG_REQUEST_RESPONSE_ACK_BODY_SIZE);
+
+  size_t offset = 0;
+
+  FAITH_ENCODE_U64_BE_RETURN(out_buf, buf_cap_in_bytes, offset, in->cl_req_id);
+
+  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, in->srv_req_id.bytes,
+                      sizeof(in->srv_req_id.bytes));
+
+  FAITH_ENVL_ENCODE_EPILOGUE(FAITH_ENVL_STC_MSG_REQUEST_RESPONSE_ACK_BODY_SIZE,
+                             !=);
+
+  return FAITH_OK;
+}
+
+faith_status_code_t faith_decode_msg_request_response_ack_body(
+    const uint8_t *payload, faith_body_size_t payload_size,
+    faith_envl_stc_msg_request_response_ack_t *out) {
+
+  FAITH_ENVL_DECODE_PROLOGUE(FAITH_ENVL_STC_MSG_REQUEST_RESPONSE_ACK_BODY_SIZE,
+                             !=);
+
+  size_t offset = 0;
+
+  FAITH_DECODE_U64_BE_RETURN(payload, payload_size, offset, out->cl_req_id);
+
+  FAITH_DECODE_RETURN(payload, payload_size, offset, out->srv_req_id.bytes,
+                      sizeof(out->srv_req_id.bytes));
+
+  FAITH_ENVL_DECODE_EPILOGUE(FAITH_ENVL_STC_MSG_REQUEST_RESPONSE_ACK_BODY_SIZE,
+                             !=);
+
+  return FAITH_OK;
+}
+
+faith_status_code_t faith_encode_msg_request_response_failed_body(
+    uint8_t *out_buf, faith_body_size_t *out_size, size_t buf_cap_in_bytes,
+    const faith_envl_stc_msg_request_response_failed_t *in) {
+
+  FAITH_ENVL_ENCODE_PROLOGUE(
+      FAITH_ENVL_STC_MSG_REQUEST_RESPONSE_FAILED_BODY_SIZE);
+
+  size_t offset = 0;
+
+  switch (in->reason) {
+#define X(name, value) case name:
+    FAITH_MSG_REQUEST_RESPONSE_FAIL_REASONS(X)
+#undef X
+    break;
+
+  default:
+    return FAITH_ERR_BAD_FRAME;
+  }
+
+  FAITH_ENCODE_U32_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
+                             (uint32_t)in->reason);
+
+  FAITH_ENCODE_U64_BE_RETURN(out_buf, buf_cap_in_bytes, offset, in->cl_req_id);
+
+  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, in->srv_req_id.bytes,
+                      sizeof(in->srv_req_id.bytes));
+
+  FAITH_ENVL_ENCODE_EPILOGUE(
+      FAITH_ENVL_STC_MSG_REQUEST_RESPONSE_FAILED_BODY_SIZE, !=);
+
+  return FAITH_OK;
+}
+
+faith_status_code_t faith_decode_msg_request_response_failed_body(
+    const uint8_t *payload, faith_body_size_t payload_size,
+    faith_envl_stc_msg_request_response_failed_t *out) {
+
+  FAITH_ENVL_DECODE_PROLOGUE(
+      FAITH_ENVL_STC_MSG_REQUEST_RESPONSE_FAILED_BODY_SIZE, !=);
+
+  size_t offset = 0;
+
+  FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset, out->reason);
+
+  switch (out->reason) {
+#define X(name, value) case name:
+    FAITH_MSG_REQUEST_RESPONSE_FAIL_REASONS(X)
+#undef X
+    break;
+
+  default:
+    return FAITH_ERR_BAD_FRAME;
+  }
+
+  FAITH_DECODE_U64_BE_RETURN(payload, payload_size, offset, out->cl_req_id);
+
+  FAITH_DECODE_RETURN(payload, payload_size, offset, out->srv_req_id.bytes,
+                      sizeof(out->srv_req_id.bytes));
+
+  FAITH_ENVL_DECODE_EPILOGUE(
+      FAITH_ENVL_STC_MSG_REQUEST_RESPONSE_FAILED_BODY_SIZE, !=);
+
+  return FAITH_OK;
+}
+
+faith_status_code_t faith_encode_msg_request_responded_body(
+    uint8_t *out_buf, faith_body_size_t *out_size, size_t buf_cap_in_bytes,
+    const faith_envl_stc_msg_request_responded_t *in) {
+
+  FAITH_ENVL_ENCODE_PROLOGUE(
+      FAITH_ENVL_STC_MSG_REQUEST_RESPONDED_BODY_SIZE);
+
+  switch (in->type) {
+#define X(name, value)                                                        \
+  case name:
+    FAITH_MSG_REQUEST_RESPONSE_TYPES(X)
+#undef X
+    break;
+
+  default:
+    return FAITH_ERR_INVALID;
+  }
+
+  size_t offset = 0;
+
+  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset,
+                      in->srv_req_id.bytes,
+                      sizeof(in->srv_req_id.bytes));
+
+  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset,
+                      in->auth_id_responder.bytes,
+                      sizeof(in->auth_id_responder.bytes));
+
+  FAITH_ENCODE_U32_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
+                             (uint32_t)in->type);
+
+  FAITH_ENVL_ENCODE_EPILOGUE(
+      FAITH_ENVL_STC_MSG_REQUEST_RESPONDED_BODY_SIZE, !=);
+
+  return FAITH_OK;
+}
+
+faith_status_code_t faith_decode_msg_request_responded_body(
+    const uint8_t *payload, faith_body_size_t payload_size,
+    faith_envl_stc_msg_request_responded_t *out) {
+
+  FAITH_ENVL_DECODE_PROLOGUE(
+      FAITH_ENVL_STC_MSG_REQUEST_RESPONDED_BODY_SIZE, !=);
+
+  size_t offset = 0;
 
   FAITH_DECODE_RETURN(payload, payload_size, offset,
                       out->srv_req_id.bytes,
                       sizeof(out->srv_req_id.bytes));
 
+  FAITH_DECODE_RETURN(payload, payload_size, offset,
+                      out->auth_id_responder.bytes,
+                      sizeof(out->auth_id_responder.bytes));
+
+  FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset, out->type);
+
+  switch (out->type) {
+#define X(name, value)                                                        \
+  case name:
+    FAITH_MSG_REQUEST_RESPONSE_TYPES(X)
+#undef X
+    break;
+
+  default:
+    return FAITH_ERR_BAD_FRAME;
+  }
+
   FAITH_ENVL_DECODE_EPILOGUE(
-      FAITH_ENVL_STC_MSG_REQUEST_RECEIVED_BODY_SIZE, !=);
+      FAITH_ENVL_STC_MSG_REQUEST_RESPONDED_BODY_SIZE, !=);
 
   return FAITH_OK;
 }
+
 
 void faith_log_handler(Nob_Log_Level level, const char *fmt, va_list args) {
   if (level < nob_minimal_log_level)
@@ -1141,7 +1391,7 @@ cleanup:
 }
 
 faith_status_code_t faith_gen_sign_buf_hello_handshake(
-    uint8_t *out_buf, size_t* out_size, size_t buf_cap_in_bytes,
+    uint8_t *out_buf, size_t *out_size, size_t buf_cap_in_bytes,
     const faith_signature_hello_handshake_t *in) {
 
   FAITH_ENVL_ENCODE_PROLOGUE(FAITH_SIGNATURE_HELLO_HANDSHAKE_SIZE);
@@ -1169,7 +1419,7 @@ faith_status_code_t faith_gen_sign_buf_hello_handshake(
 }
 
 faith_status_code_t faith_gen_sign_buf_device_link_response(
-    uint8_t *out_buf, size_t* out_size, size_t buf_cap_in_bytes,
+    uint8_t *out_buf, size_t *out_size, size_t buf_cap_in_bytes,
     const faith_signature_device_link_response_t *in) {
 
   FAITH_ENVL_ENCODE_PROLOGUE(FAITH_SIGNATURE_DEVICE_LINK_RESPONSE_SIZE);
@@ -1179,8 +1429,8 @@ faith_status_code_t faith_gen_sign_buf_device_link_response(
   FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, in->auth_id.bytes,
                       sizeof(in->auth_id.bytes));
 
-  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, in->device_id_new.bytes,
-                      sizeof(in->device_id_new.bytes));
+  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset,
+                      in->device_id_new.bytes, sizeof(in->device_id_new.bytes));
 
   FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset,
                       in->public_key_new_device,

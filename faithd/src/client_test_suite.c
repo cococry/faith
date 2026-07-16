@@ -74,7 +74,8 @@ int main(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 
-  faith_client_id_t recipient_id = {0}; 
+  faith_client_id_t recipient_id = {0};
+  faith_msg_request_t msg_request = {0};
 
   if (argc >= 2) {
     if (!client_id_from_hex(argv[1], &recipient_id)) {
@@ -97,6 +98,7 @@ int main(int argc, char **argv) {
   }
 
   bool pending_device_link_request = false;
+  bool pending_msg_request = true;
 
   printf("Type messages and press Enter. Type /quit to exit.\n");
 
@@ -179,6 +181,44 @@ int main(int argc, char **argv) {
                     faith_status_code_name(deny_rc));
           } else {
             printf("Device link denied.\n");
+          }
+        } else {
+          printf("Please answer y or n.\n");
+          printf("(y)es/n(o) ? ");
+          fflush(stdout);
+          continue;
+        }
+
+        printf("> ");
+        fflush(stdout);
+        continue;
+      }
+      if (pending_msg_request) {
+        if (strcmp(line, "y") == 0 || strcmp(line, "Y") == 0 ||
+            strcmp(line, "yes") == 0 || strcmp(line, "YES") == 0) {
+          pending_msg_request = false;
+
+          faith_status_code_t approve_rc =
+              faith_client_msg_request_accept(client, &msg_request);
+
+          if (approve_rc != FAITH_OK) {
+            fprintf(stderr, "faith_client_msg_request_accept() failed: %s\n",
+                    faith_status_code_name(approve_rc));
+          } else {
+            printf("Message request accepted.\n");
+          }
+        } else if (strcmp(line, "n") == 0 || strcmp(line, "N") == 0 ||
+                   strcmp(line, "no") == 0 || strcmp(line, "NO") == 0) {
+          pending_msg_request = false;
+
+          faith_status_code_t deny_rc =
+              faith_client_msg_request_deny(client, &msg_request);
+
+          if (deny_rc != FAITH_OK) {
+            fprintf(stderr, "faith_client_msg_request_deny() failed: %s\n",
+                    faith_status_code_name(deny_rc));
+          } else {
+            printf("Message request denied.\n");
           }
         } else {
           printf("Please answer y or n.\n");
@@ -278,6 +318,17 @@ int main(int argc, char **argv) {
 
           printf("> ");
           break;
+        case FAITH_EVENT_MSG_REQUEST_RECEIVED: {
+
+          pending_msg_request = true;
+          memcpy(msg_request.srv_req_id.bytes, ev.value0_128,
+                 FAITH_REQUEST_ID_SIZE);
+          memcpy(msg_request.auth_id_req.bytes, ev.value1_128,
+                 FAITH_REQUEST_ID_SIZE);
+
+          printf("accept: (y)es/n(o) ? ");
+          break;
+        }
 
         default:
           if (pending_device_link_request)

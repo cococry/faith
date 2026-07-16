@@ -4,6 +4,34 @@
 
 #include "../shared.h"
 
+#define FAITH_EVENT_TYPES(X)                                                   \
+  X(FAITH_EVENT_NONE, 0)                                                       \
+  X(FAITH_EVENT_CONNECTING, 1)                                                 \
+  X(FAITH_EVENT_CONNECTED, 2)                                                  \
+  X(FAITH_EVENT_DISCONNECTED, 3)                                               \
+  X(FAITH_EVENT_PONG, 4)                                                       \
+  X(FAITH_EVENT_ERROR, 5)                                                      \
+  X(FAITH_EVENT_MESSAGE_RECEIVED, 6)                                           \
+  X(FAITH_EVENT_DEVICE_AUTH_PENDING, 7)                                        \
+  X(FAITH_EVENT_DEVICE_LINK_REQUEST, 8)                                        \
+  X(FAITH_EVENT_DEVICE_AUTH_RESPONSE_ACK, 9)                                   \
+  X(FAITH_EVENT_DEVICE_LINK_CANCELLED, 10)                                     \
+  X(FAITH_EVENT_AUTHORIZED, 11)                                                \
+  X(FAITH_EVENT_SERVER_DISCONNECT, 12)                                         \
+  X(FAITH_EVENT_MSG_REQUEST_RECEIVED, 13)                                      \
+  X(FAITH_EVENT_MSG_REQUEST_RESPONDED, 14)                                     \
+  X(FAITH_EVENT_MSG_REQUEST_ACK, 15)                                           \
+  X(FAITH_EVENT_MSG_REQUEST_FAILED, 16)                                        \
+  X(FAITH_EVENT_MSG_REQUEST_RESPONSE_ACK, 17)                                  \
+  X(FAITH_EVENT_MSG_REQUEST_RESPONSE_FAILED, 18)
+
+typedef enum {
+#define X(name, value) name = value,
+  FAITH_EVENT_TYPES(X)
+#undef X
+} faith_event_type_t;
+
+
 typedef struct faith_client faith_client_t;
 
 typedef struct {
@@ -23,6 +51,11 @@ typedef struct {
   uint32_t type;
   uint64_t value0;
   uint64_t value1;
+
+  uint8_t value0_128[16];
+  uint8_t value1_128[16];
+  uint8_t value2_128[16];
+
   char     message[256];
 
   char  *chat_message;
@@ -62,3 +95,4 @@ faith_status_code_t faith_client_deny_pending_device_auth(faith_client_t* client
 
 faith_status_code_t faith_client_reconnect(faith_client_t *client);
 
+const char *faith_event_name(faith_event_type_t ev);

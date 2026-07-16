@@ -432,6 +432,28 @@ storage_remove_msg_request(struct storage_state_t  *st,
 
   return FAITH_OK;
 }
+faith_status_code_t
+storage_get_msg_request(struct storage_state_t *st,
+                        const faith_request_id_t     *request_id,
+                        struct server_msg_request_t **out) {
+  if (!st || !request_id || !out)
+    return FAITH_ERR_INVALID;
+
+  *out = NULL;
+
+  ptrdiff_t index = hmgeti(st->msg_requests, *request_id);
+
+  if (index < 0)
+    return FAITH_ERR_NOT_FOUND;
+
+  /* The request was found but not correctly allocated */
+  if (!st->msg_requests[index].value)
+    return FAITH_ERR_INVALID;
+
+  *out = st->msg_requests[index].value;
+
+  return FAITH_OK;
+}
 
 static void routing_destroy(struct routing_state_t *rt) {
   if (!rt)
@@ -1021,7 +1043,7 @@ server_send_envelope_or_close(struct server_state_t  *s,
 }
 
 static faith_status_code_t
-server_route_envl(struct server_state_t *s, struct client_conn_t *cl_sender,
+server_route_envelope(struct server_state_t *s, struct client_conn_t *cl_sender,
                   const faith_client_id_t *recipient_auth_id,
                   const faith_envelope_t  *envl) {
   if (!s || !cl_sender || cl_sender->closing || !recipient_auth_id || !envl)
@@ -1975,6 +1997,7 @@ server_handle_device_link_response(struct server_state_t  *s,
         authorized_cl->state == CLIENT_OPEN) {
       faith_envelope_t ack_envl = {0};
       ack_envl.type = FAITH_ENVELOPE_DEVICE_AUTH_RESPONSE_ACK;
+      ack_envl.recipient_id = authorized_cl->auth_id;
 
       _FH_CHECK(server_send_envelope_or_close(s, authorized_cl, &ack_envl));
     }
@@ -2109,7 +2132,7 @@ server_handle_msg_request(struct server_state_t *s, struct client_conn_t *cl,
     };
 
     _FH_CHECK_DEFER(
-        server_route_envl(s, cl, &req.auth_id_recv, &received_envl));
+        server_route_envelope(s, cl, &req.auth_id_recv, &received_envl));
   }
 
   faith_body_size_t body_size = 0;
@@ -2133,6 +2156,220 @@ defer: { _FH_CHECK(storage_remove_msg_request(&s->storage, &ack.srv_req_id)); }
   return _fh_result;
 }
 
+static faith_status_code_t server_send_msg_request_response_failed(
+    struct server_state_t *s, struct client_conn_t *cl,
+    const faith_envl_cts_msg_request_response_t *response,
+    faith_msg_request_response_fail_reason_t     reason) {
+  if (!s || !cl || cl->closing || !response)
+    return FAITH_ERR_INVALID;
+
+  faith_envl_stc_msg_request_response_failed_t failed = {
+      .reason = reason,
+      .cl_req_id = response->cl_req_id,
+      .srv_req_id = response->srv_req_id,
+  };
+
+  faith_body_size_t body_size = 0;
+  uint8_t           body[FAITH_ENVL_STC_MSG_REQUEST_RESPONSE_FAILED_BODY_SIZE];
+
+  _FH_CHECK_RETURN(faith_encode_msg_request_response_failed_body(
+      body, &body_size, sizeof(body), &failed));
+
+  faith_envelope_t failed_envl = {
+      .type = FAITH_ENVELOPE_MSG_REQUEST_RESPONSE_FAILED,
+      .recipient_id = cl->auth_id,
+      .body = body,
+      .body_size = body_size,
+  };
+
+  _FH_CHECK_RETURN(server_send_envelope_or_close(s, cl, &failed_envl));
+
+  return FAITH_OK;
+}
+
+static faith_status_code_t server_send_msg_request_response_ack(
+    struct server_state_t *s, struct client_conn_t *cl,
+    const faith_envl_cts_msg_request_response_t *response) {
+  if (!s || !cl || cl->closing || !response)
+    return FAITH_ERR_INVALID;
+
+  faith_envl_stc_msg_request_response_ack_t ack = {
+      .cl_req_id = response->cl_req_id,
+      .srv_req_id = response->srv_req_id,
+  };
+
+  faith_body_size_t body_size = 0;
+  uint8_t           body[FAITH_ENVL_STC_MSG_REQUEST_RESPONSE_ACK_BODY_SIZE];
+
+  _FH_CHECK_RETURN(faith_encode_msg_request_response_ack_body(
+      body, &body_size, sizeof(body), &ack));
+
+  faith_envelope_t ack_envl = {
+      .type = FAITH_ENVELOPE_MSG_REQUEST_RESPONSE_ACK,
+      .recipient_id = cl->auth_id,
+      .body = body,
+      .body_size = body_size,
+  };
+
+  _FH_CHECK_RETURN(server_send_envelope_or_close(s, cl, &ack_envl));
+
+  return FAITH_OK;
+}
+
+static faith_status_code_t
+server_handle_msg_request_response(struct server_state_t *s, struct client_conn_t *cl,
+                          const faith_envelope_t *response_envl) {
+  if (!s || !cl || cl->closing || !response_envl)
+    return FAITH_ERR_INVALID;
+
+  if (response_envl->type != FAITH_ENVELOPE_MSG_REQUEST_RESPONSE)
+    return FAITH_ERR_INVALID;
+
+  if (cl->state != CLIENT_OPEN)
+    return FAITH_ERR_BAD_ENVELOPE;
+
+  if (!cl->authorized)
+    return FAITH_ERR_UNAUTHORIZED;
+
+  /* Get session of the responding client connection */
+  struct client_device_session_data_t *sess = NULL;
+  _FH_CHECK_RETURN(
+      routing_get_session(&s->rt, &cl->auth_id, &cl->device_id, &sess));
+
+  if (!sess)
+    return FAITH_ERR_INVALID;
+
+  /* Decode MSG_REQUEST_RESPONSE body */
+  faith_envl_cts_msg_request_response_t response = {0};
+  _FH_CHECK_RETURN(faith_decode_msg_request_response_body(
+      response_envl->body, response_envl->body_size, &response));
+
+  /* Retrieve the message request that the client wants to respond to */
+  struct server_msg_request_t *stored_req = NULL;
+  faith_status_code_t          storage_rc =
+      storage_get_msg_request(&s->storage, &response.srv_req_id, &stored_req);
+
+  if(storage_rc == FAITH_ERR_NOT_FOUND) {
+    _FH_CHECK(server_send_msg_request_response_failed(
+        s, cl, &response, FAITH_MSG_REQUEST_RESPONSE_FAIL_REQUEST_NOT_FOUND));
+    return _fh_rc;
+  }
+
+  if (storage_rc != FAITH_OK) {
+    _FH_CHECK(server_send_msg_request_response_failed(
+        s, cl, &response, FAITH_MSG_REQUEST_RESPONSE_FAIL_INTERNAL_ERROR));
+    return storage_rc;
+  }
+
+  /* <auth_id_receiver> here refers to the original receiver of the message
+   * request, not the receiver of this MSG_REQUEST_RESPONSE. */
+  if (!faith_client_id_equal(stored_req->auth_id_receiver, cl->auth_id)) {
+    _FH_CHECK_RETURN(server_send_msg_request_response_failed(
+        s, cl, &response, FAITH_MSG_REQUEST_RESPONSE_FAIL_NOT_RECIPIENT));
+    return FAITH_OK;
+  }
+
+  const uint64_t now_ms = faith_now_ms();
+
+  if (stored_req->expires_at_ms <= now_ms) {
+    _FH_CHECK(storage_remove_msg_request(&s->storage, &response.srv_req_id));
+
+    if (_fh_rc != FAITH_OK && _fh_rc != FAITH_ERR_NOT_FOUND)
+      return _fh_rc;
+
+    _FH_CHECK_RETURN(server_send_msg_request_response_failed(
+        s, cl, &response, FAITH_MSG_REQUEST_RESPONSE_FAIL_EXPIRED));
+
+    return FAITH_OK;
+  }
+
+  faith_signature_msg_request_response_t sign_msg = {0};
+  sign_msg.type = response.type;
+  sign_msg.srv_req_id = response.srv_req_id;
+  sign_msg.auth_id_recv = cl->auth_id;
+  sign_msg.device_id_recv = cl->device_id;
+  sign_msg.auth_id_req = stored_req->auth_id_sender;
+
+  size_t msg_size = 0;
+  uint8_t msg_buf[FAITH_SIGNATURE_MSG_REQUEST_RESPONSE_SIZE];
+  {
+    _FH_CHECK(faith_gen_sign_buf_msg_request_response(msg_buf, &msg_size, sizeof(msg_buf),
+                                                 &sign_msg));
+    if (_fh_rc != FAITH_OK) {
+      nob_log(ERROR,
+              "[client=%" PRIu64
+              " fd=%i] Failed to generate signing message buffer",
+              cl->conn_id, cl->fd);
+
+      return _fh_rc;
+    }
+  }
+
+  /* Verify the signature */
+  {
+    _FH_CHECK(faith_verify_signature_raw_pubkey(
+        sess->ident.public_key, msg_buf, sizeof(msg_buf),
+        response.signature_response, sizeof(response.signature_response)));
+
+    if (_fh_rc == FAITH_ERR_NOT_EQUAL) {
+      return FAITH_ERR_UNAUTHORIZED;
+    }
+
+    if (_fh_rc != FAITH_OK) {
+      return _fh_rc;
+    }
+  }
+
+  const faith_client_id_t auth_id_sender = stored_req->auth_id_sender;
+  const faith_client_id_t auth_id_receiver = stored_req->auth_id_receiver;
+
+  // TODO: Avoid race condition of multiple devices responding to a message
+  // request and removing the request.
+  faith_status_code_t remove_rc =
+      storage_remove_msg_request(&s->storage, &response.srv_req_id);
+
+  if (remove_rc == FAITH_ERR_NOT_FOUND) {
+    return server_send_msg_request_response_failed(
+        s, cl, &response, FAITH_MSG_REQUEST_RESPONSE_FAIL_ALREADY_RESPONDED);
+  }
+
+  if (remove_rc != FAITH_OK) {
+    _FH_CHECK(server_send_msg_request_response_failed(
+        s, cl, &response, FAITH_MSG_REQUEST_RESPONSE_FAIL_INTERNAL_ERROR));
+
+    return remove_rc;
+  }
+
+  /* route MSG_REQUEST_RESPONDED to client that sent the request originally */
+  {
+    faith_envl_stc_msg_request_responded_t responded = {
+        .srv_req_id = response.srv_req_id,
+        .auth_id_responder = auth_id_receiver,
+        .type = response.type,
+    };
+
+    faith_body_size_t body_size = 0;
+    uint8_t           body[FAITH_ENVL_STC_MSG_REQUEST_RESPONDED_BODY_SIZE];
+
+    _FH_CHECK_RETURN(faith_encode_msg_request_responded_body(
+        body, &body_size, sizeof(body), &responded));
+
+    faith_envelope_t responded_envl = {
+        .type = FAITH_ENVELOPE_MSG_REQUEST_RESPONDED,
+        .recipient_id = auth_id_sender,
+        .body = body,
+        .body_size = body_size,
+    };
+
+    _FH_CHECK_RETURN(server_route_envelope(s, cl, &auth_id_sender, &responded_envl));
+  }
+
+  /* send MSG_REQUEST_RESPONSE_ACK back to client */
+  _FH_CHECK_RETURN(server_send_msg_request_response_ack(s, cl, &response));
+
+  return FAITH_OK;
+}
+
 static faith_status_code_t server_route_msg_envl(struct server_state_t *s,
                                                  struct client_conn_t  *cl,
                                                  faith_envelope_t      *envl) {
@@ -2146,7 +2383,9 @@ static faith_status_code_t server_route_msg_envl(struct server_state_t *s,
   if (envl->body_size == 0 || !envl->body)
     return FAITH_ERR_INVALID;
 
-  return server_route_envl(s, cl, &envl->recipient_id, envl);
+  _FH_CHECK_RETURN(server_route_envelope(s, cl, &envl->recipient_id, envl));
+
+  return FAITH_OK;
 }
 
 static faith_status_code_t server_handle_envelope(struct server_state_t *s,
@@ -2187,6 +2426,9 @@ static faith_status_code_t server_handle_envelope(struct server_state_t *s,
     break;
   case FAITH_ENVELOPE_MSG_REQUEST: 
     _FH_CHECK_DEFER(server_handle_msg_request(s, cl, &envl));
+    break;
+  case FAITH_ENVELOPE_MSG_REQUEST_RESPONSE:  
+    _FH_CHECK_DEFER(server_handle_msg_request_response(s, cl, &envl));
     break;
   default:
     _FH_RETURN_DEFER(FAITH_ERR_BAD_ENVELOPE);

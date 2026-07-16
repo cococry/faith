@@ -56,8 +56,8 @@
   _FAITH_BODY_SIZE(FAITH_ED25519_SIGNATURE_SIZE /* signature response */ +     \
                    FAITH_DEVICE_ID_SIZE /*device ID new*/)
 
-#define FAITH_DEVICE_LINK_CODE_SIZE   16
-#define FAITH_REQUEST_ID_SIZE 16
+#define FAITH_DEVICE_LINK_CODE_SIZE 16
+#define FAITH_REQUEST_ID_SIZE       16
 
 #define FAITH_ENVL_STC_DEVICE_LINK_REQ_BODY_SIZE                               \
   _FAITH_BODY_SIZE(FAITH_CLIENT_ID_SIZE /* auth ID */ +                        \
@@ -82,14 +82,15 @@
 #define FAITH_ENVL_CTS_MSG_REQUEST_RESPONSE_BODY_SIZE                          \
   _FAITH_BODY_SIZE(FAITH_ED25519_SIGNATURE_SIZE /* signature response */ +     \
                    sizeof(uint64_t) /* client request ID */ +                  \
-                   FAITH_REQUEST_ID_SIZE /* server request ID */)
+                   FAITH_REQUEST_ID_SIZE /* server request ID */ + \
+                   sizeof(uint32_t) /* type */)
 
 #define FAITH_ENVL_STC_MSG_REQUEST_FAILED_BODY_SIZE                            \
   _FAITH_BODY_SIZE(sizeof(uint32_t) /* failure reason */ +                     \
                    sizeof(uint64_t) /* client request ID */)
 
 #define FAITH_ENVL_STC_MSG_REQUEST_RECEIVED_BODY_SIZE                          \
-  _FAITH_BODY_SIZE(FAITH_CLIENT_ID_SIZE /* sender auth ID */ +       \
+  _FAITH_BODY_SIZE(FAITH_CLIENT_ID_SIZE /* sender auth ID */ +                 \
                    FAITH_REQUEST_ID_SIZE /* server request ID */)
 
 #define FAITH_ENVL_STC_MSG_REQUEST_ACK_BODY_SIZE                               \
@@ -113,7 +114,7 @@
   (FAITH_CLIENT_ID_SIZE /* auth ID requesting */ +                             \
    FAITH_CLIENT_ID_SIZE /* auth ID receiving */ +                              \
    FAITH_DEVICE_ID_SIZE /* device id receiving */) +                           \
-      FAITH_REQUEST_ID_SIZE /* server request ID */ +                  \
+      FAITH_REQUEST_ID_SIZE /* server request ID */ +                          \
       sizeof(uint32_t) /* type */
 
 #define FAITH_SIGNATURE_HELLO_HANDSHAKE_SIZE                                   \
@@ -122,6 +123,19 @@
    FAITH_ED25519_PUBLIC_KEY_SIZE /* client public key */ +                     \
    sizeof(uint64_t) /* client nonce */ + sizeof(uint64_t) /* server nonce */)
 
+#define FAITH_ENVL_STC_MSG_REQUEST_RESPONSE_ACK_BODY_SIZE                      \
+  _FAITH_BODY_SIZE(sizeof(uint64_t) /* client request ID */ +                  \
+                   FAITH_REQUEST_ID_SIZE /* server request ID */)
+
+#define FAITH_ENVL_STC_MSG_REQUEST_RESPONSE_FAILED_BODY_SIZE                   \
+  _FAITH_BODY_SIZE(sizeof(uint32_t) /* failure reason */ +                     \
+                   sizeof(uint64_t) /* client request ID */ +                  \
+                   FAITH_REQUEST_ID_SIZE /* server request ID */)
+
+#define FAITH_ENVL_STC_MSG_REQUEST_RESPONDED_BODY_SIZE                         \
+  _FAITH_BODY_SIZE(FAITH_REQUEST_ID_SIZE /* server request ID */ +             \
+                   FAITH_CLIENT_ID_SIZE /* responder authentication ID */ +    \
+                   sizeof(uint32_t) /* response type */)
 
 #define _FH_CHECK_RETURN(expr)                                                 \
   do {                                                                         \
@@ -586,27 +600,6 @@ typedef enum {
 #undef X
 } faith_status_code_t;
 
-#define FAITH_EVENT_TYPES(X)                                                   \
-  X(FAITH_EVENT_NONE, 0)                                                       \
-  X(FAITH_EVENT_CONNECTING, 1)                                                 \
-  X(FAITH_EVENT_CONNECTED, 2)                                                  \
-  X(FAITH_EVENT_DISCONNECTED, 3)                                               \
-  X(FAITH_EVENT_PONG, 4)                                                       \
-  X(FAITH_EVENT_ERROR, 5)                                                      \
-  X(FAITH_EVENT_MESSAGE_RECEIVED, 6)                                           \
-  X(FAITH_EVENT_DEVICE_AUTH_PENDING, 7)                                        \
-  X(FAITH_EVENT_DEVICE_LINK_REQUEST, 8)                                        \
-  X(FAITH_EVENT_DEVICE_AUTH_RESPONSE_ACK, 9)                                   \
-  X(FAITH_EVENT_DEVICE_LINK_CANCELLED, 10)                                     \
-  X(FAITH_EVENT_AUTHORIZED, 11)                                                \
-  X(FAITH_EVENT_SERVER_DISCONNECT, 12)
-
-typedef enum {
-#define X(name, value) name = value,
-  FAITH_EVENT_TYPES(X)
-#undef X
-} faith_event_type_t;
-
 #define FAITH_MSG_TYPES(X)                                                     \
   X(FAITH_MSG_PING, 0)                                                         \
   X(FAITH_MSG_PONG, 1)                                                         \
@@ -636,9 +629,12 @@ typedef enum {
   X(FAITH_ENVELOPE_CLIENT_DISCONNECT, 14)                                      \
   X(FAITH_ENVELOPE_MSG_REQUEST, 15)                                            \
   X(FAITH_ENVELOPE_MSG_REQUEST_RESPONSE, 16)                                   \
-  X(FAITH_ENVELOPE_MSG_REQUEST_ACK, 17)                                        \
-  X(FAITH_ENVELOPE_MSG_REQUEST_FAILED, 18)                                     \
-  X(FAITH_ENVELOPE_MSG_REQUEST_RECEIVED, 19)
+  X(FAITH_ENVELOPE_MSG_REQUEST_RESPONSE_ACK, 17)                               \
+  X(FAITH_ENVELOPE_MSG_REQUEST_RESPONSE_FAILED, 18)                            \
+  X(FAITH_ENVELOPE_MSG_REQUEST_ACK, 19)                                        \
+  X(FAITH_ENVELOPE_MSG_REQUEST_FAILED, 20)                                     \
+  X(FAITH_ENVELOPE_MSG_REQUEST_RECEIVED, 21) \
+  X(FAITH_ENVELOPE_MSG_REQUEST_RESPONDED, 22)
 
 #define FAITH_CLIENT_DISCONNECT_REASONS(X)                                     \
   X(FAITH_DISCONNECT_REASON_NONE, 0)                                           \
@@ -684,6 +680,30 @@ typedef enum {
 #undef X
 } faith_msg_request_fail_reason_t;
 
+#define FAITH_MSG_REQUEST_RESPONSE_FAIL_REASONS(X)                             \
+  X(FAITH_MSG_REQUEST_RESPONSE_FAIL_INVALID, 0)                                \
+  X(FAITH_MSG_REQUEST_RESPONSE_FAIL_INTERNAL_ERROR, 1)                         \
+  X(FAITH_MSG_REQUEST_RESPONSE_FAIL_REQUEST_NOT_FOUND, 2)                      \
+  X(FAITH_MSG_REQUEST_RESPONSE_FAIL_NOT_RECIPIENT, 3)                          \
+  X(FAITH_MSG_REQUEST_RESPONSE_FAIL_ALREADY_RESPONDED, 4)                      \
+  X(FAITH_MSG_REQUEST_RESPONSE_FAIL_EXPIRED, 5)
+
+typedef enum {
+#define X(name, value) name = value,
+  FAITH_MSG_REQUEST_RESPONSE_FAIL_REASONS(X)
+#undef X
+} faith_msg_request_response_fail_reason_t;
+
+#define FAITH_MSG_REQUEST_RESPONSE_TYPES(X)                                  \
+  X(FAITH_MSG_REQUEST_RESPONSE_ACCEPT, 0)                                    \
+  X(FAITH_MSG_REQUEST_RESPONSE_DENY, 1)
+
+typedef enum {
+#define X(name, value) name = value,
+  FAITH_MSG_REQUEST_RESPONSE_TYPES(X)
+#undef X
+} faith_msg_request_response_type_t;
+
 #define FAITH_DEVICE_LINK_REQ_EXPIRATION_TIME_MS 1000 * 60 /* 60 seconds */
 #define FAITH_MSG_REQUEST_EXPIRATION_TIME_MS                                   \
   (1000 * 60 * 60 * 6) /* 6 hours                                              \
@@ -712,12 +732,6 @@ typedef enum {
   FAITH_DEVICE_LINK_DENY = 0,
   FAITH_DEVICE_LINK_APPROVE = 1,
 } faith_device_link_response_type_t;
-
-typedef enum {
-  FAITH_MSG_REQUEST_DENY = 0,
-  FAITH_MSG_REQUEST_ACCEPT = 1,
-} faith_msg_request_response_type_t;
-
 
 typedef struct {
   faith_envelope_type_t type;
@@ -763,12 +777,12 @@ typedef struct {
 
 typedef struct {
   faith_client_id_t auth_id_recv;
-  uint64_t cl_req_id;
+  uint64_t          cl_req_id;
 } faith_envl_cts_msg_request_t;
 
 typedef struct {
   uint8_t signature_response[FAITH_ED25519_SIGNATURE_SIZE];
-  
+
   uint64_t cl_req_id;
 
   faith_request_id_t srv_req_id;
@@ -777,12 +791,23 @@ typedef struct {
 } faith_envl_cts_msg_request_response_t;
 
 typedef struct {
+  uint64_t           cl_req_id;
+  faith_request_id_t srv_req_id;
+} faith_envl_stc_msg_request_response_ack_t;
+
+typedef struct {
+  faith_msg_request_response_fail_reason_t reason;
+  uint64_t                                 cl_req_id;
+  faith_request_id_t                       srv_req_id;
+} faith_envl_stc_msg_request_response_failed_t;
+
+typedef struct {
   faith_msg_request_fail_reason_t reason;
-  uint64_t cl_req_id;
+  uint64_t                        cl_req_id;
 } faith_envl_stc_msg_request_failed_t;
 
 typedef struct {
-  uint64_t cl_req_id;
+  uint64_t           cl_req_id;
   faith_request_id_t srv_req_id;
 } faith_envl_stc_msg_request_ack_t;
 
@@ -790,6 +815,12 @@ typedef struct {
   faith_client_id_t  auth_id_sender;
   faith_request_id_t srv_req_id;
 } faith_envl_stc_msg_request_received_t;
+
+typedef struct {
+  faith_request_id_t                srv_req_id;
+  faith_client_id_t                 auth_id_responder;
+  faith_msg_request_response_type_t type;
+} faith_envl_stc_msg_request_responded_t;
 
 typedef struct {
   faith_client_id_t auth_id;
@@ -827,8 +858,7 @@ typedef struct {
 
 typedef struct {
   faith_request_id_t srv_req_id;
-  faith_client_id_t auth_id_req;
-  faith_device_id_t device_id_req;
+  faith_client_id_t  auth_id_req;
 } faith_msg_request_t;
 
 uint16_t faith_version_pack(uint8_t major, uint8_t minor, uint8_t patch);
@@ -869,7 +899,6 @@ uint32_t faith_read_u32_be(const uint8_t *p);
 uint64_t faith_read_u64_be(const uint8_t *p);
 
 const char *faith_status_code_name(faith_status_code_t code);
-const char *faith_event_name(faith_event_type_t ev);
 const char *faith_frame_msg_name(faith_frame_msg_type_t msg);
 const char *faith_envelope_name(faith_envelope_type_t env);
 const char *
@@ -878,6 +907,11 @@ const char *
 faith_client_disconnect_reason_name(faith_client_disconnect_reason_t reason);
 const char *
 faith_msg_request_fail_reason_name(faith_msg_request_fail_reason_t reason);
+const char *faith_msg_request_response_fail_reason_name(
+    faith_msg_request_response_fail_reason_t reason);
+const char *
+faith_msg_request_response_type_name(
+    faith_msg_request_response_type_t type);
 
 faith_status_code_t faith_encode_envelope(uint8_t *out_buf, size_t *out_size,
                                           size_t buf_cap_in_bytes,
@@ -910,26 +944,26 @@ faith_status_code_t faith_encode_client_disconnect_body(
     const faith_envl_stc_client_disconnect_t *in);
 
 faith_status_code_t
-     faith_decode_client_disconnect_body(const uint8_t    *payload,
-                                         faith_body_size_t payload_size,
-                                         faith_envl_stc_client_disconnect_t *out);
+faith_decode_client_disconnect_body(const uint8_t    *payload,
+                                    faith_body_size_t payload_size,
+                                    faith_envl_stc_client_disconnect_t *out);
 
 faith_status_code_t
 faith_encode_msg_request_body(uint8_t *out_buf, faith_body_size_t *out_size,
-                         size_t                            buf_cap_in_bytes,
-                         const faith_envl_cts_msg_request_t *in);
-
-faith_status_code_t faith_decode_msg_request_body(const uint8_t    *payload,
-                                             faith_body_size_t payload_size,
-                                             faith_envl_cts_msg_request_t *out);
+                              size_t buf_cap_in_bytes,
+                              const faith_envl_cts_msg_request_t *in);
 
 faith_status_code_t
-faith_encode_msg_request_response_body(uint8_t *out_buf, faith_body_size_t *out_size,
-                         size_t                            buf_cap_in_bytes,
-                         const faith_envl_cts_msg_request_response_t *in);
+faith_decode_msg_request_body(const uint8_t                *payload,
+                              faith_body_size_t             payload_size,
+                              faith_envl_cts_msg_request_t *out);
+
+faith_status_code_t faith_encode_msg_request_response_body(
+    uint8_t *out_buf, faith_body_size_t *out_size, size_t buf_cap_in_bytes,
+    const faith_envl_cts_msg_request_response_t *in);
 
 faith_status_code_t
-faith_decode_msg_request_response(const uint8_t    *payload,
+faith_decode_msg_request_response_body(const uint8_t    *payload,
                                   faith_body_size_t payload_size,
                                   faith_envl_cts_msg_request_response_t *out);
 
@@ -959,6 +993,30 @@ faith_status_code_t faith_encode_msg_request_received_body(
 faith_status_code_t faith_decode_msg_request_received_body(
     const uint8_t *payload, faith_body_size_t payload_size,
     faith_envl_stc_msg_request_received_t *out);
+
+faith_status_code_t faith_encode_msg_request_response_ack_body(
+    uint8_t *out_buf, faith_body_size_t *out_size, size_t buf_cap_in_bytes,
+    const faith_envl_stc_msg_request_response_ack_t *in);
+
+faith_status_code_t faith_decode_msg_request_response_ack_body(
+    const uint8_t *payload, faith_body_size_t payload_size,
+    faith_envl_stc_msg_request_response_ack_t *out);
+
+faith_status_code_t faith_encode_msg_request_response_failed_body(
+    uint8_t *out_buf, faith_body_size_t *out_size, size_t buf_cap_in_bytes,
+    const faith_envl_stc_msg_request_response_failed_t *in);
+
+faith_status_code_t faith_decode_msg_request_response_failed_body(
+    const uint8_t *payload, faith_body_size_t payload_size,
+    faith_envl_stc_msg_request_response_failed_t *out);
+
+faith_status_code_t faith_encode_msg_request_responded_body(
+    uint8_t *out_buf, faith_body_size_t *out_size, size_t buf_cap_in_bytes,
+    const faith_envl_stc_msg_request_responded_t *in);
+
+faith_status_code_t faith_decode_msg_request_responded_body(
+    const uint8_t *payload, faith_body_size_t payload_size,
+    faith_envl_stc_msg_request_responded_t *out);
 
 void faith_log_handler(Nob_Log_Level level, const char *fmt, va_list args);
 
