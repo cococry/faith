@@ -9,7 +9,7 @@
 **faith is an instant messenger optimized for security, 
 native performance & user customization.**
 
-The ***faith*** <ins>client</ins> is designed around native, GPU accelerated rendering
+The ***faith*** [<ins>client</ins>](https://github.com/cococry/faith/tree/main/src) is designed around native, GPU accelerated rendering
 of arbitrarily large text message scrolls.
 
 It implements a custom text layout and rendering engine, supporting
@@ -20,7 +20,7 @@ The user interface is rendered through an optimized rendering backend abstractio
 Windowing is handled by the implemented backends, which currently include **X11** and **Wayland**.
 
 
-The ***faith*** <ins>server</ins> is designed around security & low latency. It is written from scratch in C,
+The ***faith*** [<ins>server</ins>](https://github.com/cococry/faith/tree/main/faithd) is designed around security & low latency. It is written from scratch in C,
 supports concurrent networking, implements a custom binary protocol and uses TLS for wire security.
 
 ## Current features 
