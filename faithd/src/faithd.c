@@ -1157,6 +1157,9 @@ server_cancel_pending_device_link(struct server_state_t *s,
   struct client_temporary_handshake_params_t *params =
       &requesting_cl->temp_handshake_params;
 
+  /* <sender_auth_id> is the auth ID of the account that <requesting_cl>
+   * requested to be linked to. All devices on that account need to be
+   * notified that the request has cancelled. */
   struct client_route_device_t *devices = NULL;
   faith_status_code_t           rc =
       routing_get_devices(&s->rt, &params->sender_auth_id, &devices);
@@ -1738,6 +1741,22 @@ reject: {
 }
 
 static faith_status_code_t
+server_send_device_auth_response_failed(struct server_state_t *s,
+                                        struct client_conn_t  *cl) {
+  if (!s || !cl || cl->closing)
+    return FAITH_ERR_INVALID;
+
+  faith_envelope_t failed_envl = {
+      .type = FAITH_ENVELOPE_DEVICE_AUTH_RESPONSE_FAILED,
+      .recipient_id = cl->auth_id,
+      .body = NULL,
+      .body_size = 0,
+  };
+
+  return server_send_envelope(s, cl, &failed_envl);
+}
+
+static faith_status_code_t
 server_handle_device_link_response(struct server_state_t  *s,
                                    struct client_conn_t   *cl,
                                    const faith_envelope_t *response_envl) {
@@ -1768,32 +1787,21 @@ server_handle_device_link_response(struct server_state_t  *s,
             "FAITH_ENVELOPE_DEVICE_AUTH_APPROVE or "
             "FAITH_ENVELOPE_DEVICE_AUTH_DENY, got %s",
             cl->conn_id, cl->fd, faith_envelope_name(response_envl->type));
+
     return FAITH_ERR_INVALID;
   }
 
   if (!response_envl->body ||
       response_envl->body_size !=
-          sizeof(faith_envl_cts_device_link_response_t)) {
+          FAITH_ENVL_CTS_DEVICE_LINK_RESPONSE_BODY_SIZE) {
     nob_log(ERROR,
             "[client=%" PRIu64
             " fd=%i] Server got invalid %s envelope contents.",
             cl->conn_id, cl->fd, faith_envelope_name(response_envl->type));
+
+    _FH_CHECK_RETURN(server_send_device_auth_response_failed(s, cl));
+
     return FAITH_ERR_INVALID;
-  }
-
-  if (!req_cl || req_cl->closing) {
-    char req_auth_id_hex[33];
-    char req_device_id_hex[33];
-    _FH_CHECK_RETURN(faith_id128_to_hex(req->auth_id.bytes, req_auth_id_hex));
-    _FH_CHECK_RETURN(
-        faith_id128_to_hex(req->device_id_new.bytes, req_device_id_hex));
-
-    nob_log(INFO,
-            "[client=%" PRIu64 " fd=%i] Client that requested"
-            "their device (device_id=%s) to be linked to auth_id=%s has "
-            "already been closed.",
-            cl->conn_id, cl->fd, req_auth_id_hex, req_device_id_hex);
-    return FAITH_OK;
   }
 
   if (!cl->authorized) {
@@ -1814,16 +1822,22 @@ server_handle_device_link_response(struct server_state_t  *s,
     return FAITH_ERR_UNAUTHORIZED;
   }
 
-  if (cl->state != CLIENT_OPEN) {
-    nob_log(ERROR,
-            "[client=%" PRIu64 " fd=%i] Server got invalid %s"
-            "from client. Authorizing client is not in OPEN state.",
-            cl->conn_id, cl->fd, faith_envelope_name(response_envl->type));
+  if (!req_cl || req_cl->closing) {
+    char req_auth_id_hex[33];
+    char req_device_id_hex[33];
+    _FH_CHECK_RETURN(faith_id128_to_hex(req->auth_id.bytes, req_auth_id_hex));
+    _FH_CHECK_RETURN(
+        faith_id128_to_hex(req->device_id_new.bytes, req_device_id_hex));
 
-    /* Return INVALID without rejecting/closing the client connection that
-     * requested the device link. We are protecting the pending client
-     * connection here. */
-    return FAITH_ERR_INVALID;
+    nob_log(INFO,
+            "[client=%" PRIu64 " fd=%i] Client that requested"
+            "their device (device_id=%s) to be linked to auth_id=%s has "
+            "already been closed.",
+            cl->conn_id, cl->fd, req_auth_id_hex, req_device_id_hex);
+
+    _FH_CHECK_RETURN(server_send_device_auth_response_failed(s, cl));
+
+    return FAITH_OK;
   }
 
   faith_envl_cts_device_link_response_t response = {0};
@@ -1836,6 +1850,8 @@ server_handle_device_link_response(struct server_state_t  *s,
         "[client=%" PRIu64 " fd=%i] Server got %s but the sent"
         "device_id does not match the device_id that requested the approval.",
         cl->conn_id, cl->fd, faith_envelope_name(response_envl->type));
+
+    _FH_CHECK_RETURN(server_send_device_auth_response_failed(s, cl));
 
     /* Return INVALID without rejecting/closing the client connection that
      * requested the device link. */
@@ -1925,6 +1941,9 @@ server_handle_device_link_response(struct server_state_t  *s,
             "However, the client connection IS authorized, so there is "
             "probably a deeper issue.",
             cl->conn_id, cl->fd, faith_envelope_name(response_envl->type));
+
+    _FH_CHECK_RETURN(server_send_device_auth_response_failed(s, cl));
+
     return FAITH_ERR_INVALID;
   }
 
@@ -1970,42 +1989,9 @@ server_handle_device_link_response(struct server_state_t  *s,
     return FAITH_ERR_UNREACHABLE;
   }
 
-  struct client_route_device_t *authorized_devices = NULL;
-
-  {
-    _FH_CHECK(routing_get_devices(&s->rt, &cl->auth_id, &authorized_devices));
-    if (_fh_rc != FAITH_OK)
-      rc = _fh_rc;
-  }
-
-  ptrdiff_t n_authorized_devices = hmlen(authorized_devices);
-
-  /* Route the response to all other authorized devices
-    for that auth ID */
-  for (ptrdiff_t i = 0; i < n_authorized_devices; i++) {
-    if (!authorized_devices[i].value || !authorized_devices[i].value->conn) {
-      nob_log(ERROR, "Routing table contains an invalid device entry");
-      continue;
-    }
-
-    struct client_conn_t *authorized_cl = authorized_devices[i].value->conn;
-
-    if (authorized_cl->pending_device_link_conn != req_cl)
-      continue;
-
-    if (authorized_cl->authorized && !authorized_cl->closing &&
-        authorized_cl->state == CLIENT_OPEN) {
-      faith_envelope_t ack_envl = {0};
-      ack_envl.type = FAITH_ENVELOPE_DEVICE_AUTH_RESPONSE_ACK;
-      ack_envl.recipient_id = authorized_cl->auth_id;
-
-      _FH_CHECK(server_send_envelope_or_close(s, authorized_cl, &ack_envl));
-    }
-
-    free(authorized_cl->pending_device_link_req);
-    authorized_cl->pending_device_link_req = NULL;
-    authorized_cl->pending_device_link_conn = NULL;
-  }
+  faith_envelope_t ack_envl = {0};
+  ack_envl.type = FAITH_ENVELOPE_DEVICE_AUTH_RESPONSE_ACK;
+  _FH_CHECK_RETURN(server_route_envelope(s, cl, &cl->auth_id, &ack_envl));
 
   return rc;
 
@@ -2030,10 +2016,12 @@ defer: {
            "Client failed device-link authorization. (Error: %s)",
            faith_status_code_name(_fh_result));
 
-  // Don't propagate status code
-  _FH_CHECK(server_disconnect_client(s, req_cl, FAITH_DISCONNECT_AUTH_FAILED,
-                                     FAITH_CLIENT_RECONNECT_FORBIDDEN, 0, 0,
-                                     buf));
+  /* Don't propagate status code */
+  {
+    _FH_CHECK(server_disconnect_client(s, req_cl, FAITH_DISCONNECT_AUTH_FAILED,
+                                       FAITH_CLIENT_RECONNECT_FORBIDDEN, 0, 0,
+                                       buf));
+  }
 
   char auth_id_hex[33];
   char device_id_hex[33];
@@ -2048,6 +2036,11 @@ defer: {
           "Closing connection. ",
           req_cl->conn_id, req_cl->fd, auth_id_hex, device_id_hex,
           faith_status_code_name(_fh_result), device_id_hex, auth_id_hex);
+
+  /* Don't propagate status code */
+  {
+    _FH_CHECK(server_send_device_auth_response_failed(s, cl));
+  }
 
   return blame_responder ? _fh_result : FAITH_OK;
 }

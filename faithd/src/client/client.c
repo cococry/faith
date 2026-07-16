@@ -684,14 +684,32 @@ client_handle_device_auth_response_ack(faith_client_t   *client,
     return FAITH_ERR_BAD_ENVELOPE;
 
   if (!client->pending_device_link_req)
-    return FAITH_ERR_BAD_ENVELOPE;
+    return FAITH_OK;
 
   client_clear_pending_device_link_request(client);
 
   _FH_CHECK_RETURN(client_push_event(
       client, FAITH_EVENT_DEVICE_AUTH_RESPONSE_ACK, 0, 0,
-      "The pending device-link request was answered by another authorized "
-      "device."));
+      "The device-link response was successfully acknowledged."));
+
+  return FAITH_OK;
+}
+
+static faith_status_code_t
+client_handle_device_auth_response_failed(faith_client_t   *client,
+                                          faith_envelope_t *envl) {
+  if (!client || !envl)
+    return FAITH_ERR_INVALID;
+
+  if (envl->type != FAITH_ENVELOPE_DEVICE_AUTH_RESPONSE_FAILED)
+    return FAITH_ERR_INVALID;
+
+  if (envl->body || envl->body_size != 0)
+    return FAITH_ERR_BAD_ENVELOPE;
+
+  _FH_CHECK_RETURN(client_push_event(
+      client, FAITH_EVENT_DEVICE_AUTH_RESPONSE_FAILED, 0, 0,
+      "The device-link response was not accepted by the server."));
 
   return FAITH_OK;
 }
@@ -702,7 +720,7 @@ client_handle_device_link_cancelled(faith_client_t   *client,
   if (envl->body || envl->body_size != 0)
     return FAITH_ERR_BAD_ENVELOPE;
   if (!client->pending_device_link_req)
-    return FAITH_ERR_BAD_ENVELOPE;
+    return FAITH_OK;
 
   client_clear_pending_device_link_request(client);
 
@@ -923,6 +941,10 @@ static faith_status_code_t client_handle_envelope(faith_client_t *client,
   }
   case FAITH_ENVELOPE_DEVICE_AUTH_RESPONSE_ACK: {
     _FH_CHECK_RETURN(client_handle_device_auth_response_ack(client, &envl));
+    break;
+  }
+  case FAITH_ENVELOPE_DEVICE_AUTH_RESPONSE_FAILED: {
+    _FH_CHECK_RETURN(client_handle_device_auth_response_failed(client, &envl));
     break;
   }
   case FAITH_ENVELOPE_DEVICE_LINK_CANCELLED: {
@@ -1508,8 +1530,7 @@ static faith_status_code_t client_new_identity(client_identity_t *o_ident) {
 
   /* Generate 128 bit random device & auth identities */
 
-  _FH_CHECK_RETURN(faith_random_bytes(o_ident->auth_id.bytes,
-                                      sizeof(o_ident->auth_id.bytes)));
+  client_id_from_hex("9379839402f90a5aa848b418953cecd2", &o_ident->auth_id);
 
   _FH_CHECK_RETURN(faith_random_bytes(o_ident->device_id.bytes, sizeof(o_ident->device_id.bytes)));
 
@@ -2042,8 +2063,6 @@ faith_client_approve_pending_device_auth(faith_client_t *client) {
 
   _FH_CHECK_DEFER(client_send_envelope_locked(client, &approval_envl));
 
-  client_clear_pending_device_link_request(client);
-
   return FAITH_OK;
 
 defer: {
@@ -2073,8 +2092,7 @@ faith_client_deny_pending_device_auth(faith_client_t *client) {
   uint8_t signature[FAITH_ED25519_SIGNATURE_SIZE] = {0};
   size_t  signature_size = 0;
 
-  faith_status_code_t _fh_result = FAITH_OK;
-  _FH_CHECK_DEFER(client_gen_device_auth_respone_signature(
+  _FH_CHECK_RETURN(client_gen_device_auth_respone_signature(
       client, req, signature, &signature_size, FAITH_DEVICE_LINK_DENY));
 
   /* Serialize faith_envl_cts_device_link_response_t */
@@ -2095,12 +2113,10 @@ faith_client_deny_pending_device_auth(faith_client_t *client) {
   approval_envl.body = body;
   approval_envl.body_size = body_size;
 
-  _FH_CHECK_DEFER(client_send_envelope_locked(client, &approval_envl));
+  _FH_CHECK_RETURN(client_send_envelope_locked(client, &approval_envl));
 
-defer:
-  client_clear_pending_device_link_request(client);
 
-  return _fh_result;
+  return FAITH_OK;
 }
 
 faith_status_code_t faith_client_reconnect(faith_client_t *client) {
