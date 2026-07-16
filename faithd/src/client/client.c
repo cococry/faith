@@ -104,7 +104,7 @@ struct faith_client {
 
 static faith_status_code_t
 client_push_event_ex(faith_client_t *client, faith_event_type_t type,
-                     uint64_t value0, uint64_t value1, const char *message,
+                     uint64_t value0, uint64_t value1, uint8_t value0_128[16], uint8_t value1_128[16], const char *message,
                      char *chat_message, size_t chat_message_size) {
   if (!client)
     return FAITH_ERR_INVALID;
@@ -123,9 +123,17 @@ client_push_event_ex(faith_client_t *client, faith_event_type_t type,
   faith_event_t ev;
   ev.value0 = value0;
   ev.value1 = value1;
+
+  if (value0_128 != NULL)
+    memcpy(ev.value0_128, value0_128, 16);
+  if (value1_128 != NULL)
+    memcpy(ev.value1_128, value1_128, 16);
+
   ev.type = type;
+
   ev.chat_message = chat_message;
   ev.chat_message_size = chat_message_size;
+
   if (message != NULL) {
     snprintf(ev.message, sizeof(ev.message), "%s", message);
   } else {
@@ -151,7 +159,7 @@ static faith_status_code_t client_push_event(faith_client_t    *client,
                                              faith_event_type_t type,
                                              uint64_t value0, uint64_t value1,
                                              const char *message) {
-  return client_push_event_ex(client, type, value0, value1, message, NULL, 0);
+  return client_push_event_ex(client, type, value0, value1, NULL, NULL, message, NULL, 0);
 }
 
 static int client_is_running(faith_client_t *client) {
@@ -589,71 +597,52 @@ client_next_request_id(faith_client_t       *client,
   return FAITH_OK;
 }
 
-static faith_status_code_t client_handle_envelope(faith_client_t *client,
-                                                  faith_frame_t  *frame) {
-  faith_envelope_t envl;
-  _FH_CHECK(faith_decode_envelope(frame->payload, frame->payload_size, &envl));
-  switch (envl.type) {
-  case FAITH_ENVELOPE_HELLO_OK: {
-    if (envl.body_size != 0)
-      return FAITH_ERR_BAD_ENVELOPE;
+static faith_status_code_t client_handle_hello_ok(faith_client_t   *client,
+                                                  faith_envelope_t *envl) {
+  if (!client || !envl)
+    return FAITH_ERR_INVALID;
+  if (envl->body_size != 0)
+    return FAITH_ERR_BAD_ENVELOPE;
 
-    _FH_CHECK_RETURN(client_push_event_ex(
-        client, FAITH_EVENT_AUTHORIZED, 0, 0,
-        "The client was successfully authorized.", NULL, 0));
+  _FH_CHECK_RETURN(
+      client_push_event(client, FAITH_EVENT_AUTHORIZED, 0, 0,
+                        "The client was successfully authorized."));
 
-    break;
+  return FAITH_OK;
+}
+
+static faith_status_code_t client_handle_msg_send(faith_client_t   *client,
+                                                  faith_envelope_t *envl) {
+  if (!client || !envl)
+    return FAITH_ERR_INVALID;
+  if (envl->body_size > FAITH_MAX_MSG_SIZE) {
+    nob_log(ERROR, "[client - reader] Got sent too large message.");
+    return FAITH_ERR_OVERFLOW;
   }
-  case FAITH_ENVELOPE_MSG_SEND: {
-    if (!faith_client_id_equal(envl.recipient_id, client->ident.auth_id)) {
-      nob_log(ERROR, "[client - reader] Got sent invalid MESSAGE envelope.");
-      return _fh_rc;
-    }
-
-    if (envl.body_size > FAITH_MAX_MSG_SIZE) {
-      nob_log(ERROR, "[client - reader] Got sent too large message.");
-      return FAITH_ERR_OVERFLOW;
-    }
-    char *msg = malloc(envl.body_size + 1);
-    if (!msg) {
-      nob_log(
-          ERROR,
-          "[client - reader] Failed to allocate memory for received message.");
-      return FAITH_ERR_NOMEM;
-    }
-
-    memcpy(msg, envl.body, envl.body_size);
-    msg[envl.body_size] = '\0';
-
-    _FH_CHECK_RETURN(client_push_event_ex(client, FAITH_EVENT_MESSAGE_RECEIVED,
-                                          0, 0, NULL, msg, envl.body_size));
-
-    break;
+  char *msg = malloc(envl->body_size + 1);
+  if (!msg) {
+    nob_log(
+        ERROR,
+        "[client - reader] Failed to allocate memory for received message.");
+    return FAITH_ERR_NOMEM;
   }
-  case FAITH_ENVELOPE_DEVICE_LINK_REQUEST: {
-    /* Client-side rejection of multiple pending device link requests. TOOD:
-     * This has to also be server enforced.*/
-    if (client->pending_device_link_req != NULL) {
+
+  memcpy(msg, envl->body, envl->body_size);
+  msg[envl->body_size] = '\0';
+
+  _FH_CHECK_RETURN(client_push_event_ex(client, FAITH_EVENT_MESSAGE_RECEIVED, 0,
+                                        0, 0, NULL, NULL, msg, envl->body_size));
+
+  return FAITH_OK;
+}
+
+static faith_status_code_t client_handle_device_link_request(faith_client_t* client, faith_envelope_t* envl) {
+   if (client->pending_device_link_req != NULL) {
       if(g_log_enable_tracing) {
         nob_log(WARNING, "[client - reader] Rejecting new DEVICE_LINK_REQUEST; "
                          "A link request is already pending for this client.");
       }
       return FAITH_OK;
-    }
-
-    if (!faith_client_id_equal(envl.recipient_id, client->ident.auth_id)) {
-      char recipient_id_hex[33];
-      char auth_id_hex[33];
-      _FH_CHECK_RETURN(
-          faith_id128_to_hex(envl.recipient_id.bytes, recipient_id_hex));
-      _FH_CHECK_RETURN(
-          faith_id128_to_hex(client->ident.auth_id.bytes, auth_id_hex));
-
-      nob_log(ERROR,
-              "[client - reader] Got sent invalid DEVICE_LINK_REQUEST envelope. Expected "
-              "envelope recipient_id to be %s but got %s.",
-              auth_id_hex, recipient_id_hex);
-      return _fh_rc;
     }
 
     // Allocate pending device link request
@@ -663,7 +652,7 @@ static faith_status_code_t client_handle_envelope(faith_client_t *client,
 
     {
       _FH_CHECK(
-          faith_decode_device_link_req_body(envl.body, envl.body_size, req));
+          faith_decode_device_link_req_body(envl->body, envl->body_size, req));
       if (_fh_rc != FAITH_OK) {
         free(req);
         return _fh_rc;
@@ -682,42 +671,284 @@ static faith_status_code_t client_handle_envelope(faith_client_t *client,
              "A new device requested to log in (device_id=%s). Accept?",
              device_id_hex);
 
-    _FH_CHECK_RETURN(client_push_event(
-        client, FAITH_EVENT_DEVICE_LINK_REQUEST, 0, 0, msg)); 
+    _FH_CHECK_RETURN(
+        client_push_event(client, FAITH_EVENT_DEVICE_LINK_REQUEST, 0, 0, msg));
+
+    return FAITH_OK;
+}
+
+static faith_status_code_t
+client_handle_device_auth_response_ack(faith_client_t   *client,
+                                       faith_envelope_t *envl) {
+  if (envl->body_size != 0)
+    return FAITH_ERR_BAD_ENVELOPE;
+
+  if (!client->pending_device_link_req)
+    return FAITH_ERR_BAD_ENVELOPE;
+
+  client_clear_pending_device_link_request(client);
+
+  _FH_CHECK_RETURN(client_push_event(
+      client, FAITH_EVENT_DEVICE_AUTH_RESPONSE_ACK, 0, 0,
+      "The pending device-link request was answered by another authorized "
+      "device."));
+
+  return FAITH_OK;
+}
+
+static faith_status_code_t
+client_handle_device_link_cancelled(faith_client_t   *client,
+                                    faith_envelope_t *envl) {
+  if (envl->body || envl->body_size != 0)
+    return FAITH_ERR_BAD_ENVELOPE;
+  if (!client->pending_device_link_req)
+    return FAITH_ERR_BAD_ENVELOPE;
+
+  client_clear_pending_device_link_request(client);
+
+  _FH_CHECK_RETURN(client_push_event(
+      client, FAITH_EVENT_DEVICE_LINK_CANCELLED, 0, 0,
+      "The pending device-link request was cancelled because the requesting "
+      "device disconnected."));
+
+  return FAITH_OK;
+}
+
+static faith_status_code_t
+client_handle_msg_request_ack(faith_client_t *client, faith_envelope_t *envl) {
+
+  faith_envl_stc_msg_request_ack_t ack = {0};
+  _FH_CHECK_RETURN(
+      faith_decode_msg_request_ack_body(envl->body, envl->body_size, &ack));
+
+  char srv_req_id_hex[33];
+  _FH_CHECK_RETURN(faith_id128_to_hex(ack.srv_req_id.bytes, srv_req_id_hex));
+  char buf[256];
+  snprintf(buf, sizeof(buf),
+           "Message request (client request ID: %" PRIu64
+           ", server request ID: %s) "
+           "was successfully acknowledged.",
+           ack.cl_req_id, srv_req_id_hex);
+
+  _FH_CHECK_RETURN(client_push_event_ex(client, FAITH_EVENT_MSG_REQUEST_ACK,
+                                        ack.cl_req_id, 0, ack.srv_req_id.bytes,
+                                        NULL, buf, NULL, 0));
+
+  return FAITH_OK;
+}
+
+static faith_status_code_t
+client_handle_msg_request_failed(faith_client_t   *client,
+                                 faith_envelope_t *envl) {
+
+  faith_envl_stc_msg_request_failed_t failed = {0};
+
+  _FH_CHECK_RETURN(faith_decode_msg_request_failed_body(
+      envl->body, envl->body_size, &failed));
+
+  const char *reason_name = faith_msg_request_fail_reason_name(failed.reason);
+
+  char buf[256];
+  snprintf(buf, sizeof(buf),
+           "Message request (client request ID: %" PRIu64 ") failed: %s.",
+           failed.cl_req_id, reason_name);
+
+  _FH_CHECK_RETURN(client_push_event_ex(
+      client, FAITH_EVENT_MSG_REQUEST_FAILED, failed.cl_req_id,
+      (uint64_t)failed.reason, NULL, NULL, buf, NULL, 0));
+
+  return FAITH_OK;
+}
+
+static faith_status_code_t
+client_handle_msg_request_response_ack(faith_client_t   *client,
+                                       faith_envelope_t *envl) {
+
+  faith_envl_stc_msg_request_response_ack_t ack = {0};
+
+  _FH_CHECK_RETURN(faith_decode_msg_request_response_ack_body(
+      envl->body, envl->body_size, &ack));
+
+  char srv_req_id_hex[33];
+  _FH_CHECK_RETURN(faith_id128_to_hex(ack.srv_req_id.bytes, srv_req_id_hex));
+
+  char buf[256];
+  snprintf(buf, sizeof(buf),
+           "Message request response (client request ID: %" PRIu64
+           ", server request ID: %s) was successfully acknowledged.",
+           ack.cl_req_id, srv_req_id_hex);
+
+  _FH_CHECK_RETURN(client_push_event_ex(
+      client, FAITH_EVENT_MSG_REQUEST_RESPONSE_ACK, ack.cl_req_id, 0,
+      ack.srv_req_id.bytes, NULL, buf, NULL, 0));
+
+  return FAITH_OK;
+}
+
+static faith_status_code_t
+client_handle_msg_request_response_failed(faith_client_t   *client,
+                                          faith_envelope_t *envl) {
+
+  faith_envl_stc_msg_request_response_failed_t failed = {0};
+
+  _FH_CHECK_RETURN(faith_decode_msg_request_response_failed_body(
+      envl->body, envl->body_size, &failed));
+
+  const char *reason_name =
+      faith_msg_request_response_fail_reason_name(failed.reason);
+
+  char srv_req_id_hex[33];
+  _FH_CHECK_RETURN(faith_id128_to_hex(failed.srv_req_id.bytes, srv_req_id_hex));
+
+  char buf[256];
+  snprintf(buf, sizeof(buf),
+           "Message request response (client request ID: %" PRIu64
+           ", server request ID: %s) failed: %s.",
+           failed.cl_req_id, srv_req_id_hex, reason_name);
+
+  _FH_CHECK_RETURN(client_push_event_ex(
+      client, FAITH_EVENT_MSG_REQUEST_RESPONSE_FAILED, failed.cl_req_id,
+      (uint64_t)failed.reason, failed.srv_req_id.bytes, NULL, buf, NULL, 0));
+
+  return FAITH_OK;
+}
+
+static faith_status_code_t
+client_handle_msg_request_received(faith_client_t   *client,
+                                   faith_envelope_t *envl) {
+  if (!client || !envl)
+    return FAITH_ERR_INVALID;
+
+  if (envl->type != FAITH_ENVELOPE_MSG_REQUEST_RECEIVED)
+    return FAITH_ERR_INVALID;
+
+  faith_envl_stc_msg_request_received_t received = {0};
+
+  _FH_CHECK_RETURN(faith_decode_msg_request_received_body(
+      envl->body, envl->body_size, &received));
+
+  char srv_req_id_hex[33];
+  _FH_CHECK_RETURN(
+      faith_id128_to_hex(received.srv_req_id.bytes, srv_req_id_hex));
+
+  char sender_auth_id_hex[33];
+  _FH_CHECK_RETURN(
+      faith_id128_to_hex(received.auth_id_sender.bytes, sender_auth_id_hex));
+
+  char buf[256];
+  snprintf(buf, sizeof(buf),
+           "Received message request "
+           "(server request ID: %s, sender auth ID: %s).",
+           srv_req_id_hex, sender_auth_id_hex);
+
+  _FH_CHECK_RETURN(client_push_event_ex(
+      client, FAITH_EVENT_MSG_REQUEST_RECEIVED, 0, 0, received.srv_req_id.bytes,
+      received.auth_id_sender.bytes, buf, NULL, 0));
+
+  return FAITH_OK;
+}
+
+static faith_status_code_t
+client_handle_msg_request_responded(faith_client_t   *client,
+                                    faith_envelope_t *envl) {
+  if (!client || !envl)
+    return FAITH_ERR_INVALID;
+
+  if (envl->type != FAITH_ENVELOPE_MSG_REQUEST_RESPONDED)
+    return FAITH_ERR_INVALID;
+
+  faith_envl_stc_msg_request_responded_t responded = {0};
+
+  _FH_CHECK_RETURN(faith_decode_msg_request_responded_body(
+      envl->body, envl->body_size, &responded));
+
+  char srv_req_id_hex[33];
+  _FH_CHECK_RETURN(
+      faith_id128_to_hex(responded.srv_req_id.bytes, srv_req_id_hex));
+
+  char responder_auth_id_hex[33];
+  _FH_CHECK_RETURN(faith_id128_to_hex(responded.auth_id_responder.bytes,
+                                      responder_auth_id_hex));
+
+  const char *response_type_name =
+      faith_msg_request_response_type_name(responded.type);
+
+  char buf[256];
+  snprintf(buf, sizeof(buf),
+           "Message request (server request ID: %s) was responded to by "
+           "account %s with response: %s.",
+           srv_req_id_hex, responder_auth_id_hex, response_type_name);
+
+  _FH_CHECK_RETURN(client_push_event_ex(
+      client, FAITH_EVENT_MSG_REQUEST_RESPONDED, 0, (uint64_t)responded.type,
+      responded.srv_req_id.bytes, responded.auth_id_responder.bytes, buf, 0,
+      sizeof(responded.auth_id_responder.bytes)));
+
+  return FAITH_OK;
+}
+
+static faith_status_code_t client_handle_envelope(faith_client_t *client,
+                                                  faith_frame_t  *frame) {
+  faith_envelope_t envl;
+  _FH_CHECK_RETURN(
+      faith_decode_envelope(frame->payload, frame->payload_size, &envl));
+
+  if (!faith_client_id_equal(envl.recipient_id, client->ident.auth_id)) {
+    char recipient_id_hex[33];
+    char auth_id_hex[33];
+    _FH_CHECK_RETURN(
+        faith_id128_to_hex(envl.recipient_id.bytes, recipient_id_hex));
+    _FH_CHECK_RETURN(
+        faith_id128_to_hex(client->ident.auth_id.bytes, auth_id_hex));
+
+    nob_log(
+        ERROR,
+        "[client - reader] Got sent invalid %s envelope recipient. Expected "
+        "envelope recipient_id to be %s but got %s.",
+        faith_envelope_name(envl.type), auth_id_hex, recipient_id_hex);
+    return FAITH_ERR_BAD_ENVELOPE;
+  }
+
+  switch (envl.type) {
+  case FAITH_ENVELOPE_HELLO_OK:
+    _FH_CHECK_RETURN(client_handle_hello_ok(client, &envl));
+    break;
+  case FAITH_ENVELOPE_MSG_SEND: {
+    _FH_CHECK_RETURN(client_handle_msg_send(client, &envl));
+    break;
+  }
+  case FAITH_ENVELOPE_DEVICE_LINK_REQUEST: {
+    _FH_CHECK_RETURN(client_handle_device_link_request(client, &envl));
     break;
   }
   case FAITH_ENVELOPE_DEVICE_AUTH_RESPONSE_ACK: {
-    if (envl.body_size != 0)
-      return FAITH_ERR_BAD_ENVELOPE;
-
-    if (!client->pending_device_link_req)
-      break;
-
-    client_clear_pending_device_link_request(client);
-
-    _FH_CHECK_RETURN(client_push_event(
-        client, FAITH_EVENT_DEVICE_AUTH_RESPONSE_ACK, 0, 0,
-        "The pending device-link request was answered by another authorized "
-        "device."));
+    _FH_CHECK_RETURN(client_handle_device_auth_response_ack(client, &envl));
     break;
   }
-
   case FAITH_ENVELOPE_DEVICE_LINK_CANCELLED: {
-    if (envl.body)
-      return FAITH_ERR_BAD_ENVELOPE;
-    if (!client->pending_device_link_req)
-      break;
-
-    client_clear_pending_device_link_request(client);
-
-    _FH_CHECK_RETURN(client_push_event(
-        client, FAITH_EVENT_DEVICE_LINK_CANCELLED, 0, 0,
-        "The pending device-link request was cancelled because the requesting "
-        "device disconnected."));
+    _FH_CHECK_RETURN(client_handle_device_link_cancelled(client, &envl));
     break;
   }
   case FAITH_ENVELOPE_CLIENT_DISCONNECT:
-    client_handle_disconnect(client, &envl);
+    _FH_CHECK_RETURN(client_handle_disconnect(client, &envl));
+    break;
+  case FAITH_ENVELOPE_MSG_REQUEST_ACK:
+    _FH_CHECK_RETURN(client_handle_msg_request_ack(client, &envl));
+    break;
+  case FAITH_ENVELOPE_MSG_REQUEST_FAILED:
+    _FH_CHECK_RETURN(client_handle_msg_request_failed(client, &envl));
+    break;
+  case FAITH_ENVELOPE_MSG_REQUEST_RESPONSE_ACK:
+    _FH_CHECK_RETURN(client_handle_msg_request_response_ack(client, &envl));
+    break;
+  case FAITH_ENVELOPE_MSG_REQUEST_RESPONSE_FAILED:
+    _FH_CHECK_RETURN(client_handle_msg_request_response_failed(client, &envl));
+    break;
+  case FAITH_ENVELOPE_MSG_REQUEST_RECEIVED:
+    _FH_CHECK_RETURN(client_handle_msg_request_received(client, &envl));
+    break;
+  case FAITH_ENVELOPE_MSG_REQUEST_RESPONDED:
+    _FH_CHECK_RETURN(client_handle_msg_request_responded(client, &envl));
     break;
   default:
     break;
@@ -1574,7 +1805,7 @@ faith_status_code_t
 faith_client_msg_request_accept(faith_client_t            *client,
                                     const faith_msg_request_t *req) {
   _FH_CHECK_RETURN(
-      client_msg_request_response(client, req, FAITH_MSG_REQUEST_ACCEPT));
+      client_msg_request_response(client, req, FAITH_MSG_REQUEST_RESPONSE_ACCEPT));
   return FAITH_OK;
 }
 
@@ -1582,7 +1813,7 @@ faith_status_code_t
 faith_client_msg_request_deny(faith_client_t            *client,
                                   const faith_msg_request_t *req) {
   _FH_CHECK_RETURN(
-      client_msg_request_response(client, req, FAITH_MSG_REQUEST_DENY));
+      client_msg_request_response(client, req, FAITH_MSG_REQUEST_RESPONSE_DENY));
   return FAITH_OK;
 }
 
@@ -1643,12 +1874,42 @@ static faith_status_code_t client_gen_msg_request_respone_signature(
 
   sign_msg.auth_id_req = req->auth_id_req;
   sign_msg.auth_id_recv = client->ident.auth_id;
-
   sign_msg.device_id_recv = client->ident.device_id;
-
-  memcpy(sign_msg.srv_req_id.bytes, req->srv_req_id.bytes, FAITH_REQUEST_ID_SIZE);
+  sign_msg.srv_req_id = req->srv_req_id;
 
   sign_msg.type = type;
+
+  char auth_id_req_hex[33];
+char auth_id_recv_hex[33];
+char device_id_recv_hex[33];
+char srv_req_id_hex[33];
+
+_FH_CHECK_RETURN(
+    faith_id128_to_hex(sign_msg.auth_id_req.bytes, auth_id_req_hex));
+
+_FH_CHECK_RETURN(
+    faith_id128_to_hex(sign_msg.auth_id_recv.bytes, auth_id_recv_hex));
+
+_FH_CHECK_RETURN(
+    faith_id128_to_hex(sign_msg.device_id_recv.bytes, device_id_recv_hex));
+
+_FH_CHECK_RETURN(
+    faith_id128_to_hex(sign_msg.srv_req_id.bytes, srv_req_id_hex));
+
+nob_log(INFO,
+        "CLIENT: faith_signature_msg_request_response_t { "
+        "auth_id_req=%s, "
+        "auth_id_recv=%s, "
+        "device_id_recv=%s, "
+        "srv_req_id=%s, "
+        "type=%s (%u) "
+        "}",
+        auth_id_req_hex,
+        auth_id_recv_hex,
+        device_id_recv_hex,
+        srv_req_id_hex,
+        faith_msg_request_response_type_name(sign_msg.type),
+        (unsigned)sign_msg.type);
 
   size_t  msg_size = 0;
   uint8_t msg_buf[FAITH_SIGNATURE_MSG_REQUEST_RESPONSE_SIZE];
@@ -1861,3 +2122,16 @@ faith_status_code_t faith_client_reconnect(faith_client_t *client) {
 
   return FAITH_OK;
 }
+
+const char *faith_event_name(faith_event_type_t ev) {
+  switch (ev) {
+#define X(name, value)                                                         \
+  case name:                                                                   \
+    return #name;
+    FAITH_EVENT_TYPES(X)
+#undef X
+  default:
+    return "FAITH_EVENT_UNKNOWN";
+  }
+}
+
