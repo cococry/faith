@@ -15,22 +15,22 @@
   X(FAITH_EVENT_DEVICE_AUTH_PENDING, 7)                                        \
   X(FAITH_EVENT_DEVICE_LINK_REQUEST, 8)                                        \
   X(FAITH_EVENT_DEVICE_AUTH_RESPONSE_ACK, 9)                                   \
-  X(FAITH_EVENT_DEVICE_LINK_CANCELLED, 10)                                     \
-  X(FAITH_EVENT_AUTHORIZED, 11)                                                \
-  X(FAITH_EVENT_SERVER_DISCONNECT, 12)                                         \
-  X(FAITH_EVENT_MSG_REQUEST_RECEIVED, 13)                                      \
-  X(FAITH_EVENT_MSG_REQUEST_RESPONDED, 14)                                     \
-  X(FAITH_EVENT_MSG_REQUEST_ACK, 15)                                           \
-  X(FAITH_EVENT_MSG_REQUEST_FAILED, 16)                                        \
-  X(FAITH_EVENT_MSG_REQUEST_RESPONSE_ACK, 17)                                  \
-  X(FAITH_EVENT_MSG_REQUEST_RESPONSE_FAILED, 18)
+  X(FAITH_EVENT_DEVICE_AUTH_RESPONSE_FAILED, 10)                               \
+  X(FAITH_EVENT_DEVICE_LINK_CANCELLED, 11)                                     \
+  X(FAITH_EVENT_AUTHORIZED, 12)                                                \
+  X(FAITH_EVENT_SERVER_DISCONNECT, 13)                                         \
+  X(FAITH_EVENT_MSG_REQUEST_RECEIVED, 14)                                      \
+  X(FAITH_EVENT_MSG_REQUEST_RESPONDED, 15)                                     \
+  X(FAITH_EVENT_MSG_REQUEST_ACK, 16)                                           \
+  X(FAITH_EVENT_MSG_REQUEST_FAILED, 17)                                        \
+  X(FAITH_EVENT_MSG_REQUEST_RESPONSE_ACK, 18)                                  \
+  X(FAITH_EVENT_MSG_REQUEST_RESPONSE_FAILED, 19)
 
 typedef enum {
 #define X(name, value) name = value,
   FAITH_EVENT_TYPES(X)
 #undef X
 } faith_event_type_t;
-
 
 typedef struct faith_client faith_client_t;
 

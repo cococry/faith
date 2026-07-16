@@ -625,16 +625,17 @@ typedef enum {
   X(FAITH_ENVELOPE_DEVICE_AUTH_APPROVE, 10)                                    \
   X(FAITH_ENVELOPE_DEVICE_AUTH_DENY, 11)                                       \
   X(FAITH_ENVELOPE_DEVICE_AUTH_RESPONSE_ACK, 12)                               \
-  X(FAITH_ENVELOPE_DEVICE_LINK_CANCELLED, 13)                                  \
-  X(FAITH_ENVELOPE_CLIENT_DISCONNECT, 14)                                      \
-  X(FAITH_ENVELOPE_MSG_REQUEST, 15)                                            \
-  X(FAITH_ENVELOPE_MSG_REQUEST_RESPONSE, 16)                                   \
-  X(FAITH_ENVELOPE_MSG_REQUEST_RESPONSE_ACK, 17)                               \
-  X(FAITH_ENVELOPE_MSG_REQUEST_RESPONSE_FAILED, 18)                            \
-  X(FAITH_ENVELOPE_MSG_REQUEST_ACK, 19)                                        \
-  X(FAITH_ENVELOPE_MSG_REQUEST_FAILED, 20)                                     \
-  X(FAITH_ENVELOPE_MSG_REQUEST_RECEIVED, 21) \
-  X(FAITH_ENVELOPE_MSG_REQUEST_RESPONDED, 22)
+  X(FAITH_ENVELOPE_DEVICE_AUTH_RESPONSE_FAILED, 13)                            \
+  X(FAITH_ENVELOPE_DEVICE_LINK_CANCELLED, 14)                                  \
+  X(FAITH_ENVELOPE_CLIENT_DISCONNECT, 15)                                      \
+  X(FAITH_ENVELOPE_MSG_REQUEST, 16)                                            \
+  X(FAITH_ENVELOPE_MSG_REQUEST_RESPONSE, 17)                                   \
+  X(FAITH_ENVELOPE_MSG_REQUEST_RESPONSE_ACK, 18)                               \
+  X(FAITH_ENVELOPE_MSG_REQUEST_RESPONSE_FAILED, 19)                            \
+  X(FAITH_ENVELOPE_MSG_REQUEST_ACK, 20)                                        \
+  X(FAITH_ENVELOPE_MSG_REQUEST_FAILED, 21)                                     \
+  X(FAITH_ENVELOPE_MSG_REQUEST_RECEIVED, 22)                                   \
+  X(FAITH_ENVELOPE_MSG_REQUEST_RESPONDED, 23)
 
 #define FAITH_CLIENT_DISCONNECT_REASONS(X)                                     \
   X(FAITH_DISCONNECT_REASON_NONE, 0)                                           \
@@ -703,6 +704,25 @@ typedef enum {
   FAITH_MSG_REQUEST_RESPONSE_TYPES(X)
 #undef X
 } faith_msg_request_response_type_t;
+
+#define FAITH_DEVICE_AUTH_RESPONSE_FAIL_REASONS(X)                             \
+  X(FAITH_DEVICE_AUTH_RESPONSE_FAIL_INVALID, 0)                                \
+  X(FAITH_DEVICE_AUTH_RESPONSE_FAIL_REQUEST_NOT_FOUND, 1)                      \
+  X(FAITH_DEVICE_AUTH_RESPONSE_FAIL_REQUESTER_DISCONNECTED, 2)                 \
+  X(FAITH_DEVICE_AUTH_RESPONSE_FAIL_DEVICE_ID_MISMATCH, 3)                     \
+  X(FAITH_DEVICE_AUTH_RESPONSE_FAIL_REQUEST_EXPIRED, 4)                        \
+  X(FAITH_DEVICE_AUTH_RESPONSE_FAIL_NOT_AUTHORIZED, 5)                         \
+  X(FAITH_DEVICE_AUTH_RESPONSE_FAIL_INVALID_SIGNATURE, 6)                      \
+  X(FAITH_DEVICE_AUTH_RESPONSE_FAIL_INTERNAL_ERROR, 7)
+
+typedef enum {
+#define X(name, value) name = value,
+  FAITH_DEVICE_AUTH_RESPONSE_FAIL_REASONS(X)
+#undef X
+} faith_device_auth_response_fail_reason_t;
+
+const char *faith_device_auth_response_fail_reason_name(
+    faith_device_auth_response_fail_reason_t reason);
 
 #define FAITH_DEVICE_LINK_REQ_EXPIRATION_TIME_MS 1000 * 60 /* 60 seconds */
 #define FAITH_MSG_REQUEST_EXPIRATION_TIME_MS                                   \
