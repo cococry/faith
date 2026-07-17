@@ -387,54 +387,19 @@ static faith_status_code_t client_init_ssl(faith_client_t *client) {
   return FAITH_OK;
 }
 
-static faith_status_code_t encode_ping(uint8_t *out_buf, size_t *out_size,
-                                       size_t buf_cap_in_bytes, uint64_t nonce,
-                                       uint64_t sent_at_ms) {
-  if (!out_buf || !out_size)
-    return FAITH_ERR_INVALID;
-
-  const size_t ping_size = sizeof(uint64_t) * 2;
-
-  if (buf_cap_in_bytes < ping_size)
-    return FAITH_ERR_OVERFLOW;
-
-  _FH_CHECK_RETURN(faith_write_u64_be(out_buf, nonce));
-  _FH_CHECK_RETURN(faith_write_u64_be(out_buf + sizeof(uint64_t), sent_at_ms));
-
-  *out_size = ping_size;
-
-  return FAITH_OK;
-}
-
-static faith_status_code_t decode_pong(const uint8_t *payload,
-                                       size_t         payload_size,
-                                       uint64_t      *pong_nonce,
-                                       uint64_t      *server_time_ms) {
-  const size_t pong_size = sizeof(uint64_t) * 2;
-
-  if (payload == NULL || pong_nonce == NULL || server_time_ms == NULL)
-    return FAITH_ERR_INVALID;
-
-  if (payload_size != pong_size)
-    return FAITH_ERR_BAD_FRAME;
-
-  *pong_nonce = faith_read_u64_be(payload);
-  *server_time_ms = faith_read_u64_be(payload + sizeof(uint64_t));
-
-  return FAITH_OK;
-}
-
 static faith_status_code_t client_send_ping_sync(SSL *ssl, uint64_t nonce,
                                                  uint64_t sent_at_ms) {
 
   if (!ssl)
     return FAITH_ERR_INVALID;
 
-  uint8_t payload[sizeof(uint64_t) * 2];
-  size_t  payload_size = 0;
+  uint8_t payload[FAITH_MSG_PING_PAYLOAD_SIZE];
 
+  faith_body_size_t payload_size = 0;
+
+  faith_msg_ping_t ping = {.nonce = nonce, .client_sent_at_ms = sent_at_ms};
   _FH_CHECK_RETURN(
-      encode_ping(payload, &payload_size, sizeof(payload), nonce, sent_at_ms));
+      faith_encode_ping(payload, &payload_size, sizeof(payload), &ping));
 
   _FH_CHECK_RETURN(
       faith_write_frame_sync(ssl, FAITH_MSG_PING, payload, payload_size));
@@ -497,14 +462,14 @@ static void client_clear_pending_device_link_request(faith_client_t *client) {
 }
 
 static void client_handle_pong(faith_client_t *client, faith_frame_t *frame) {
-  uint64_t pong_nonce;
-  uint64_t server_time_ms;
 
-  _FH_CHECK(decode_pong(frame->payload, frame->payload_size, &pong_nonce,
-                        &server_time_ms));
+  faith_msg_pong_t pong = {0};
+
+  _FH_CHECK(faith_decode_pong(frame->payload, frame->payload_size, &pong));
 
   pthread_mutex_lock(&client->ping_lock);
-  int ok = _fh_rc == FAITH_OK && pong_nonce == client->ping_nonce &&
+
+  int ok = _fh_rc == FAITH_OK && pong.nonce == client->ping_nonce &&
            client->ping_active;
   uint64_t ping_sent_at_ms = client->ping_sent_at_ms;
   if (ok) {
@@ -517,7 +482,7 @@ static void client_handle_pong(faith_client_t *client, faith_frame_t *frame) {
       nob_log(INFO, "[client - pinger]: Heartbeat successful.");
     uint64_t now = faith_now_ms();
     _FH_CHECK(client_push_event(client, FAITH_EVENT_PONG, now - ping_sent_at_ms,
-                                server_time_ms, NULL));
+                                pong.server_sent_at_ms, NULL));
   } else {
     _FH_CHECK(client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
                                 "Invalid pong response from server"));
@@ -1530,9 +1495,15 @@ static faith_status_code_t client_new_identity(client_identity_t *o_ident) {
 
   /* Generate 128 bit random device & auth identities */
 
-  client_id_from_hex("9379839402f90a5aa848b418953cecd2", &o_ident->auth_id);
+  //client_id_from_hex("9379839402f90a5aa848b418953cecd2", &o_ident->auth_id);
 
-  _FH_CHECK_RETURN(faith_random_bytes(o_ident->device_id.bytes, sizeof(o_ident->device_id.bytes)));
+  _FH_CHECK_RETURN(faith_random_bytes(o_ident->auth_id.bytes,
+                                      sizeof(o_ident->auth_id.bytes)));
+
+
+
+  _FH_CHECK_RETURN(faith_random_bytes(o_ident->device_id.bytes,
+                                      sizeof(o_ident->device_id.bytes)));
 
   /* Generate client identity keypair */
   _FH_CHECK_RETURN(faith_gen_ed25519_keypair(

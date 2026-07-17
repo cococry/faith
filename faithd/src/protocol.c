@@ -360,7 +360,7 @@ faith_status_code_t faith_decode_frame(const uint8_t *payload,
   if (proto_ver != FAITH_PROTO_VERSION)
     return FAITH_ERR_UNSUPPORTED_VER;
 
-  FAITH_ENVL_DECODE_EPILOGUE_DNY(FAITH_FRAME_HEADER_SIZE, <);
+  FAITH_DECODE_EPILOGUE_DNY(FAITH_FRAME_HEADER_SIZE, <);
 
   out->proto_ver = proto_ver;
   out->msg_type = msg_type;
@@ -544,6 +544,72 @@ faith_msg_request_response_type_name(faith_msg_request_response_type_t type) {
   }
 }
 
+faith_status_code_t faith_encode_ping(uint8_t                *out_buf,
+                                      faith_body_size_t      *out_size,
+                                      size_t                  buf_cap_in_bytes,
+                                      const faith_msg_ping_t *in) {
+  FAITH_ENCODE_PROLOGUE(FAITH_MSG_PING_PAYLOAD_SIZE);
+
+  size_t offset = 0;
+
+  FAITH_ENCODE_U64_BE_RETURN(out_buf, buf_cap_in_bytes, offset, in->nonce);
+  FAITH_ENCODE_U64_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
+                             in->client_sent_at_ms);
+
+  FAITH_ENCODE_EPILOGUE(FAITH_MSG_PING_PAYLOAD_SIZE, !=);
+
+  return FAITH_OK;
+}
+
+faith_status_code_t faith_decode_ping(const uint8_t    *payload,
+                                      size_t            payload_size,
+                                      faith_msg_ping_t *out) {
+  FAITH_DECODE_PROLOGUE(FAITH_MSG_PING_PAYLOAD_SIZE, !=);
+
+  size_t offset = 0;
+
+  FAITH_DECODE_U64_BE_RETURN(payload, payload_size, offset, out->nonce);
+  FAITH_DECODE_U64_BE_RETURN(payload, payload_size, offset,
+                             out->client_sent_at_ms);
+
+  FAITH_DECODE_EPILOGUE(FAITH_MSG_PING_PAYLOAD_SIZE, !=);
+
+  return FAITH_OK;
+}
+
+faith_status_code_t faith_encode_pong(uint8_t                *out_buf,
+                                      faith_body_size_t      *out_size,
+                                      size_t                  buf_cap_in_bytes,
+                                      const faith_msg_pong_t *in) {
+  FAITH_ENCODE_PROLOGUE(FAITH_MSG_PING_PAYLOAD_SIZE);
+
+  size_t offset = 0;
+
+  FAITH_ENCODE_U64_BE_RETURN(out_buf, buf_cap_in_bytes, offset, in->nonce);
+  FAITH_ENCODE_U64_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
+                             in->server_sent_at_ms);
+
+  FAITH_ENCODE_EPILOGUE(FAITH_MSG_PING_PAYLOAD_SIZE, !=);
+
+  return FAITH_OK;
+}
+
+faith_status_code_t faith_decode_pong(const uint8_t    *payload,
+                                      size_t            payload_size,
+                                      faith_msg_pong_t *out) {
+  FAITH_DECODE_PROLOGUE(FAITH_MSG_PING_PAYLOAD_SIZE, !=);
+
+  size_t offset = 0;
+
+  FAITH_DECODE_U64_BE_RETURN(payload, payload_size, offset, out->nonce);
+  FAITH_DECODE_U64_BE_RETURN(payload, payload_size, offset,
+                             out->server_sent_at_ms);
+
+  FAITH_DECODE_EPILOGUE(FAITH_MSG_PING_PAYLOAD_SIZE, !=);
+
+  return FAITH_OK;
+}
+
 faith_status_code_t faith_encode_envelope(uint8_t *out_buf, size_t *out_size,
                                           size_t buf_cap_in_bytes,
                                           const faith_envelope_t *in) {
@@ -587,7 +653,7 @@ faith_status_code_t faith_encode_envelope(uint8_t *out_buf, size_t *out_size,
 faith_status_code_t faith_decode_envelope(const uint8_t    *payload,
                                           size_t            payload_size,
                                           faith_envelope_t *out) {
-  FAITH_ENVL_DECODE_PROLOGUE(FAITH_ENVL_HEADER_SIZE, <);
+  FAITH_DECODE_PROLOGUE(FAITH_ENVL_HEADER_SIZE, <);
 
   size_t offset = 0;
 
@@ -601,7 +667,7 @@ faith_status_code_t faith_decode_envelope(const uint8_t    *payload,
 
   FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset, out->body_size);
 
-  FAITH_ENVL_DECODE_EPILOGUE_DNY(FAITH_ENVL_HEADER_SIZE, <);
+  FAITH_DECODE_EPILOGUE_DNY(FAITH_ENVL_HEADER_SIZE, <);
 
   if (out->body_size != payload_size - offset) {
     return FAITH_ERR_BAD_FRAME;
@@ -632,7 +698,7 @@ faith_encode_device_link_req_body(uint8_t *out_buf, faith_body_size_t *out_size,
                                   size_t buf_cap_in_bytes,
                                   const faith_envl_stc_device_link_req_t *in) {
 
-  FAITH_ENVL_ENCODE_PROLOGUE(FAITH_ENVL_STC_DEVICE_LINK_REQ_BODY_SIZE);
+  FAITH_ENCODE_PROLOGUE(FAITH_ENVL_STC_DEVICE_LINK_REQ_BODY_SIZE);
 
   size_t offset = 0;
 
@@ -652,7 +718,7 @@ faith_encode_device_link_req_body(uint8_t *out_buf, faith_body_size_t *out_size,
   FAITH_ENCODE_U64_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
                              in->expires_at_ms);
 
-  FAITH_ENVL_ENCODE_EPILOGUE(FAITH_ENVL_STC_DEVICE_LINK_REQ_BODY_SIZE, !=);
+  FAITH_ENCODE_EPILOGUE(FAITH_ENVL_STC_DEVICE_LINK_REQ_BODY_SIZE, !=);
 
   return FAITH_OK;
 }
@@ -661,7 +727,7 @@ faith_status_code_t
 faith_decode_device_link_req_body(const uint8_t    *payload,
                                   faith_body_size_t payload_size,
                                   faith_envl_stc_device_link_req_t *out) {
-  FAITH_ENVL_DECODE_PROLOGUE(FAITH_ENVL_STC_DEVICE_LINK_REQ_BODY_SIZE, !=);
+  FAITH_DECODE_PROLOGUE(FAITH_ENVL_STC_DEVICE_LINK_REQ_BODY_SIZE, !=);
 
   size_t offset = 0;
 
@@ -679,7 +745,7 @@ faith_decode_device_link_req_body(const uint8_t    *payload,
 
   FAITH_DECODE_U64_BE_RETURN(payload, payload_size, offset, out->expires_at_ms);
 
-  FAITH_ENVL_DECODE_EPILOGUE(FAITH_ENVL_STC_DEVICE_LINK_REQ_BODY_SIZE, !=);
+  FAITH_DECODE_EPILOGUE(FAITH_ENVL_STC_DEVICE_LINK_REQ_BODY_SIZE, !=);
 
   return FAITH_OK;
 }
@@ -687,7 +753,7 @@ faith_decode_device_link_req_body(const uint8_t    *payload,
 faith_status_code_t faith_encode_device_link_response_body(
     uint8_t *out_buf, faith_body_size_t *out_size, size_t buf_cap_in_bytes,
     const faith_envl_cts_device_link_response_t *in) {
-  FAITH_ENVL_ENCODE_PROLOGUE(FAITH_ENVL_CTS_DEVICE_LINK_RESPONSE_BODY_SIZE);
+  FAITH_ENCODE_PROLOGUE(FAITH_ENVL_CTS_DEVICE_LINK_RESPONSE_BODY_SIZE);
 
   size_t offset = 0;
 
@@ -697,7 +763,7 @@ faith_status_code_t faith_encode_device_link_response_body(
   FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset,
                       in->device_id_new.bytes, sizeof(in->device_id_new.bytes));
 
-  FAITH_ENVL_ENCODE_EPILOGUE(FAITH_ENVL_CTS_DEVICE_LINK_RESPONSE_BODY_SIZE, !=);
+  FAITH_ENCODE_EPILOGUE(FAITH_ENVL_CTS_DEVICE_LINK_RESPONSE_BODY_SIZE, !=);
 
   return FAITH_OK;
 }
@@ -706,7 +772,7 @@ faith_status_code_t faith_decode_device_link_response_body(
     const uint8_t *payload, faith_body_size_t payload_size,
     faith_envl_cts_device_link_response_t *out) {
 
-  FAITH_ENVL_DECODE_PROLOGUE(FAITH_ENVL_CTS_DEVICE_LINK_RESPONSE_BODY_SIZE, !=);
+  FAITH_DECODE_PROLOGUE(FAITH_ENVL_CTS_DEVICE_LINK_RESPONSE_BODY_SIZE, !=);
 
   size_t offset = 0;
 
@@ -716,7 +782,7 @@ faith_status_code_t faith_decode_device_link_response_body(
   FAITH_DECODE_RETURN(payload, payload_size, offset, out->device_id_new.bytes,
                       sizeof(out->device_id_new.bytes));
 
-  FAITH_ENVL_DECODE_EPILOGUE(FAITH_ENVL_CTS_DEVICE_LINK_RESPONSE_BODY_SIZE, !=);
+  FAITH_DECODE_EPILOGUE(FAITH_ENVL_CTS_DEVICE_LINK_RESPONSE_BODY_SIZE, !=);
 
   return FAITH_OK;
 }
@@ -727,7 +793,7 @@ faith_status_code_t faith_encode_client_disconnect_body(
 
   const size_t msg_len = strnlen(in->msg, sizeof(in->msg));
 
-  FAITH_ENVL_ENCODE_PROLOGUE(FAITH_ENVL_STC_CLIENT_DISCONNECT_BODY_SIZE_FIXED +
+  FAITH_ENCODE_PROLOGUE(FAITH_ENVL_STC_CLIENT_DISCONNECT_BODY_SIZE_FIXED +
                              msg_len);
 
   size_t offset = 0;
@@ -769,7 +835,7 @@ faith_status_code_t faith_encode_client_disconnect_body(
 
   FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, in->msg, msg_len);
 
-  FAITH_ENVL_ENCODE_EPILOGUE(
+  FAITH_ENCODE_EPILOGUE(
       FAITH_ENVL_STC_CLIENT_DISCONNECT_BODY_SIZE_FIXED + msg_len, !=);
 
   return FAITH_OK;
@@ -780,7 +846,7 @@ faith_decode_client_disconnect_body(const uint8_t    *payload,
                                     faith_body_size_t payload_size,
                                     faith_envl_stc_client_disconnect_t *out) {
 
-  FAITH_ENVL_DECODE_PROLOGUE(FAITH_ENVL_STC_CLIENT_DISCONNECT_BODY_SIZE_FIXED,
+  FAITH_DECODE_PROLOGUE(FAITH_ENVL_STC_CLIENT_DISCONNECT_BODY_SIZE_FIXED,
                              <);
 
   size_t offset = 0;
@@ -827,7 +893,7 @@ faith_decode_client_disconnect_body(const uint8_t    *payload,
 
   out->msg[out->msg_size] = '\0';
 
-  FAITH_ENVL_DECODE_EPILOGUE(FAITH_ENVL_STC_CLIENT_DISCONNECT_BODY_SIZE_FIXED,
+  FAITH_DECODE_EPILOGUE(FAITH_ENVL_STC_CLIENT_DISCONNECT_BODY_SIZE_FIXED,
                              <);
 
   return FAITH_OK;
@@ -837,7 +903,7 @@ faith_status_code_t
 faith_encode_msg_request_body(uint8_t *out_buf, faith_body_size_t *out_size,
                               size_t buf_cap_in_bytes,
                               const faith_envl_cts_msg_request_t *in) {
-  FAITH_ENVL_ENCODE_PROLOGUE(FAITH_ENVL_CTS_MSG_REQUEST_BODY_SIZE);
+  FAITH_ENCODE_PROLOGUE(FAITH_ENVL_CTS_MSG_REQUEST_BODY_SIZE);
 
   size_t offset = 0;
 
@@ -846,7 +912,7 @@ faith_encode_msg_request_body(uint8_t *out_buf, faith_body_size_t *out_size,
 
   FAITH_ENCODE_U64_BE_RETURN(out_buf, buf_cap_in_bytes, offset, in->cl_req_id);
 
-  FAITH_ENVL_ENCODE_EPILOGUE(FAITH_ENVL_CTS_MSG_REQUEST_BODY_SIZE, !=);
+  FAITH_ENCODE_EPILOGUE(FAITH_ENVL_CTS_MSG_REQUEST_BODY_SIZE, !=);
 
   return FAITH_OK;
 }
@@ -856,7 +922,7 @@ faith_decode_msg_request_body(const uint8_t                *payload,
                               faith_body_size_t             payload_size,
                               faith_envl_cts_msg_request_t *out) {
 
-  FAITH_ENVL_DECODE_PROLOGUE(FAITH_ENVL_CTS_MSG_REQUEST_BODY_SIZE, !=);
+  FAITH_DECODE_PROLOGUE(FAITH_ENVL_CTS_MSG_REQUEST_BODY_SIZE, !=);
 
   size_t offset = 0;
 
@@ -865,7 +931,7 @@ faith_decode_msg_request_body(const uint8_t                *payload,
 
   FAITH_DECODE_U64_BE_RETURN(payload, payload_size, offset, out->cl_req_id);
 
-  FAITH_ENVL_DECODE_EPILOGUE(FAITH_ENVL_CTS_MSG_REQUEST_BODY_SIZE, !=);
+  FAITH_DECODE_EPILOGUE(FAITH_ENVL_CTS_MSG_REQUEST_BODY_SIZE, !=);
 
   return FAITH_OK;
 }
@@ -874,7 +940,7 @@ faith_status_code_t faith_encode_msg_request_response_body(
     uint8_t *out_buf, faith_body_size_t *out_size, size_t buf_cap_in_bytes,
     const faith_envl_cts_msg_request_response_t *in) {
 
-  FAITH_ENVL_ENCODE_PROLOGUE(FAITH_ENVL_CTS_MSG_REQUEST_RESPONSE_BODY_SIZE);
+  FAITH_ENCODE_PROLOGUE(FAITH_ENVL_CTS_MSG_REQUEST_RESPONSE_BODY_SIZE);
 
   size_t offset = 0;
 
@@ -893,7 +959,7 @@ faith_status_code_t faith_encode_msg_request_response_body(
   FAITH_ENCODE_U32_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
                              (uint32_t)in->type);
 
-  FAITH_ENVL_ENCODE_EPILOGUE(FAITH_ENVL_CTS_MSG_REQUEST_RESPONSE_BODY_SIZE, !=);
+  FAITH_ENCODE_EPILOGUE(FAITH_ENVL_CTS_MSG_REQUEST_RESPONSE_BODY_SIZE, !=);
 
   return FAITH_OK;
 }
@@ -902,7 +968,7 @@ faith_status_code_t faith_decode_msg_request_response_body(
     const uint8_t *payload, faith_body_size_t payload_size,
     faith_envl_cts_msg_request_response_t *out) {
 
-  FAITH_ENVL_DECODE_PROLOGUE(FAITH_ENVL_CTS_MSG_REQUEST_RESPONSE_BODY_SIZE, !=);
+  FAITH_DECODE_PROLOGUE(FAITH_ENVL_CTS_MSG_REQUEST_RESPONSE_BODY_SIZE, !=);
 
   size_t offset = 0;
   FAITH_DECODE_RETURN(payload, payload_size, offset, out->signature_response,
@@ -919,7 +985,7 @@ faith_status_code_t faith_decode_msg_request_response_body(
 
   FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset, out->type);
 
-  FAITH_ENVL_DECODE_EPILOGUE(FAITH_ENVL_CTS_MSG_REQUEST_RESPONSE_BODY_SIZE, !=);
+  FAITH_DECODE_EPILOGUE(FAITH_ENVL_CTS_MSG_REQUEST_RESPONSE_BODY_SIZE, !=);
 
   return FAITH_OK;
 }
@@ -928,7 +994,7 @@ faith_status_code_t faith_encode_msg_request_failed_body(
     uint8_t *out_buf, faith_body_size_t *out_size, size_t buf_cap_in_bytes,
     const faith_envl_stc_msg_request_failed_t *in) {
 
-  FAITH_ENVL_ENCODE_PROLOGUE(FAITH_ENVL_STC_MSG_REQUEST_FAILED_BODY_SIZE);
+  FAITH_ENCODE_PROLOGUE(FAITH_ENVL_STC_MSG_REQUEST_FAILED_BODY_SIZE);
 
   size_t offset = 0;
 
@@ -947,7 +1013,7 @@ faith_status_code_t faith_encode_msg_request_failed_body(
 
   FAITH_ENCODE_U64_BE_RETURN(out_buf, buf_cap_in_bytes, offset, in->cl_req_id);
 
-  FAITH_ENVL_ENCODE_EPILOGUE(FAITH_ENVL_STC_MSG_REQUEST_FAILED_BODY_SIZE, !=);
+  FAITH_ENCODE_EPILOGUE(FAITH_ENVL_STC_MSG_REQUEST_FAILED_BODY_SIZE, !=);
 
   return FAITH_OK;
 }
@@ -957,7 +1023,7 @@ faith_decode_msg_request_failed_body(const uint8_t    *payload,
                                      faith_body_size_t payload_size,
                                      faith_envl_stc_msg_request_failed_t *out) {
 
-  FAITH_ENVL_DECODE_PROLOGUE(FAITH_ENVL_STC_MSG_REQUEST_FAILED_BODY_SIZE, !=);
+  FAITH_DECODE_PROLOGUE(FAITH_ENVL_STC_MSG_REQUEST_FAILED_BODY_SIZE, !=);
 
   size_t offset = 0;
 
@@ -975,7 +1041,7 @@ faith_decode_msg_request_failed_body(const uint8_t    *payload,
 
   FAITH_DECODE_U64_BE_RETURN(payload, payload_size, offset, out->cl_req_id);
 
-  FAITH_ENVL_DECODE_EPILOGUE(FAITH_ENVL_STC_MSG_REQUEST_FAILED_BODY_SIZE, !=);
+  FAITH_DECODE_EPILOGUE(FAITH_ENVL_STC_MSG_REQUEST_FAILED_BODY_SIZE, !=);
 
   return FAITH_OK;
 }
@@ -985,7 +1051,7 @@ faith_encode_msg_request_ack_body(uint8_t *out_buf, faith_body_size_t *out_size,
                                   size_t buf_cap_in_bytes,
                                   const faith_envl_stc_msg_request_ack_t *in) {
 
-  FAITH_ENVL_ENCODE_PROLOGUE(FAITH_ENVL_STC_MSG_REQUEST_ACK_BODY_SIZE);
+  FAITH_ENCODE_PROLOGUE(FAITH_ENVL_STC_MSG_REQUEST_ACK_BODY_SIZE);
 
   size_t offset = 0;
 
@@ -994,7 +1060,7 @@ faith_encode_msg_request_ack_body(uint8_t *out_buf, faith_body_size_t *out_size,
   FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, in->srv_req_id.bytes,
                       sizeof(in->srv_req_id.bytes));
 
-  FAITH_ENVL_ENCODE_EPILOGUE(FAITH_ENVL_STC_MSG_REQUEST_ACK_BODY_SIZE, !=);
+  FAITH_ENCODE_EPILOGUE(FAITH_ENVL_STC_MSG_REQUEST_ACK_BODY_SIZE, !=);
 
   return FAITH_OK;
 }
@@ -1004,7 +1070,7 @@ faith_decode_msg_request_ack_body(const uint8_t    *payload,
                                   faith_body_size_t payload_size,
                                   faith_envl_stc_msg_request_ack_t *out) {
 
-  FAITH_ENVL_DECODE_PROLOGUE(FAITH_ENVL_STC_MSG_REQUEST_ACK_BODY_SIZE, !=);
+  FAITH_DECODE_PROLOGUE(FAITH_ENVL_STC_MSG_REQUEST_ACK_BODY_SIZE, !=);
 
   size_t offset = 0;
 
@@ -1013,7 +1079,7 @@ faith_decode_msg_request_ack_body(const uint8_t    *payload,
   FAITH_DECODE_RETURN(payload, payload_size, offset, out->srv_req_id.bytes,
                       sizeof(out->srv_req_id.bytes));
 
-  FAITH_ENVL_DECODE_EPILOGUE(FAITH_ENVL_STC_MSG_REQUEST_ACK_BODY_SIZE, !=);
+  FAITH_DECODE_EPILOGUE(FAITH_ENVL_STC_MSG_REQUEST_ACK_BODY_SIZE, !=);
 
   return FAITH_OK;
 }
@@ -1022,7 +1088,7 @@ faith_status_code_t faith_encode_msg_request_received_body(
     uint8_t *out_buf, faith_body_size_t *out_size, size_t buf_cap_in_bytes,
     const faith_envl_stc_msg_request_received_t *in) {
 
-  FAITH_ENVL_ENCODE_PROLOGUE(FAITH_ENVL_STC_MSG_REQUEST_RECEIVED_BODY_SIZE);
+  FAITH_ENCODE_PROLOGUE(FAITH_ENVL_STC_MSG_REQUEST_RECEIVED_BODY_SIZE);
 
   size_t offset = 0;
 
@@ -1033,7 +1099,7 @@ faith_status_code_t faith_encode_msg_request_received_body(
   FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, in->srv_req_id.bytes,
                       sizeof(in->srv_req_id.bytes));
 
-  FAITH_ENVL_ENCODE_EPILOGUE(FAITH_ENVL_STC_MSG_REQUEST_RECEIVED_BODY_SIZE, !=);
+  FAITH_ENCODE_EPILOGUE(FAITH_ENVL_STC_MSG_REQUEST_RECEIVED_BODY_SIZE, !=);
 
   return FAITH_OK;
 }
@@ -1042,7 +1108,7 @@ faith_status_code_t faith_decode_msg_request_received_body(
     const uint8_t *payload, faith_body_size_t payload_size,
     faith_envl_stc_msg_request_received_t *out) {
 
-  FAITH_ENVL_DECODE_PROLOGUE(FAITH_ENVL_STC_MSG_REQUEST_RECEIVED_BODY_SIZE, !=);
+  FAITH_DECODE_PROLOGUE(FAITH_ENVL_STC_MSG_REQUEST_RECEIVED_BODY_SIZE, !=);
 
   size_t offset = 0;
 
@@ -1052,7 +1118,7 @@ faith_status_code_t faith_decode_msg_request_received_body(
   FAITH_DECODE_RETURN(payload, payload_size, offset, out->srv_req_id.bytes,
                       sizeof(out->srv_req_id.bytes));
 
-  FAITH_ENVL_DECODE_EPILOGUE(FAITH_ENVL_STC_MSG_REQUEST_RECEIVED_BODY_SIZE, !=);
+  FAITH_DECODE_EPILOGUE(FAITH_ENVL_STC_MSG_REQUEST_RECEIVED_BODY_SIZE, !=);
 
   return FAITH_OK;
 }
@@ -1061,7 +1127,7 @@ faith_status_code_t faith_encode_msg_request_response_ack_body(
     uint8_t *out_buf, faith_body_size_t *out_size, size_t buf_cap_in_bytes,
     const faith_envl_stc_msg_request_response_ack_t *in) {
 
-  FAITH_ENVL_ENCODE_PROLOGUE(FAITH_ENVL_STC_MSG_REQUEST_RESPONSE_ACK_BODY_SIZE);
+  FAITH_ENCODE_PROLOGUE(FAITH_ENVL_STC_MSG_REQUEST_RESPONSE_ACK_BODY_SIZE);
 
   size_t offset = 0;
 
@@ -1070,7 +1136,7 @@ faith_status_code_t faith_encode_msg_request_response_ack_body(
   FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, in->srv_req_id.bytes,
                       sizeof(in->srv_req_id.bytes));
 
-  FAITH_ENVL_ENCODE_EPILOGUE(FAITH_ENVL_STC_MSG_REQUEST_RESPONSE_ACK_BODY_SIZE,
+  FAITH_ENCODE_EPILOGUE(FAITH_ENVL_STC_MSG_REQUEST_RESPONSE_ACK_BODY_SIZE,
                              !=);
 
   return FAITH_OK;
@@ -1080,7 +1146,7 @@ faith_status_code_t faith_decode_msg_request_response_ack_body(
     const uint8_t *payload, faith_body_size_t payload_size,
     faith_envl_stc_msg_request_response_ack_t *out) {
 
-  FAITH_ENVL_DECODE_PROLOGUE(FAITH_ENVL_STC_MSG_REQUEST_RESPONSE_ACK_BODY_SIZE,
+  FAITH_DECODE_PROLOGUE(FAITH_ENVL_STC_MSG_REQUEST_RESPONSE_ACK_BODY_SIZE,
                              !=);
 
   size_t offset = 0;
@@ -1090,7 +1156,7 @@ faith_status_code_t faith_decode_msg_request_response_ack_body(
   FAITH_DECODE_RETURN(payload, payload_size, offset, out->srv_req_id.bytes,
                       sizeof(out->srv_req_id.bytes));
 
-  FAITH_ENVL_DECODE_EPILOGUE(FAITH_ENVL_STC_MSG_REQUEST_RESPONSE_ACK_BODY_SIZE,
+  FAITH_DECODE_EPILOGUE(FAITH_ENVL_STC_MSG_REQUEST_RESPONSE_ACK_BODY_SIZE,
                              !=);
 
   return FAITH_OK;
@@ -1100,7 +1166,7 @@ faith_status_code_t faith_encode_msg_request_response_failed_body(
     uint8_t *out_buf, faith_body_size_t *out_size, size_t buf_cap_in_bytes,
     const faith_envl_stc_msg_request_response_failed_t *in) {
 
-  FAITH_ENVL_ENCODE_PROLOGUE(
+  FAITH_ENCODE_PROLOGUE(
       FAITH_ENVL_STC_MSG_REQUEST_RESPONSE_FAILED_BODY_SIZE);
 
   size_t offset = 0;
@@ -1123,7 +1189,7 @@ faith_status_code_t faith_encode_msg_request_response_failed_body(
   FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, in->srv_req_id.bytes,
                       sizeof(in->srv_req_id.bytes));
 
-  FAITH_ENVL_ENCODE_EPILOGUE(
+  FAITH_ENCODE_EPILOGUE(
       FAITH_ENVL_STC_MSG_REQUEST_RESPONSE_FAILED_BODY_SIZE, !=);
 
   return FAITH_OK;
@@ -1133,7 +1199,7 @@ faith_status_code_t faith_decode_msg_request_response_failed_body(
     const uint8_t *payload, faith_body_size_t payload_size,
     faith_envl_stc_msg_request_response_failed_t *out) {
 
-  FAITH_ENVL_DECODE_PROLOGUE(
+  FAITH_DECODE_PROLOGUE(
       FAITH_ENVL_STC_MSG_REQUEST_RESPONSE_FAILED_BODY_SIZE, !=);
 
   size_t offset = 0;
@@ -1155,7 +1221,7 @@ faith_status_code_t faith_decode_msg_request_response_failed_body(
   FAITH_DECODE_RETURN(payload, payload_size, offset, out->srv_req_id.bytes,
                       sizeof(out->srv_req_id.bytes));
 
-  FAITH_ENVL_DECODE_EPILOGUE(
+  FAITH_DECODE_EPILOGUE(
       FAITH_ENVL_STC_MSG_REQUEST_RESPONSE_FAILED_BODY_SIZE, !=);
 
   return FAITH_OK;
@@ -1165,7 +1231,7 @@ faith_status_code_t faith_encode_msg_request_responded_body(
     uint8_t *out_buf, faith_body_size_t *out_size, size_t buf_cap_in_bytes,
     const faith_envl_stc_msg_request_responded_t *in) {
 
-  FAITH_ENVL_ENCODE_PROLOGUE(
+  FAITH_ENCODE_PROLOGUE(
       FAITH_ENVL_STC_MSG_REQUEST_RESPONDED_BODY_SIZE);
 
   switch (in->type) {
@@ -1192,7 +1258,7 @@ faith_status_code_t faith_encode_msg_request_responded_body(
   FAITH_ENCODE_U32_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
                              (uint32_t)in->type);
 
-  FAITH_ENVL_ENCODE_EPILOGUE(
+  FAITH_ENCODE_EPILOGUE(
       FAITH_ENVL_STC_MSG_REQUEST_RESPONDED_BODY_SIZE, !=);
 
   return FAITH_OK;
@@ -1202,7 +1268,7 @@ faith_status_code_t faith_decode_msg_request_responded_body(
     const uint8_t *payload, faith_body_size_t payload_size,
     faith_envl_stc_msg_request_responded_t *out) {
 
-  FAITH_ENVL_DECODE_PROLOGUE(
+  FAITH_DECODE_PROLOGUE(
       FAITH_ENVL_STC_MSG_REQUEST_RESPONDED_BODY_SIZE, !=);
 
   size_t offset = 0;
@@ -1228,7 +1294,7 @@ faith_status_code_t faith_decode_msg_request_responded_body(
     return FAITH_ERR_BAD_FRAME;
   }
 
-  FAITH_ENVL_DECODE_EPILOGUE(
+  FAITH_DECODE_EPILOGUE(
       FAITH_ENVL_STC_MSG_REQUEST_RESPONDED_BODY_SIZE, !=);
 
   return FAITH_OK;
@@ -1394,7 +1460,7 @@ faith_status_code_t faith_gen_sign_buf_hello_handshake(
     uint8_t *out_buf, size_t *out_size, size_t buf_cap_in_bytes,
     const faith_signature_hello_handshake_t *in) {
 
-  FAITH_ENVL_ENCODE_PROLOGUE(FAITH_SIGNATURE_HELLO_HANDSHAKE_SIZE);
+  FAITH_ENCODE_PROLOGUE(FAITH_SIGNATURE_HELLO_HANDSHAKE_SIZE);
 
   size_t offset = 0;
 
@@ -1413,7 +1479,7 @@ faith_status_code_t faith_gen_sign_buf_hello_handshake(
   FAITH_ENCODE_U64_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
                              in->server_nonce);
 
-  FAITH_ENVL_ENCODE_EPILOGUE(FAITH_SIGNATURE_HELLO_HANDSHAKE_SIZE, !=);
+  FAITH_ENCODE_EPILOGUE(FAITH_SIGNATURE_HELLO_HANDSHAKE_SIZE, !=);
 
   return FAITH_OK;
 }
@@ -1422,7 +1488,7 @@ faith_status_code_t faith_gen_sign_buf_device_link_response(
     uint8_t *out_buf, size_t *out_size, size_t buf_cap_in_bytes,
     const faith_signature_device_link_response_t *in) {
 
-  FAITH_ENVL_ENCODE_PROLOGUE(FAITH_SIGNATURE_DEVICE_LINK_RESPONSE_SIZE);
+  FAITH_ENCODE_PROLOGUE(FAITH_SIGNATURE_DEVICE_LINK_RESPONSE_SIZE);
 
   size_t offset = 0;
 
@@ -1458,7 +1524,7 @@ faith_status_code_t faith_gen_sign_buf_msg_request_response(
     uint8_t *out_buf, size_t *out_size, size_t buf_cap_in_bytes,
     const faith_signature_msg_request_response_t *in) {
 
-  FAITH_ENVL_ENCODE_PROLOGUE(FAITH_SIGNATURE_MSG_REQUEST_RESPONSE_SIZE);
+  FAITH_ENCODE_PROLOGUE(FAITH_SIGNATURE_MSG_REQUEST_RESPONSE_SIZE);
 
   size_t offset = 0;
 
@@ -1478,7 +1544,7 @@ faith_status_code_t faith_gen_sign_buf_msg_request_response(
   FAITH_ENCODE_U32_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
                              (uint32_t)in->type);
 
-  FAITH_ENVL_ENCODE_EPILOGUE(FAITH_SIGNATURE_MSG_REQUEST_RESPONSE_SIZE, !=);
+  FAITH_ENCODE_EPILOGUE(FAITH_SIGNATURE_MSG_REQUEST_RESPONSE_SIZE, !=);
 
   return FAITH_OK;
 }

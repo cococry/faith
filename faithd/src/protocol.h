@@ -44,6 +44,10 @@
   _FAITH_BODY_SIZE(sizeof(uint64_t) /* client-server nonce */ +                \
                    sizeof(uint64_t)) /* server sent at ms */
 
+#define FAITH_MSG_PING_PAYLOAD_SIZE                                            \
+  _FAITH_BODY_SIZE(sizeof(uint64_t) /* client-server nonce */ +                \
+                   sizeof(uint64_t)) /* server sent at ms */
+
 #define FAITH_ENVL_HELLO_BODY_SIZE                                             \
   _FAITH_BODY_SIZE(FAITH_DEVICE_ID_SIZE /* client device id */ +               \
                    FAITH_ED25519_PUBLIC_KEY_SIZE /* client public key */ +     \
@@ -403,7 +407,7 @@
   _FAITH_ENCODE_INT_BE_RETURN(buf, buf_cap, offset, value, uint64_t,           \
                               faith_write_u64_be)
 
-#define FAITH_ENVL_DECODE_PROLOGUE(envl_size, sign)                            \
+#define FAITH_DECODE_PROLOGUE(envl_size, sign)                            \
   do {                                                                         \
     const size_t _fh_expected_size = (size_t)(envl_size);                      \
                                                                                \
@@ -439,7 +443,7 @@
     }                                                                          \
   } while (0)
 
-#define FAITH_ENVL_DECODE_EPILOGUE(envl_size, sign)                            \
+#define FAITH_DECODE_EPILOGUE(envl_size, sign)                            \
   do {                                                                         \
     const size_t _fh_expected_size = (size_t)(envl_size);                      \
     const size_t _fh_offset = (size_t)offset;                                  \
@@ -457,7 +461,7 @@
     }                                                                          \
   } while (0)
 
-#define FAITH_ENVL_DECODE_EPILOGUE_DNY(envl_size, sign)                        \
+#define FAITH_DECODE_EPILOGUE_DNY(envl_size, sign)                        \
   do {                                                                         \
     const size_t _fh_expected_size = (size_t)(envl_size);                      \
     const size_t _fh_offset = (size_t)offset;                                  \
@@ -474,7 +478,7 @@
     }                                                                          \
   } while (0)
 
-#define FAITH_ENVL_ENCODE_PROLOGUE(envl_size)                                  \
+#define FAITH_ENCODE_PROLOGUE(envl_size)                                  \
   do {                                                                         \
     const size_t _fh_expected_size = (size_t)(envl_size);                      \
                                                                                \
@@ -501,7 +505,7 @@
     }                                                                          \
   } while (0)
 
-#define FAITH_ENVL_ENCODE_EPILOGUE(envl_size, sign)                            \
+#define FAITH_ENCODE_EPILOGUE(envl_size, sign)                            \
   do {                                                                         \
     const size_t _fh_expected_size = (size_t)(envl_size);                      \
     const size_t _fh_offset = (size_t)offset;                                  \
@@ -592,7 +596,8 @@ typedef struct {
   X(FAITH_ERR_BAD_ENVELOPE, 21)                                                \
   X(FAITH_ERR_NOT_STARTED, 22)                                                 \
   X(FAITH_ERR_ALREADY_CONNECTED, 23)                                           \
-  X(FAITH_ERR_ALREADY_EXISTS, 24)
+  X(FAITH_ERR_ALREADY_EXISTS, 24)                                              \
+  X(FAITH_ERR_ALREADY_REMOVED, 25)
 
 typedef enum {
 #define X(name, value) name = value,
@@ -744,6 +749,16 @@ typedef struct {
 
   uint8_t *body;
 } faith_envelope_t;
+
+typedef struct {
+  uint64_t nonce;
+  uint64_t client_sent_at_ms;
+} faith_msg_ping_t;
+
+typedef struct {
+  uint64_t nonce;
+  uint64_t server_sent_at_ms;
+} faith_msg_pong_t;
 
 typedef struct {
   // Auth ID of the session that wants to link a new device
@@ -911,12 +926,29 @@ faith_msg_request_fail_reason_name(faith_msg_request_fail_reason_t reason);
 const char *faith_msg_request_response_fail_reason_name(
     faith_msg_request_response_fail_reason_t reason);
 const char *
-faith_msg_request_response_type_name(
-    faith_msg_request_response_type_t type);
+faith_msg_request_response_type_name(faith_msg_request_response_type_t type);
+
+faith_status_code_t faith_encode_ping(uint8_t                *out_buf,
+                                      faith_body_size_t      *out_size,
+                                      size_t                  buf_cap_in_bytes,
+                                      const faith_msg_ping_t *in);
+
+faith_status_code_t faith_decode_ping(const uint8_t    *payload,
+                                      size_t            payload_size,
+                                      faith_msg_ping_t *out);
+
+faith_status_code_t faith_encode_pong(uint8_t                *out_buf,
+                                      faith_body_size_t      *out_size,
+                                      size_t                  buf_cap_in_bytes,
+                                      const faith_msg_pong_t *in);
+
+faith_status_code_t faith_decode_pong(const uint8_t    *payload,
+                                      size_t            payload_size,
+                                      faith_msg_pong_t *out);
 
 faith_status_code_t faith_encode_envelope(uint8_t *out_buf, size_t *out_size,
                                           size_t buf_cap_in_bytes,
-                                          const faith_envelope_t *env);
+                                          const faith_envelope_t *in);
 
 faith_status_code_t faith_decode_envelope(const uint8_t    *payload,
                                           size_t            payload_size,

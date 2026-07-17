@@ -98,7 +98,7 @@ int main(int argc, char **argv) {
   }
 
   bool pending_device_link_request = false;
-  bool pending_msg_request = true;
+  bool pending_msg_request = false;
 
   printf("Type messages and press Enter. Type /quit to exit.\n");
 
@@ -183,7 +183,7 @@ int main(int argc, char **argv) {
             printf("Device link denied.\n");
           }
         } else {
-          printf("Please answer y or n.\n");
+          printf("Please answer y or n. (pending device link)\n");
           printf("(y)es/n(o) ? ");
           fflush(stdout);
           continue;
@@ -221,7 +221,7 @@ int main(int argc, char **argv) {
             printf("Message request denied.\n");
           }
         } else {
-          printf("Please answer y or n.\n");
+          printf("Please answer y or n (pending message request).\n");
           printf("(y)es/n(o) ? ");
           fflush(stdout);
           continue;
@@ -319,7 +319,7 @@ int main(int argc, char **argv) {
           printf("> ");
           break;
         case FAITH_EVENT_MSG_REQUEST_RECEIVED: {
-
+          printf("Received message request.\n");
           pending_msg_request = true;
           memcpy(msg_request.srv_req_id.bytes, ev.value0_128,
                  FAITH_REQUEST_ID_SIZE);
