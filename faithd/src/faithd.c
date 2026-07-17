@@ -33,6 +33,38 @@
 #define PORT       4433
 #define MAX_EVENTS 1024
 
+#define _FH_FOR_EACH_AUTH_DEVICE(SERVER, AUTH_ID, RECIPIENT, STATUS_OUT, BODY) \
+  do {                                                                         \
+    struct server_state_t        *_fh_iter_server = (SERVER);                  \
+    const faith_client_id_t      *_fh_iter_auth_id = (AUTH_ID);                \
+    struct client_route_device_t *_fh_iter_devices = NULL;                     \
+                                                                               \
+    (STATUS_OUT) = routing_get_devices(&_fh_iter_server->rt, _fh_iter_auth_id, \
+                                       &_fh_iter_devices);                     \
+                                                                               \
+    if ((STATUS_OUT) == FAITH_ERR_NOT_FOUND) {                                 \
+      (STATUS_OUT) = FAITH_OK;                                                 \
+    } else if ((STATUS_OUT) == FAITH_OK) {                                     \
+      ptrdiff_t _fh_iter_count = hmlen(_fh_iter_devices);                      \
+                                                                               \
+      for (ptrdiff_t _fh_iter_i = 0; _fh_iter_i < _fh_iter_count;              \
+           ++_fh_iter_i) {                                                     \
+        if (!_fh_iter_devices[_fh_iter_i].value ||                             \
+            !_fh_iter_devices[_fh_iter_i].value->conn)                         \
+          continue;                                                            \
+                                                                               \
+        struct client_conn_t *(RECIPIENT) =                                    \
+            _fh_iter_devices[_fh_iter_i].value->conn;                          \
+                                                                               \
+        if ((RECIPIENT)->closing || !(RECIPIENT)->authorized ||                \
+            (RECIPIENT)->state != CLIENT_OPEN)                                 \
+          continue;                                                            \
+                                                                               \
+        BODY                                                                   \
+      }                                                                        \
+    }                                                                          \
+  } while (0)
+
 struct server_cfg_t {
   int verbose_logging;
 };
@@ -397,8 +429,8 @@ static faith_status_code_t storage_store_msg_request(
   if (!st || !request_id || !request)
     return FAITH_ERR_INVALID;
 
-  /* Refuse to overwrite an existing request. This also handles the extremely
-   * unlikely case of a randomly generated server request ID colliding. */
+  /* This also handles the extremely unlikely case of a randomly generated
+   * server request ID colliding. */
   if (hmgetp_null(st->msg_requests, *request_id))
     return FAITH_ERR_ALREADY_EXISTS;
 
@@ -495,10 +527,8 @@ static faith_status_code_t close_client(struct server_state_t *s,
     return FAITH_ERR_INVALID;
 
   struct client_conn_t *cl = *cl_ptr;
-  faith_status_code_t   result = FAITH_OK;
 
-  *cl_ptr = NULL;
-
+  faith_status_code_t result = FAITH_OK;
   if (cl->state == CLIENT_WAIT_FOR_DEVICE_LINK_RESPONSE) {
     faith_status_code_t rc = server_cancel_pending_device_link(s, cl);
 
@@ -513,36 +543,38 @@ static faith_status_code_t close_client(struct server_state_t *s,
     }
   }
 
+  *cl_ptr = NULL;
+
   server_remove_client(s, cl);
 
-  if (cl->authorized) {
-    if (cl->pending_device_link_conn != NULL &&
-        cl->pending_device_link_req != NULL) {
-      struct client_route_device_t *devices = NULL;
-      faith_status_code_t           rc =
-          routing_get_devices(&s->rt, &cl->auth_id, &devices);
-      if (rc != FAITH_OK || devices == NULL) {
-        nob_log(ERROR,
-                "[client=%" PRIu64
-                " fd=%d] Failed to enumerate account devices: %s",
-                cl->conn_id, cl->fd, faith_status_code_name(rc));
-        if (result == FAITH_OK)
-          result = rc;
-      } else if (hmlen(devices) - 1 == 0) {
-        rc = server_disconnect_client(
-            s, cl->pending_device_link_conn, FAITH_DISCONNECT_TEMPORARY_FAILURE,
-            FAITH_CLIENT_RECONNECT_ALLOWED, 0, 0,
-            "All authorized devices of the account you "
-            "are trying to link to have disconnected.");
-        if (result == FAITH_OK)
-          result = rc;
-      }
-      free(cl->pending_device_link_req);
-      cl->pending_device_link_req = NULL;
-      cl->pending_device_link_conn = NULL;
+  if (!shutdown_requested && cl->authorized && (cl->pending_device_link_conn != NULL &&
+                         cl->pending_device_link_req != NULL)) {
+    struct client_route_device_t *devices = NULL;
+    faith_status_code_t           rc =
+        routing_get_devices(&s->rt, &cl->auth_id, &devices);
+    if (rc != FAITH_OK || devices == NULL) {
+      nob_log(ERROR,
+              "[client=%" PRIu64
+              " fd=%d] Failed to enumerate account devices: %s",
+              cl->conn_id, cl->fd, faith_status_code_name(rc));
+      if (result == FAITH_OK)
+        result = rc;
+    } else if (hmlen(devices) - 1 == 0) {
+      rc = server_disconnect_client(s, cl->pending_device_link_conn,
+                                    FAITH_DISCONNECT_TEMPORARY_FAILURE,
+                                    FAITH_CLIENT_RECONNECT_ALLOWED, 0, 0,
+                                    "All authorized devices of the account you "
+                                    "are trying to link to have disconnected.");
+      if (result == FAITH_OK)
+        result = rc;
     }
+    free(cl->pending_device_link_req);
+    cl->pending_device_link_req = NULL;
+    cl->pending_device_link_conn = NULL;
+  }
 
-    // TODO: persistent sessions 
+  if (cl->authorized) {
+    // TODO: persistent sessions
     faith_status_code_t rc =
         routing_unregister_session(&s->rt, &cl->auth_id, &cl->device_id);
 
@@ -837,8 +869,18 @@ server_enqueue_output_bytes(struct client_conn_t *cl, const uint8_t *bytes,
   }
 
   if (cl->out_size > FAITH_MAX_CLIENT_OUT_QUEUE ||
-      n_bytes > FAITH_MAX_CLIENT_OUT_QUEUE - cl->out_size)
+      n_bytes > FAITH_MAX_CLIENT_OUT_QUEUE - cl->out_size) {
+    nob_log(ERROR,
+            "[client=%" PRIu64 " fd=%d] Output queue overflow: "
+            "queued=%zu bytes, requested=%zu bytes, limit=%zu bytes, "
+            "available=%zu bytes",
+            cl->conn_id, cl->fd, cl->out_size, n_bytes,
+            (size_t)FAITH_MAX_CLIENT_OUT_QUEUE,
+            cl->out_size <= FAITH_MAX_CLIENT_OUT_QUEUE
+                ? (size_t)FAITH_MAX_CLIENT_OUT_QUEUE - cl->out_size
+                : 0);
     return FAITH_ERR_OVERFLOW;
+  }
 
   const size_t needed = cl->out_size + n_bytes;
 
@@ -862,8 +904,14 @@ server_enqueue_output_bytes(struct client_conn_t *cl, const uint8_t *bytes,
         new_cap = FAITH_MAX_CLIENT_OUT_QUEUE;
     }
 
-    if (new_cap < needed)
+    if (new_cap < needed) {
+      nob_log(ERROR,
+
+              "[client=%" PRIu64 " fd=%d] Output queue overflow: "
+              "Need %zu bytes but can only allocate %zu bytes.",
+              cl->conn_id, cl->fd, needed, new_cap);
       return FAITH_ERR_OVERFLOW;
+    }
 
     uint8_t *p = realloc(cl->out_buf, new_cap);
     if (!p)
@@ -920,12 +968,7 @@ server_send_over_wire(struct server_state_t *s, struct client_conn_t *cl,
     _FH_CHECK(server_enqueue_output_bytes(cl, wire_data, wire_size, &s->cfg));
 
     if (_fh_rc != FAITH_OK) {
-      if (_fh_rc == FAITH_ERR_OVERFLOW || _fh_rc == FAITH_ERR_NOMEM) {
-        server_disconnect_client(
-            s, cl, FAITH_DISCONNECT_MEMORY_LIMIT,
-            FAITH_CLIENT_RECONNECT_ALLOWED, 0, 0,
-            "The client exceeded it's output data queue limit.");
-      }
+      free(wire_data);
       return _fh_rc;
     }
   }
@@ -1506,6 +1549,9 @@ static faith_status_code_t server_handle_newly_joined_device(
   /* Send DEVICE_AUTH_PENDING to the connection that requested the
    * new device */
   _FH_CHECK_RETURN(server_send_device_auth_pending(s, cl));
+  /* temporarily assign <cl->auth_id> for disconnection purposes later. this
+   * does not mean that the client is authorized. */
+  cl->auth_id = params->sender_auth_id;
   set_client_state(s, cl, CLIENT_WAIT_FOR_DEVICE_LINK_RESPONSE);
 
   return FAITH_OK;
@@ -1993,7 +2039,14 @@ server_handle_device_link_response(struct server_state_t  *s,
   ack_envl.type = FAITH_ENVELOPE_DEVICE_AUTH_RESPONSE_ACK;
   _FH_CHECK_RETURN(server_route_envelope(s, cl, &cl->auth_id, &ack_envl));
 
-  return rc;
+  faith_status_code_t device_loop_rc = FAITH_OK;
+  _FH_FOR_EACH_AUTH_DEVICE(s, &cl->auth_id, recipient, device_loop_rc, {
+    free(recipient->pending_device_link_req);
+    recipient->pending_device_link_conn = NULL;
+    recipient->pending_device_link_req = NULL;
+  });
+
+  return device_loop_rc == FAITH_OK ? rc : device_loop_rc;
 
 defer: {
   /* ================================================= */
@@ -2870,21 +2923,13 @@ static int client_output_empty(const struct client_conn_t *cl) {
 }
 
 static void server_begin_shutdown(struct server_state_t *s) {
-  for (struct client_conn_t *cl = s->clients; cl != NULL;) {
+  struct client_conn_t *cl = s->clients;
+  while (cl != NULL) {
     struct client_conn_t *next = cl->next;
 
-    faith_status_code_t rc = server_disconnect_client(
-        s, cl, FAITH_DISCONNECT_SERVER_SHUTDOWN,
-        FAITH_CLIENT_RECONNECT_FORBIDDEN, 0, 0, "The server has shut down.");
-
-    if (rc != FAITH_OK) {
-      nob_log(ERROR, "Failed to send shutdown disconnect to client: %s",
-              faith_status_code_name(rc));
-
-      struct client_conn_t *to_close = cl;
-      _FH_CHECK(close_client(s, &to_close));
-    }
-
+    _FH_CHECK(server_disconnect_client(s, cl, FAITH_DISCONNECT_SERVER_SHUTDOWN,
+                                       FAITH_CLIENT_RECONNECT_FORBIDDEN, 0, 0,
+                                       "The server has shut down"));
     cl = next;
   }
 }
