@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-#include "../shared.h"
+#include "../protocol.h"
 
 #define FAITH_EVENT_TYPES(X)                                                   \
   X(FAITH_EVENT_NONE, 0)                                                       \
