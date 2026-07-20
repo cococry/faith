@@ -50,5 +50,4 @@ int tls_BIO_ctrl_pending(const tls_state_fd_t *state);
 
 faith_status_code_t tls_shutdown(tls_state_fd_t *state);
 
-
 faith_status_code_t tls_destroy(tls_context_t *tls);
