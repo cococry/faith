@@ -2544,7 +2544,7 @@ static faith_status_code_t try_parse_frame_from_buffer(const uint8_t *payload,
     return rc;
   }
 
-  *consumed_out = out->frame_size + FAITH_FRAME_LENGTH_SIZE;;
+  *consumed_out = out->frame_size + FAITH_FRAME_LENGTH_SIZE;
 
   return FAITH_OK;
 }
@@ -2670,7 +2670,7 @@ static int drive_client_read(struct server_state_t *s, struct client_conn_t *cl,
     if (cl->closing)
       return -1;
 
-    if (cfg->verbose_logging) {
+    if (cfg->verbose_logging) { 
       nob_log(INFO, "[client=%" PRIu64 " fd=%i] Success handling client frame.",
               cl->conn_id, cl->fd);
     }
