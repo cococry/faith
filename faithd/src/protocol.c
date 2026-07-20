@@ -1,4 +1,4 @@
-#include "shared.h"
+#include "protocol.h"
 
 #include <openssl/rand.h>
 #include <openssl/ssl.h>
