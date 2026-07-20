@@ -1,5 +1,4 @@
 #include "client/client.h"
-#include "shared.h"
 
 #include <errno.h>
 #include <poll.h>

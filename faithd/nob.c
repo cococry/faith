@@ -79,7 +79,7 @@ bool build()
   nob_cc_flags(&cmd);
   nob_cc_output(&cmd, BUILD_FOLDER"faithd");
   nob_cmd_append(&cmd, "-lssl", "-lcrypto");
-  nob_cc_inputs(&cmd, "src/faithd.c", "src/shared.c");
+  nob_cc_inputs(&cmd, "src/faithd.c", "src/protocol.c", "src/transport/tls.c");
   
   if (!cmd_run(&cmd)) return false;
 
@@ -87,7 +87,7 @@ bool build()
   nob_cc_flags(&cmd);
   nob_cc_output(&cmd, BUILD_FOLDER"test_suite");
   nob_cmd_append(&cmd, "-lssl", "-lcrypto");
-  nob_cc_inputs(&cmd, "src/client_test_suite.c", "src/shared.c", "src/client/client.c");
+  nob_cc_inputs(&cmd, "src/client_test_suite.c", "src/protocol.c", "src/client/client.c");
   
   if (!cmd_run(&cmd)) return false;
 

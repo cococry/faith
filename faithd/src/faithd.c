@@ -1,5 +1,7 @@
 #define _GNU_SOURCE
 
+#include "transport/tls.h"
+
 #include <openssl/crypto.h>
 #include <openssl/err.h>
 #include <openssl/rand.h>
@@ -25,6 +27,8 @@
 #include <unistd.h>
 
 #define NOB_IMPLEMENTATION
+#include "../third_party/nob.h"
+
 #include "protocol.h"
 
 #define STB_DS_IMPLEMENTATION
@@ -97,7 +101,7 @@ struct client_conn_t {
   faith_client_id_t   auth_id;
   faith_device_id_t   device_id;
   int                 fd;
-  SSL                *ssl;
+  tls_state_fd_t      tls;
   enum client_state_t state;
 
   uint32_t ev_mask;
@@ -170,7 +174,8 @@ struct storage_state_t {
 struct server_state_t {
   int      listenfd;
   int      epoll_fd;
-  SSL_CTX *ssl_ctx;
+
+  tls_context_t tls;
 
   atomic_uint_fast64_t  next_client_id;
   struct client_conn_t *clients;
@@ -611,12 +616,13 @@ static faith_status_code_t close_client(struct server_state_t *s,
     }
   }
 
-  if (cl->ssl) {
-    /* Frees the local TLS state. It does not perform a graceful
-     * TLS shutdown exchange with the peer. */
-    SSL_set_shutdown(cl->ssl, SSL_SENT_SHUTDOWN | SSL_RECEIVED_SHUTDOWN);
-    SSL_free(cl->ssl);
-    cl->ssl = NULL;
+  {
+    faith_status_code_t rc = tls_shutdown(&cl->tls);
+    if (rc != FAITH_OK) {
+      nob_log(ERROR, "[client=%" PRIu64 "] TLS shutdown failed: %s (%d)",
+              cl->conn_id, faith_status_code_name(rc), (int)rc);
+      result = rc;
+    }
   }
 
   const int      log_fd = cl->fd;
@@ -762,10 +768,7 @@ void server_destroy(struct server_state_t *s) {
     s->epoll_fd = -1;
   }
 
-  if (s->ssl_ctx) {
-    SSL_CTX_free(s->ssl_ctx);
-    s->ssl_ctx = NULL;
-  }
+  _FH_CHECK(tls_destroy(&s->tls));
 
   nob_log(INFO, "Destroyed server context.");
 }
@@ -2018,8 +2021,8 @@ server_handle_device_link_response(struct server_state_t  *s,
 
 defer: {
   /* ================================================= */
-  /* This path punishes the pending client that
-   * requested to be linked to this auth_id. */
+  /* This path PUNISHES the client that requested the 
+   * conversation. They will be executed. */
   /* ================================================= */
 
   /* Copies for logging */
@@ -2496,7 +2499,11 @@ server_read_more_ssl_bytes(struct client_conn_t      *cl,
 
   uint8_t tmp[4096];
 
-  int nread = SSL_read(cl->ssl, tmp, sizeof(tmp));
+  int nread = 0;
+  int err = tls_read(&cl->tls, tmp, sizeof(tmp), &nread);
+  if (err == INT_MAX) {
+    return READ_FRAME_ERROR;
+  }
 
   if (nread > 0) {
     faith_status_code_t rc =
@@ -2507,8 +2514,6 @@ server_read_more_ssl_bytes(struct client_conn_t      *cl,
 
     return READ_FRAME_GOT_BYTES;
   }
-
-  int err = SSL_get_error(cl->ssl, nread);
 
   if (err == SSL_ERROR_WANT_READ)
     return READ_FRAME_WANT_READ;
@@ -2758,18 +2763,13 @@ static void accept_clients(struct server_state_t *s) {
     /* Add client to linked list of clients */
     server_add_client(s, cl);
 
-    // create SSL object for client
-    cl->ssl = SSL_new(s->ssl_ctx);
-    if (!cl->ssl) {
-      nob_log(ERROR, "SSL_new() failed for client connection (FD: %i)",
-              client_fd);
-      _FH_CHECK(close_client(s, &cl));
-      continue;
+    {
+      _FH_CHECK(tls_new_with_fd(&s->tls, cl->fd, &cl->tls));
+      if (_fh_rc != FAITH_OK) {
+        _FH_CHECK(close_client(s, &cl));
+        continue;
+      }
     }
-
-    // set file descriptor of ssl object
-    SSL_set_fd(cl->ssl, cl->fd);
-    SSL_set_accept_state(cl->ssl);
 
     struct epoll_event ev;
     memset(&ev, 0, sizeof(ev));
@@ -2789,9 +2789,13 @@ static void accept_clients(struct server_state_t *s) {
 
 static faith_status_code_t drive_tls_handshake(struct server_state_t *s,
                                                struct client_conn_t  *cl) {
-  int rc = SSL_accept(cl->ssl);
+  int err = tls_accept(&cl->tls);
 
-  if (rc == 1) {
+  if (err == INT_MAX) {
+    return FAITH_ERR_INVALID;
+  }
+
+  if (err == SSL_ERROR_NONE) {
     set_client_state(s, cl, CLIENT_WAIT_FOR_HELLO);
 
     if (modify_client_ev_mask(s->epoll_fd, cl, cl->ev_mask | EPOLLIN) < 0) {
@@ -2801,8 +2805,6 @@ static faith_status_code_t drive_tls_handshake(struct server_state_t *s,
 
     return FAITH_OK;
   }
-
-  int err = SSL_get_error(cl->ssl, rc);
 
   if (err == SSL_ERROR_WANT_READ) {
     if (modify_client_ev_mask(s->epoll_fd, cl, cl->ev_mask | EPOLLIN) < 0) {
@@ -2840,9 +2842,19 @@ static faith_status_code_t flush_client_output(int                   epoll_fd,
     size_t remaining = cl->out_size - cl->out_off;
     /* becaused this is passed as int to SSL, we need to clamp to integer
      * range */
-    int clamped = remaining > INT_MAX ? INT_MAX : (int)remaining;
+    int clamped_write = remaining > INT_MAX ? INT_MAX : (int)remaining;
 
-    int nwrite = SSL_write(cl->ssl, cl->out_buf + cl->out_off, clamped);
+    int nwrite = 0;
+    int err = tls_write(&cl->tls, cl->out_buf + cl->out_off, clamped_write, &nwrite);
+
+    if (err == INT_MAX) {
+      nob_log(ERROR,
+              "[client=%" PRIu64 " fd=%i] failed to write %i bytes over the "
+                                 "wire. Invalid arguments specified.",
+              cl->conn_id, cl->fd, nwrite);
+      continue;
+    }
+
     nob_log(INFO, "[client=%" PRIu64 " fd=%i] wrote %i bytes over the wire.",
             cl->conn_id, cl->fd, nwrite);
 
@@ -2850,8 +2862,6 @@ static faith_status_code_t flush_client_output(int                   epoll_fd,
       cl->out_off += (size_t)nwrite;
       continue;
     }
-
-    int err = SSL_get_error(cl->ssl, nwrite);
 
     if (err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) {
       if (modify_client_ev_mask(epoll_fd, cl,
@@ -2886,10 +2896,13 @@ static faith_status_code_t flush_client_output(int                   epoll_fd,
 }
 
 static int client_output_empty(const struct client_conn_t *cl) {
-  if (!cl || !cl->ssl)
+  if (!cl)
     return 0;
 
-  return cl->out_size == 0 && BIO_ctrl_pending(SSL_get_wbio(cl->ssl)) == 0;
+  int rc = tls_BIO_ctrl_pending(&cl->tls);
+  if(rc == INT_MAX) return 0;
+
+  return cl->out_size == 0 && rc == 0;
 }
 
 static void server_begin_shutdown(struct server_state_t *s) {
@@ -3022,57 +3035,6 @@ int loop(struct server_state_t *s) {
   return 0;
 }
 
-static int init_ssl(SSL_CTX **ctx) {
-  int result = 0;
-
-  *ctx = SSL_CTX_new(TLS_server_method());
-  if (*ctx == NULL) {
-    nob_log(ERROR, "failed to create server SSL_CTX");
-    return_defer(1);
-  }
-
-  if (!SSL_CTX_set_min_proto_version(*ctx, TLS1_2_VERSION)) {
-    nob_log(ERROR, "failed to set the minimum TLS protocol version");
-    return_defer(1);
-  }
-
-  long opts = SSL_OP_IGNORE_UNEXPECTED_EOF | SSL_OP_NO_RENEGOTIATION |
-              SSL_OP_SERVER_PREFERENCE;
-
-  SSL_CTX_set_options(*ctx, opts);
-
-  if (SSL_CTX_use_certificate_chain_file(*ctx, "chain.pem") <= 0) {
-    nob_log(ERROR, "failed to load the server certificate chain file");
-    return_defer(1);
-  }
-
-  if (SSL_CTX_use_PrivateKey_file(*ctx, "pkey.pem", SSL_FILETYPE_PEM) <= 0) {
-    nob_log(ERROR, "failed loading the server private key file, "
-                   "possible key/cert mismatch?");
-    return_defer(1);
-  }
-
-  static const char cache_id[] = "faithd-server";
-
-  SSL_CTX_set_session_id_context(*ctx, (void *)cache_id, sizeof(cache_id));
-  SSL_CTX_set_session_cache_mode(*ctx, SSL_SESS_CACHE_SERVER);
-  SSL_CTX_sess_set_cache_size(*ctx, 1024);
-  SSL_CTX_set_timeout(*ctx, 3600);
-  SSL_CTX_set_verify(*ctx, SSL_VERIFY_NONE, NULL);
-
-  nob_log(INFO, "SSL initialized.");
-
-  return 0;
-
-defer:
-  ERR_print_errors_fp(stderr);
-  if (*ctx) {
-    SSL_CTX_free(*ctx);
-    *ctx = NULL;
-  }
-  return result;
-}
-
 static int init_listen_sock(void) {
   struct sockaddr_in servaddr;
 
@@ -3199,15 +3161,6 @@ static int parse_args(int argc, char **argv, struct server_state_t *s) {
   return 0;
 }
 
-static int routing_init(struct routing_state_t *rt) {
-  if (!rt)
-    return 1;
-
-  // rt->online_clients = map64_init();
-
-  return 0;
-}
-
 static int server_init(struct server_state_t *s) {
   if (!s)
     return 1;
@@ -3215,9 +3168,22 @@ static int server_init(struct server_state_t *s) {
   if (install_signal_handlers() != 0)
     exit(1);
 
-  if (init_ssl(&s->ssl_ctx) != 0) {
-    server_destroy(s);
-    return 1;
+  const tls_config_t cfg = (tls_config_t){
+      .options = SSL_OP_IGNORE_UNEXPECTED_EOF | SSL_OP_NO_RENEGOTIATION |
+                 SSL_OP_SERVER_PREFERENCE,
+      .chain_file = "chain.pem",
+      .pkey_file = "pkey.pem",
+      .timeout = 3600,
+      .cache_size = 1024,
+      .verification_mode = SSL_VERIFY_NONE,
+  };
+
+  {
+    _FH_CHECK(tls_init(&cfg, &s->tls));
+    if (_fh_rc != FAITH_OK) {
+      server_destroy(s);
+      return 1;
+    }
   }
 
   if ((s->listenfd = init_listen_sock()) < 0) {
@@ -3226,11 +3192,6 @@ static int server_init(struct server_state_t *s) {
   }
 
   if ((s->epoll_fd = init_epoll_fd(s->listenfd)) < 0) {
-    server_destroy(s);
-    return 1;
-  }
-
-  if (routing_init(&s->rt) != 0) {
     server_destroy(s);
     return 1;
   }
@@ -3250,17 +3211,14 @@ static void ignore_sigpipe(void) {
 }
 
 int main(int argc, char **argv) {
-  ignore_sigpipe();
+  tls_init_global();
 
-  SSL_library_init();
-  SSL_load_error_strings();
-  OpenSSL_add_ssl_algorithms();
+  ignore_sigpipe();
 
   nob_set_log_handler(faith_log_handler);
 
   struct server_state_t s = {.listenfd = -1,
                              .epoll_fd = -1,
-                             .ssl_ctx = NULL,
                              .next_client_id = 1,
                              .cfg = {0}};
 
