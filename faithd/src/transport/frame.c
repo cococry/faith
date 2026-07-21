@@ -1,13 +1,15 @@
 #include "frame.h"
 #include "conn.h"
 
+#include "../logging/logging.h"
+
 transport_result_t frame_try_full_read(transport_conn_t *conn,
-                                       faith_frame_t    *frame,
-                                       bool              verbose_logging) {
+                                       faith_frame_t    *frame
+                                       ) {
   while (1) {
     size_t consumed = 0;
 
-    if (verbose_logging) {
+    if (g_verbose_logging) {
       nob_log(INFO,
               "[client=%" PRIu64 " fd=%i] Trying to parse frame buffer...",
               conn->id, conn->fd);
@@ -18,7 +20,7 @@ transport_result_t frame_try_full_read(transport_conn_t *conn,
 
     if (rc == FAITH_OK) {
 
-      if (verbose_logging) {
+      if (g_verbose_logging) {
         nob_log(
             INFO,
             "[client=%" PRIu64
@@ -39,16 +41,16 @@ transport_result_t frame_try_full_read(transport_conn_t *conn,
 
     if (rc == FAITH_ERR_INCOMPLETE) {
       /* Not enough bytes yet, so read more decrypted TLS data. */
-      if (verbose_logging) {
+      if (g_verbose_logging) {
         nob_log(INFO,
                 "[client=%" PRIu64
                 " fd=%i] Frame incomplete, reading more bytes...",
                 conn->id, conn->fd);
       }
-      transport_result_t res = conn_read_more_ssl_bytes(conn, verbose_logging);
+      transport_result_t res = conn_read_more_ssl_bytes(conn);
 
       if (res == TRANSPORT_RES_GOT_BYTES) {
-        if (verbose_logging) {
+        if (g_verbose_logging) {
           nob_log(INFO,
                   "[client=%" PRIu64
                   " fd=%i] Got new bytes, parsing frame again...",
@@ -58,7 +60,7 @@ transport_result_t frame_try_full_read(transport_conn_t *conn,
       }
 
       if (res == TRANSPORT_RES_WANT_READ) {
-        if (verbose_logging) {
+        if (g_verbose_logging) {
           nob_log(INFO,
                   "[client=%" PRIu64
                   " fd=%i] SSL_read needs to wait for socket to be readable",
@@ -68,7 +70,7 @@ transport_result_t frame_try_full_read(transport_conn_t *conn,
       }
 
       if (res == TRANSPORT_RES_WANT_WRITE) {
-        if (verbose_logging) {
+        if (g_verbose_logging) {
           nob_log(INFO,
                   "[client=%" PRIu64
                   " fd=%i] SSL_read needs to wait for socket to be writable",

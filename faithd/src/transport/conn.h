@@ -1,10 +1,9 @@
 #pragma once
 
-
 #include "tls.h"
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdbool.h>
 
 typedef enum {
   TRANSPORT_RES_COMPLETE,
@@ -39,18 +38,17 @@ typedef struct {
   tls_state_fd_t tls;
 } transport_conn_t;
 
-faith_status_code_t conn_init(transport_conn_t* conn);
+faith_status_code_t conn_init(transport_conn_t *conn);
 
-transport_result_t conn_read_more_ssl_bytes(transport_conn_t *conn,
-                                            bool              verbose_logging);
+transport_result_t conn_read_more_ssl_bytes(transport_conn_t *conn);
 
-faith_status_code_t conn_flush_output(transport_conn_t *conn, transport_result_t* o_res);
+faith_status_code_t conn_flush_output(transport_conn_t   *conn,
+                                      transport_result_t *o_res);
 
-bool conn_output_empty(transport_conn_t* conn);
+bool conn_output_empty(transport_conn_t *conn);
 
 faith_status_code_t conn_queue_enqueue_bytes(transport_queue_t *queue,
-                                       const uint8_t *bytes, size_t n_bytes,
-                                       bool verbose_logging);
+                                             const uint8_t     *bytes,
+                                             size_t             n_bytes);
 
-faith_status_code_t conn_queue_free(transport_queue_t* queue);
-
+faith_status_code_t conn_queue_free(transport_queue_t *queue);

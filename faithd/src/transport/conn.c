@@ -1,7 +1,8 @@
 #include "conn.h"
 #include <limits.h>
 #include <openssl/ssl.h>
-#include <sys/epoll.h>
+
+#include "../logging/logging.h"
 
 #define _MODULE_NAME "[transport/conn] "
 
@@ -14,8 +15,7 @@ faith_status_code_t conn_init(transport_conn_t *conn) {
 
   return FAITH_OK;
 }
-transport_result_t conn_read_more_ssl_bytes(transport_conn_t *conn,
-                                            bool              verbose_logging) {
+transport_result_t conn_read_more_ssl_bytes(transport_conn_t *conn) {
 
   if (!conn)
     return TRANSPORT_RES_ERROR;
@@ -30,10 +30,9 @@ transport_result_t conn_read_more_ssl_bytes(transport_conn_t *conn,
   }
 
   if (nread > 0) {
-    _FH_CHECK(conn_queue_enqueue_bytes(&conn->in, tmp, (size_t)nread,
-                                       verbose_logging));
+    _FH_CHECK(conn_queue_enqueue_bytes(&conn->in, tmp, (size_t)nread));
 
-    if (_fh_rc != FAITH_OK) 
+    if (_fh_rc != FAITH_OK)
       return TRANSPORT_RES_ERROR;
 
     return TRANSPORT_RES_GOT_BYTES;
@@ -64,7 +63,7 @@ faith_status_code_t conn_flush_output(transport_conn_t   *conn,
   if (!conn->out.buf) {
     nob_log(WARNING,
             "[client=%" PRIu64 " fd=%i] Requested to flush output but output "
-                               "queue buffer is not allocated.",
+            "queue buffer is not allocated.",
             conn->id, conn->fd);
     return FAITH_OK;
   }
@@ -133,19 +132,20 @@ bool conn_output_empty(transport_conn_t *conn) {
 }
 
 faith_status_code_t conn_queue_enqueue_bytes(transport_queue_t *queue,
-                                       const uint8_t *bytes, size_t n_bytes,
-                                       bool verbose_logging) {
+                                             const uint8_t     *bytes,
+                                             size_t             n_bytes) {
   if ((!bytes && n_bytes != 0))
     return FAITH_ERR_INVALID;
 
-  const char* type = queue->type == TRANSPORT_QUEUE_INPUT ? "input" : "output";
+  const char *type = queue->type == TRANSPORT_QUEUE_INPUT ? "input" : "output";
 
-  if (verbose_logging) {
-    nob_log(INFO, _MODULE_NAME "Trying to enqueue %zu %s bytes...", n_bytes, type);
+  if (g_verbose_logging) {
+    nob_log(INFO, _MODULE_NAME "Trying to enqueue %zu %s bytes...", n_bytes,
+            type);
   }
 
   if (n_bytes == 0) {
-    if (verbose_logging) {
+    if (g_verbose_logging) {
       nob_log(WARNING, _MODULE_NAME "Tried to enqueue zero-length %s", type);
     }
 
@@ -192,9 +192,9 @@ faith_status_code_t conn_queue_enqueue_bytes(transport_queue_t *queue,
   memcpy(queue->buf + queue->size, bytes, n_bytes);
   queue->size = needed;
 
-  if (verbose_logging) {
-    nob_log(INFO, _MODULE_NAME "Successfully enqueued %zu %s bytes",
-            n_bytes, type);
+  if (g_verbose_logging) {
+    nob_log(INFO, _MODULE_NAME "Successfully enqueued %zu %s bytes", n_bytes,
+            type);
   }
 
   return FAITH_OK;
@@ -209,4 +209,3 @@ faith_status_code_t conn_queue_free(transport_queue_t *queue) {
 
   return FAITH_OK;
 }
-
