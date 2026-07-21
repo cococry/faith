@@ -57,7 +57,7 @@ static bool client_id_from_hex(const char *hex, faith_client_id_t *out) {
 }
 
 int main(int argc, char **argv) {
-  faith_client_init_global(false);
+  faith_client_init_global(true);
 
   faith_client_config_t cfg = {
       .insecure_skip_verify = 1,

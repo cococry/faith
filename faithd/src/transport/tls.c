@@ -97,37 +97,79 @@ faith_status_code_t tls_new_with_fd(tls_context_t *tls, int fd,
 
   (*o_state).ssl = ssl;
 
+  nob_log(INFO,
+          _MODULE_NAME
+          "Initialized SSL and set accept state for TLS connection with fd: %i",
+          fd);
+
   return FAITH_OK;
 }
 
 int tls_accept(tls_state_fd_t *state) {
-  if (!state)
+  if (!state || !state->ssl)
     return INT_MAX;
 
+  ERR_clear_error();
+
   int rc = SSL_accept(state->ssl);
+
+  if (rc == 1) {
+    nob_log(INFO,
+            _MODULE_NAME "TLS handshake completed for connection with fd: %i",
+            state->fd);
+
+    return SSL_ERROR_NONE;
+  }
+
   int err = SSL_get_error(state->ssl, rc);
+
+  if (err == SSL_ERROR_WANT_READ) {
+    nob_log(INFO, _MODULE_NAME "TLS handshake wants read for fd: %i",
+            state->fd);
+  } else if (err == SSL_ERROR_WANT_WRITE) {
+    nob_log(INFO, _MODULE_NAME "TLS handshake wants write for fd: %i",
+            state->fd);
+  } else {
+    nob_log(ERROR, _MODULE_NAME "SSL_accept failed: rc=%i ssl_error=%i fd=%i",
+            rc, err, state->fd);
+  }
+
   return err;
 }
 
-int tls_read(tls_state_fd_t *state, void *buf, int nread, int *o_nread) {
-  if (!state)
+int tls_read(tls_state_fd_t *state, void *buf, int len, int *o_nread) {
+  if (!state || !state->ssl || !buf || !o_nread || len <= 0)
     return INT_MAX;
 
-  *o_nread = SSL_read(state->ssl, buf, nread);
-  int err = SSL_get_error(state->ssl, *o_nread);
+  *o_nread = 0;
 
-  return err;
+  ERR_clear_error();
+
+  int rc = SSL_read(state->ssl, buf, len);
+
+  if (rc > 0) {
+    *o_nread = rc;
+    return SSL_ERROR_NONE;
+  }
+
+  return SSL_get_error(state->ssl, rc);
 }
 
 int tls_write(tls_state_fd_t *state, const void *buf, int nwrite,
               int *o_nwritten) {
-  if (!state)
+  if (!state || !state->ssl || !buf || !o_nwritten || nwrite <= 0)
     return INT_MAX;
 
-  *o_nwritten = SSL_write(state->ssl, buf, nwrite);
-  int err = SSL_get_error(state->ssl, *o_nwritten);
+  *o_nwritten = 0;
 
-  return err;
+  ERR_clear_error();
+  int rc = SSL_write(state->ssl, buf, nwrite);
+
+  if (rc > 0) {
+    *o_nwritten = rc;
+    return SSL_ERROR_NONE;
+  }
+  return SSL_get_error(state->ssl, *o_nwritten);
 }
 
 faith_status_code_t tls_shutdown(tls_state_fd_t *state) {

@@ -1252,19 +1252,33 @@ static faith_status_code_t client_make_handshake(faith_client_t *client, int* au
   faith_frame_t frame = {0};
 
   _FH_CHECK_RETURN(faith_read_frame_sync(client->ssl, &frame));
+    
+  nob_log(INFO, "[client] Got new server response.");
 
-  if (frame.msg_type != FAITH_MSG_ENVL)
+  if (frame.msg_type != FAITH_MSG_ENVL) {
+    nob_log(ERROR,
+            "[client] Server response is not of expected type FAITH_MSG_ENVL, "
+            "got: %s. (payload size: %zu)",
+            faith_frame_msg_name(frame.msg_type), frame.payload_size);
     _FH_RETURN_DEFER(FAITH_ERR_INVALID);
+  }
 
+  if (g_log_enable_tracing)
+    nob_log(INFO, "[client] Decoding envelope ...");
   faith_envelope_t envl;
   _FH_CHECK_DEFER(
       faith_decode_envelope(frame.payload, frame.payload_size, &envl));
+
+  if (g_log_enable_tracing)
+    nob_log(INFO, "[client] Successfully Decoded envelope.");
 
   /* 3. Handle the CHALLENGE envelope sent by the server. This verifies the type
    * of the envelope (ensures CHALLENGE). */
   _FH_CHECK_DEFER(client_handle_challenge(client, &envl));
 
   faith_frame_free(&frame);
+
+  if (g_log_enable_tracing)
 
   /* ========================== */
   /* Read next frame */

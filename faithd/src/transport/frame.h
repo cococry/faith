@@ -3,7 +3,7 @@
 #include "../protocol.h"
 #include "conn.h"
 
-conn_read_result_t frame_try_full_read(transport_conn_t *conn,
+transport_result_t frame_try_full_read(transport_conn_t *conn,
                                        faith_frame_t    *frame,
                                        bool              verbose_logging);
 
