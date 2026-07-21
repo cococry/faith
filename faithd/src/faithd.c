@@ -3,14 +3,14 @@
 #include "transport/tls.h"
 #include "transport/conn.h"
 #include "transport/frame.h"
-#include "transport/epoll.h"
+#include "reactor/reactor.h"
+#include "logging/logging.h"
 
 #include <openssl/crypto.h>
 #include <openssl/err.h>
 #include <openssl/rand.h>
 #include <openssl/ssl.h>
 
-#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 
@@ -28,6 +28,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
 
 #define NOB_IMPLEMENTATION
 #include "../third_party/nob.h"
@@ -72,10 +73,6 @@
     }                                                                          \
   } while (0)
 
-struct server_cfg_t {
-  int verbose_logging;
-};
-
 #define CLIENT_STATES(X)                                                       \
   X(CLIENT_HANDSHAKE, 0)                                                       \
   X(CLIENT_OPEN, 1)                                                            \
@@ -104,6 +101,7 @@ struct client_conn_t {
   faith_device_id_t   device_id;
 
   transport_conn_t    conn;
+  reactor_source_t    reactor_source;
 
   enum client_state_t state;
 
@@ -165,15 +163,14 @@ struct storage_state_t {
 };
 
 struct server_state_t {
-  int      listenfd;
-  int      epoll_fd;
+  reactor_source_t  listen_source;
+  reactor_context_t reactor;
 
   tls_context_t tls;
 
   atomic_uint_fast64_t  next_client_id;
   struct client_conn_t *clients;
 
-  struct server_cfg_t    cfg;
   struct routing_state_t rt;
   struct storage_state_t storage;
 };
@@ -214,7 +211,7 @@ static void set_client_state(struct server_state_t *s, struct client_conn_t *cl,
     return;
   cl->state = state;
 
-  if (s->cfg.verbose_logging) {
+  if (g_verbose_logging) {
     nob_log(INFO, "[client=%" PRIu64 " fd=%i] Client changed state to %s",
             cl->conn.id, cl->conn.fd, client_state_name(state));
   }
@@ -589,14 +586,10 @@ static faith_status_code_t close_client(struct server_state_t *s,
     }
   }
 
-  if (cl->conn.fd >= 0) {
-    if (epoll_ctl(s->epoll_fd, EPOLL_CTL_DEL, cl->conn.fd, NULL) < 0 &&
-        errno != ENOENT) {
-      nob_log(ERROR, "[client=%" PRIu64 " fd=%d] epoll delete failed: %s",
-              cl->conn.id, cl->conn.fd, strerror(errno));
-
-      if (result == FAITH_OK)
-        result = FAITH_ERR_IO;
+  {
+    _FH_CHECK(reactor_remove(&s->reactor, &cl->reactor_source));
+    if (_fh_rc != FAITH_OK) {
+      result = _fh_rc;
     }
   }
 
@@ -701,11 +694,6 @@ server_disconnect_client(struct server_state_t *s, struct client_conn_t *cl,
   return FAITH_OK;
 }
 
-static int modify_client_ev_mask(int epoll_fd, struct client_conn_t *cl,
-                                 uint32_t mask) {
-  return epoll_modify_ev_mask(epoll_fd, cl->conn.fd, mask, &cl->ev_mask, cl);
-}
-
 void server_destroy(struct server_state_t *s) {
   if (!s)
     return;
@@ -719,28 +707,9 @@ void server_destroy(struct server_state_t *s) {
 
   routing_destroy(&s->rt);
 
-  if (s->listenfd >= 0) {
-    if (s->epoll_fd >= 0) {
-      if (epoll_ctl(s->epoll_fd, EPOLL_CTL_DEL, s->listenfd, NULL) < 0 &&
-          errno != ENOENT) {
-        nob_log(ERROR, "epoll delete listen FD failed: %s", strerror(errno));
-      }
-    }
+  _FH_CHECK_SCOPED(reactor_destroy(&s->reactor));
 
-    if (close(s->listenfd) < 0)
-      nob_log(ERROR, "close() on listen FD failed: %s", strerror(errno));
-
-    s->listenfd = -1;
-  }
-
-  if (s->epoll_fd >= 0) {
-    if (close(s->epoll_fd) < 0)
-      nob_log(ERROR, "close() epoll FD failed: %s", strerror(errno));
-
-    s->epoll_fd = -1;
-  }
-
-  _FH_CHECK(tls_destroy(&s->tls));
+  _FH_CHECK_SCOPED(tls_destroy(&s->tls));
 
   nob_log(INFO, "Destroyed server context.");
 }
@@ -765,8 +734,7 @@ server_send_over_wire(struct server_state_t *s, struct client_conn_t *cl,
   }
 
   {
-    _FH_CHECK(conn_queue_enqueue_bytes(&cl->conn.out, wire_data, wire_size,
-                                       s->cfg.verbose_logging));
+    _FH_CHECK(conn_queue_enqueue_bytes(&cl->conn.out, wire_data, wire_size));
 
     if (_fh_rc != FAITH_OK) {
       free(wire_data);
@@ -777,16 +745,16 @@ server_send_over_wire(struct server_state_t *s, struct client_conn_t *cl,
   free(wire_data);
   wire_data = NULL;
 
-  // client now wants EPOLLOUT
-  if (modify_client_ev_mask(s->epoll_fd, cl, cl->ev_mask | EPOLLOUT) < 0) {
-    nob_log(ERROR, "[client=%" PRIu64 " fd=%d]  failed to enable EPOLLOUT: %s",
-            cl->conn.id, cl->conn.fd, strerror(errno));
-
-    server_disconnect_client(s, cl, FAITH_DISCONNECT_INTERNAL_ERROR,
-                             FAITH_CLIENT_RECONNECT_ALLOWED, 0, 0,
-                             "Failed to enable EPOLLOUT for the client.");
-
-    return FAITH_ERR_IO;
+  if (!(cl->reactor_source.interests & REACTOR_WRITABLE)) {
+    _FH_CHECK(reactor_modify_interests(&s->reactor, &cl->reactor_source,
+                                       cl->reactor_source.interests |
+                                           REACTOR_WRITABLE));
+    if (_fh_rc != FAITH_OK) {
+      server_disconnect_client(s, cl, FAITH_DISCONNECT_INTERNAL_ERROR,
+                               FAITH_CLIENT_RECONNECT_ALLOWED, 0, 0,
+                               "Failed to enable REACTOR_WRITABLE for the client.");
+      return _fh_rc;
+    }
   }
 
   nob_log(INFO, "[client=%" PRIu64 " fd=%d] queued frame: %s (%zu bytes)",
@@ -1271,7 +1239,7 @@ static faith_status_code_t server_handle_newly_joined_device(
   if (cl->state != CLIENT_WAIT_FOR_CHALLENGE_RESPONSE)
     return FAITH_ERR_BAD_ENVELOPE;
 
-  if (s->cfg.verbose_logging) {
+  if (g_verbose_logging) {
     char cl_auth_id_hex[33];
     char new_device_id_hex[33];
     _FH_CHECK_RETURN(
@@ -2308,16 +2276,20 @@ static faith_status_code_t handle_frame(struct server_state_t *s,
 
 static void accept_clients(struct server_state_t *s) {
   while (1) {
-    struct sockaddr_in addr;
-    socklen_t          addrsz = sizeof(addr);
 
-    int client_fd =
-        accept4(s->listenfd, (struct sockaddr *)&addr, &addrsz, SOCK_NONBLOCK);
+    struct sockaddr_storage addr;
+    socklen_t               addr_size = sizeof addr;
+
+    int client_fd = accept4(s->listen_source.fd, (struct sockaddr *)&addr,
+                            &addr_size, SOCK_NONBLOCK | SOCK_CLOEXEC);
 
     if (client_fd < 0) {
       // no clients left to accept
       if (errno == EAGAIN || errno == EWOULDBLOCK)
         return;
+
+      if (errno == EINTR)
+        continue;
 
       nob_log(ERROR, "accept4() failed: %s", strerror(errno));
       return;
@@ -2340,16 +2312,12 @@ static void accept_clients(struct server_state_t *s) {
     }
 
     cl->conn.id = atomic_fetch_add(&s->next_client_id, 1);
-
-    nob_log(INFO, "accepted new client id=%" PRIu64 " fd=%i", cl->conn.id,
-            client_fd);
-
     cl->conn.fd = client_fd;
-    set_client_state(s, cl, CLIENT_HANDSHAKE);
 
-    /* Add client to linked list of clients */
-    server_add_client(s, cl);
-
+    cl->reactor_source = (reactor_source_t){.fd = client_fd,
+                                            .interests = REACTOR_READABLE,
+                                            .user_data = cl,
+                                            .type = REACTOR_SOURCE_CLIENT};
     {
       _FH_CHECK(tls_new_with_fd(&s->tls, cl->conn.fd, &cl->conn.tls));
       if (_fh_rc != FAITH_OK) {
@@ -2358,63 +2326,60 @@ static void accept_clients(struct server_state_t *s) {
       }
     }
 
-    struct epoll_event ev;
-    memset(&ev, 0, sizeof(ev));
-
-    ev.events = EPOLLIN | EPOLLRDHUP;
-    ev.data.ptr = cl;
-    cl->ev_mask = ev.events;
-
-    if (epoll_ctl(s->epoll_fd, EPOLL_CTL_ADD, client_fd, &ev) < 0) {
-      nob_log(ERROR, "epoll_ctl() failed for client (FD: %i): %s", client_fd,
-              strerror(errno));
-      _FH_CHECK(close_client(s, &cl));
-      continue;
+    {
+      _FH_CHECK(reactor_add(&s->reactor, &cl->reactor_source));
+      if (_fh_rc != FAITH_OK) {
+        _FH_CHECK(close_client(s, &cl));
+        continue;
+      }
     }
+
+    /* Add client to linked list of clients */
+    server_add_client(s, cl);
+    set_client_state(s, cl, CLIENT_HANDSHAKE);
+
+    nob_log(INFO, "accepted new client id=%" PRIu64 " fd=%i", cl->conn.id,
+            client_fd);
   }
 }
 
 static faith_status_code_t drive_tls_handshake(struct server_state_t *s,
                                                struct client_conn_t  *cl) {
+  if (!s || !cl || cl->closing)
+    return FAITH_ERR_INVALID;
+
   int err = tls_accept(&cl->conn.tls);
 
   if (err == INT_MAX) {
     return FAITH_ERR_INVALID;
   }
 
-  if (err == SSL_ERROR_NONE) {
+  reactor_events_t desired_interests;
+
+  switch (err) {
+  case SSL_ERROR_NONE:
     set_client_state(s, cl, CLIENT_WAIT_FOR_HELLO);
-
-    if (modify_client_ev_mask(s->epoll_fd, cl, cl->ev_mask | EPOLLIN) < 0) {
-      nob_log(ERROR, "modify_client_ev_mask failed: %s", strerror(errno));
-      return FAITH_ERR_IO;
-    }
-
-    return FAITH_OK;
+    desired_interests = REACTOR_READABLE;
+    break;
+  case SSL_ERROR_WANT_READ:
+    desired_interests = REACTOR_READABLE;
+    break;
+  case SSL_ERROR_WANT_WRITE:
+    desired_interests = REACTOR_WRITABLE;
+    break;
+  default:
+    nob_log(ERROR, "TLS handshake failed: ssl_error=%d", err);
+    ERR_print_errors_fp(stderr);
+    return FAITH_ERR_IO;
   }
 
-  if (err == SSL_ERROR_WANT_READ) {
-    if (modify_client_ev_mask(s->epoll_fd, cl, cl->ev_mask | EPOLLIN) < 0) {
-      nob_log(ERROR, "modify_client_ev_mask failed: %s", strerror(errno));
-      return FAITH_ERR_IO;
-    }
-
+  if (desired_interests == cl->reactor_source.interests)
     return FAITH_OK;
-  }
 
-  if (err == SSL_ERROR_WANT_WRITE) {
-    if (modify_client_ev_mask(s->epoll_fd, cl, cl->ev_mask | EPOLLOUT) < 0) {
-      nob_log(ERROR, "modify_client_ev_mask failed: %s", strerror(errno));
-      return FAITH_ERR_IO;
-    }
+  _FH_CHECK_RETURN(
+      reactor_modify_interests(&s->reactor, &cl->reactor_source, desired_interests));
 
-    return FAITH_OK;
-  }
-
-  nob_log(ERROR, "TLS handshake failed");
-  ERR_print_errors_fp(stderr);
-
-  return FAITH_ERR_IO;
+  return FAITH_OK;
 }
 
 static void server_begin_shutdown(struct server_state_t *s) {
@@ -2434,24 +2399,24 @@ static bool server_has_clients(const struct server_state_t *s) {
 }
 
 static faith_status_code_t
-server_flush_client_output(int epoll_fd, struct client_conn_t *cl) {
-  if (!cl || epoll_fd < 0)
+server_flush_client_output(struct server_state_t *s, struct client_conn_t *cl) {
+  if (!cl || !s)
     return FAITH_ERR_INVALID;
 
   transport_result_t res = 0;
   _FH_CHECK_RETURN(conn_flush_output(&cl->conn, &res));
 
-  uint32_t desired_mask;
+  reactor_events_t desired_interests;
 
   switch (res) {
   case TRANSPORT_RES_WANT_READ:
-    desired_mask = (cl->ev_mask | EPOLLIN) & ~EPOLLOUT;
+    desired_interests = REACTOR_READABLE;
     break;
   case TRANSPORT_RES_WANT_WRITE:
-    desired_mask = cl->ev_mask | EPOLLIN | EPOLLOUT;
+    desired_interests = REACTOR_READABLE | REACTOR_WRITABLE;
     break;
   case TRANSPORT_RES_COMPLETE:
-    desired_mask = (cl->ev_mask | EPOLLIN) & ~EPOLLOUT;
+    desired_interests = REACTOR_READABLE;
     break;
   case TRANSPORT_RES_CLOSED:
     nob_log(ERROR, "Cannot flush client output, got TRANSPORT_RES_CLOSED; "
@@ -2465,21 +2430,22 @@ server_flush_client_output(int epoll_fd, struct client_conn_t *cl) {
     return FAITH_ERR_INVALID;
   }
 
-  if (modify_client_ev_mask(epoll_fd, cl, desired_mask) < 0) {
-    nob_log(ERROR, "modify_client_ev_mask failed: %s", strerror(errno));
-    return FAITH_ERR_EPOLL;
-  }
+  if (desired_interests == cl->reactor_source.interests)
+    return FAITH_OK;
+
+  _FH_CHECK_RETURN(reactor_modify_interests(&s->reactor, &cl->reactor_source,
+                                            desired_interests));
 
   return FAITH_OK;
 }
 
-static int drive_client_read(struct server_state_t *s, struct client_conn_t *cl,
-                             const struct server_cfg_t *cfg) {
-  if (!s || !cl || cl->closing || !cfg)
+static int drive_client_read(struct server_state_t *s, struct client_conn_t *cl
+                             ) {
+  if (!s || !cl || cl->closing) 
     return -1;
   faith_frame_t frame;
 
-  transport_result_t res = frame_try_full_read(&cl->conn, &frame, cfg);
+  transport_result_t res = frame_try_full_read(&cl->conn, &frame);
 
   switch (res) {
   case TRANSPORT_RES_COMPLETE: {
@@ -2495,31 +2461,35 @@ static int drive_client_read(struct server_state_t *s, struct client_conn_t *cl,
     if (cl->closing)
       return -1;
 
-    if (cfg->verbose_logging) {
+    if (g_verbose_logging) {
       nob_log(INFO, "[client=%" PRIu64 " fd=%i] Success handling client frame.",
               cl->conn.id, cl->conn.fd);
     }
 
-    uint32_t mask = cl->ev_mask | EPOLLIN;
+    reactor_events_t desired_interests =
+        cl->reactor_source.interests | REACTOR_READABLE;
 
     if (cl->conn.out.buf && cl->conn.out.off < cl->conn.out.size) {
-      mask |= EPOLLOUT;
+      desired_interests |= REACTOR_WRITABLE;
     }
 
-    if (modify_client_ev_mask(s->epoll_fd, cl, mask) < 0) {
+    if (reactor_modify_interests(&s->reactor, &cl->reactor_source,
+                                 desired_interests) != FAITH_OK) {
       goto fail_ev_mask;
     }
 
     return 0;
   }
   case TRANSPORT_RES_WANT_READ: {
-    uint32_t mask = cl->ev_mask | EPOLLIN;
+    reactor_events_t desired_interests =
+        cl->reactor_source.interests | REACTOR_READABLE;
 
     if (cl->conn.out.buf && cl->conn.out.off < cl->conn.out.size) {
-      mask |= EPOLLOUT;
+      desired_interests |= REACTOR_WRITABLE;
     }
 
-    if (modify_client_ev_mask(s->epoll_fd, cl, mask) < 0) {
+    if (reactor_modify_interests(&s->reactor, &cl->reactor_source,
+                                 desired_interests) != FAITH_OK) {
       goto fail_ev_mask;
     }
     return 0;
@@ -2552,24 +2522,76 @@ fail_ev_mask:
   return -1;
 }
 
-int loop(struct server_state_t *s) {
-  struct epoll_event events[MAX_EVENTS];
+static void handle_client_event(struct server_state_t *s,
+                                struct client_conn_t  *cl,
+                                reactor_events_t events, bool shutting_down) {
+  if (!s || !cl)
+    return;
 
+  if (events & (REACTOR_CLOSED | REACTOR_ERROR)) {
+    _FH_CHECK(close_client(s, &cl));
+    return;
+  }
+
+  if (cl->closing) {
+    _FH_CHECK(close_client(s, &cl));
+    return;
+  }
+
+  bool dead = false;
+
+  if (shutting_down || cl->close_after_flush) {
+    if (conn_output_empty(&cl->conn)) {
+      _FH_CHECK(close_client(s, &cl));
+      return;
+    }
+
+    if (events & (REACTOR_READABLE | REACTOR_WRITABLE)) {
+      if (server_flush_client_output(s, cl) != FAITH_OK)
+        dead = true;
+    }
+  } else if (cl->state == CLIENT_HANDSHAKE) {
+    if (events & (REACTOR_READABLE | REACTOR_WRITABLE)) {
+      if (drive_tls_handshake(s, cl) != FAITH_OK)
+        dead = true;
+    }
+  } else if (cl->state == CLIENT_OPEN || cl->state == CLIENT_WAIT_FOR_HELLO ||
+             cl->state == CLIENT_WAIT_FOR_CHALLENGE_RESPONSE ||
+             cl->state == CLIENT_WAIT_FOR_DEVICE_LINK_RESPONSE) {
+    if ((events & REACTOR_READABLE) &&
+        drive_client_read(s, cl) != FAITH_OK) {
+      dead = true;
+    }
+
+    if (!dead && !cl->closing && (events & REACTOR_WRITABLE) &&
+        server_flush_client_output(s, cl) != FAITH_OK) {
+      dead = true;
+    }
+  }
+
+  if (dead || cl->closing) {
+    _FH_CHECK(close_client(s, &cl));
+    return;
+  }
+
+  if (cl->close_after_flush && conn_output_empty(&cl->conn)) {
+    _FH_CHECK(close_client(s, &cl));
+  }
+}
+
+int loop(struct server_state_t *s) {
   bool     shutting_down = false;
   uint64_t shutdown_deadline_ms = 0;
+
+  static reactor_event_data_t events[REACTOR_MAX_EVENTS];
 
   for (;;) {
     if (shutdown_requested && !shutting_down) {
       shutting_down = true;
 
-      if (server_has_clients(s))
-        nob_log(INFO, "Server shutdown requested; notifying clients.");
+      nob_log(INFO, "Server shutdown requested; notifying clients.");
 
-      if (s->listenfd >= 0) {
-        epoll_ctl(s->epoll_fd, EPOLL_CTL_DEL, s->listenfd, NULL);
-        close(s->listenfd);
-        s->listenfd = -1;
-      }
+      _FH_CHECK_SCOPED(reactor_remove(&s->reactor, &s->listen_source));
 
       server_begin_shutdown(s);
 
@@ -2595,78 +2617,44 @@ int loop(struct server_state_t *s) {
     }
 
     int timeout_ms = shutting_down ? 100 : -1;
-    int n = epoll_wait(s->epoll_fd, events, MAX_EVENTS, timeout_ms);
 
-    if (n < 0) {
-      if (errno == EINTR)
-        continue;
+    size_t n_events = 0;
+    _FH_CHECK(reactor_wait(&s->reactor, timeout_ms, events, &n_events));
 
-      nob_log(ERROR, "epoll_wait() failed: %s", strerror(errno));
-      return 1;
-    }
+    for (size_t i = 0; i < n_events; ++i) {
+      reactor_source_t *src = events[i].src;
 
-    for (int i = 0; i < n; ++i) {
-      uint32_t revents = events[i].events;
-
-      if (!shutting_down && events[i].data.fd == s->listenfd) {
-        accept_clients(s);
+      if (!src) {
+        nob_log(ERROR, "reactor_wait() returned an event with no source");
         continue;
       }
 
-      struct client_conn_t *cl = events[i].data.ptr;
-      if (!cl)
-        continue;
-
-      if (revents & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
-        _FH_CHECK(close_client(s, &cl));
-        continue;
-      }
-
-      int dead = 0;
-
-      if (cl->closing) {
-        _FH_CHECK(close_client(s, &cl));
-        continue;
-      }
-
-      if (shutting_down || cl->close_after_flush) {
-        if ((revents & EPOLLOUT) &&
-            server_flush_client_output(s->epoll_fd, cl) != FAITH_OK) {
-          dead = 1;
+      switch (src->type) {
+      case REACTOR_SOURCE_LISTENER:
+        if (!shutting_down) {
+          accept_clients(s);
         }
-      } else if (cl->state == CLIENT_HANDSHAKE) {
-        if (drive_tls_handshake(s, cl) < 0)
-          dead = 1;
-      } else if (cl->state == CLIENT_OPEN ||
-                 cl->state == CLIENT_WAIT_FOR_HELLO ||
-                 cl->state == CLIENT_WAIT_FOR_CHALLENGE_RESPONSE ||
-                 cl->state == CLIENT_WAIT_FOR_DEVICE_LINK_RESPONSE) {
-        if ((revents & EPOLLIN) && drive_client_read(s, cl, &s->cfg) < 0) {
-          dead = 1;
+        break;
+      case REACTOR_SOURCE_CLIENT:
+        if (!src->user_data) {
+          nob_log(ERROR, "client reactor source has no user_data");
+          continue;
         }
+        handle_client_event(s, (struct client_conn_t *)src->user_data,
+                            events[i].events, shutting_down);
+        break;
+      default:
+        nob_log(ERROR, "Unknown reactor source type: %u", src->type);
+        break;
       }
 
-      if (!dead && !cl->closing && (revents & EPOLLOUT) &&
-          server_flush_client_output(s->epoll_fd, cl) != FAITH_OK) {
-        dead = 1;
-      }
-
-      if (dead || cl->closing) {
-        _FH_CHECK(close_client(s, &cl));
-        continue;
-      }
-
-      if (cl->close_after_flush && conn_output_empty(&cl->conn)) {
-        _FH_CHECK(close_client(s, &cl));
-        continue;
-      }
     }
   }
 
   return 0;
 }
 
-static int init_listen_sock(void) {
+static int init_listener(void) {
   struct sockaddr_in servaddr;
 
   int listenfd = -1;
@@ -2717,27 +2705,6 @@ static int init_listen_sock(void) {
   return listenfd;
 }
 
-static int init_epoll_fd(int listenfd) {
-  int epoll_fd = epoll_create1(EPOLL_CLOEXEC);
-  if (epoll_fd == -1) {
-    nob_log(ERROR, "epoll_create1(EPOLL_CLOEXEC) failed: %s", strerror(errno));
-    return -1;
-  }
-  struct epoll_event ev = {0};
-
-  ev.events = EPOLLIN;
-  ev.data.fd = listenfd;
-
-  if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listenfd, &ev) == -1) {
-    nob_log(ERROR, "Failed to add listening FD to epoll FD with epoll_ctl: %s",
-            strerror(errno));
-    close(epoll_fd);
-    return -1;
-  }
-
-  return epoll_fd;
-}
-
 static int install_signal_handlers(void) {
   struct sigaction sa;
   memset(&sa, 0, sizeof(sa));
@@ -2775,7 +2742,7 @@ static int parse_args(int argc, char **argv, struct server_state_t *s) {
     const char *arg = argv[i];
 
     if (strcmp(arg, "-v") == 0 || strcmp(arg, "--verbose") == 0) {
-      s->cfg.verbose_logging = 1;
+      g_verbose_logging = 1;
       continue;
     }
 
@@ -2817,14 +2784,31 @@ static int server_init(struct server_state_t *s) {
     }
   }
 
-  if ((s->listenfd = init_listen_sock()) < 0) {
+  {
+    _FH_CHECK(reactor_init(&s->reactor));
+    if (_fh_rc != FAITH_OK) {
+      server_destroy(s);
+      return 1;
+    }
+  }
+
+  int listen_fd = init_listener();
+  if (listen_fd < 0) {
     server_destroy(s);
     return 1;
   }
 
-  if ((s->epoll_fd = init_epoll_fd(s->listenfd)) < 0) {
-    server_destroy(s);
-    return 1;
+  s->listen_source = (reactor_source_t){.type = REACTOR_SOURCE_LISTENER,
+                                        .fd = listen_fd,
+                                        .user_data = NULL,
+                                        .interests = REACTOR_READABLE};
+
+  {
+    _FH_CHECK(reactor_add(&s->reactor, &s->listen_source));
+    if (_fh_rc != FAITH_OK) {
+      server_destroy(s);
+      return 1;
+    }
   }
 
   return 0;
@@ -2848,10 +2832,7 @@ int main(int argc, char **argv) {
 
   nob_set_log_handler(faith_log_handler);
 
-  struct server_state_t s = {.listenfd = -1,
-                             .epoll_fd = -1,
-                             .next_client_id = 1,
-                             .cfg = {0}};
+  struct server_state_t s = {.next_client_id = 1};
 
   int arg_rc = parse_args(argc, argv, &s);
 

@@ -562,6 +562,11 @@
     }                                                                          \
   } while (0)
 
+#define _FH_CHECK_SCOPED(expr)                                                 \
+  do {                                                                         \
+    _FH_CHECK(expr);                                                           \
+  } while (0)
+
 typedef struct {
   uint32_t frame_size;
   uint16_t proto_ver;
