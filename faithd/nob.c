@@ -89,7 +89,8 @@ bool build() {
   nob_cmd_append(&cmd, "-lssl", "-lcrypto");
   nob_cc_inputs(&cmd, "src/faithd.c", "src/protocol.c", "src/transport/tls.c",
                 "src/transport/conn.c", "src/reactor/reactor.c",
-                "src/transport/frame.c", "src/logging/logging.c");
+                "src/transport/frame.c", "src/logging/logging.c",
+                "src/server/sess_registry.c");
 
   if (!cmd_run(&cmd))
     return false;

@@ -1509,10 +1509,10 @@ static faith_status_code_t client_new_identity(client_identity_t *o_ident) {
 
   /* Generate 128 bit random device & auth identities */
 
-  //client_id_from_hex("9379839402f90a5aa848b418953cecd2", &o_ident->auth_id);
+  client_id_from_hex("9379839402f90a5aa848b418953cecd2", &o_ident->auth_id);
 
-  _FH_CHECK_RETURN(faith_random_bytes(o_ident->auth_id.bytes,
-                                      sizeof(o_ident->auth_id.bytes)));
+  /*_FH_CHECK_RETURN(faith_random_bytes(o_ident->auth_id.bytes,
+                                      sizeof(o_ident->auth_id.bytes)));*/
 
 
 

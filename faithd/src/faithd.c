@@ -4,6 +4,8 @@
 #include "transport/conn.h"
 #include "transport/frame.h"
 #include "reactor/reactor.h"
+#include "server/server.h"
+#include "server/sess_registry.h"
 #include "logging/logging.h"
 
 #include <openssl/crypto.h>
@@ -35,7 +37,6 @@
 
 #include "protocol.h"
 
-#define STB_DS_IMPLEMENTATION
 #include "../third_party/stb_ds.h"
 
 #define PORT       4433
@@ -45,9 +46,9 @@
   do {                                                                         \
     struct server_state_t        *_fh_iter_server = (SERVER);                  \
     const faith_client_id_t      *_fh_iter_auth_id = (AUTH_ID);                \
-    struct client_route_device_t *_fh_iter_devices = NULL;                     \
+    client_session_device_t *_fh_iter_devices = NULL;                     \
                                                                                \
-    (STATUS_OUT) = routing_get_devices(&_fh_iter_server->rt, _fh_iter_auth_id, \
+    (STATUS_OUT) = sess_registry_get_devices(&_fh_iter_server->rt, _fh_iter_auth_id, \
                                        &_fh_iter_devices);                     \
                                                                                \
     if ((STATUS_OUT) == FAITH_ERR_NOT_FOUND) {                                 \
@@ -73,74 +74,6 @@
     }                                                                          \
   } while (0)
 
-#define CLIENT_STATES(X)                                                       \
-  X(CLIENT_HANDSHAKE, 0)                                                       \
-  X(CLIENT_OPEN, 1)                                                            \
-  X(CLIENT_CLOSING, 2)                                                         \
-  X(CLIENT_WAIT_FOR_HELLO, 3)                                                  \
-  X(CLIENT_WAIT_FOR_CHALLENGE_RESPONSE, 4)                                     \
-  X(CLIENT_WAIT_FOR_DEVICE_LINK_RESPONSE, 5)
-
-enum client_state_t {
-#define X(name, value) name = value,
-  CLIENT_STATES(X)
-#undef X
-};
-
-struct client_temporary_handshake_params_t {
-  uint64_t          nonce;
-  uint64_t          server_nonce;
-  uint8_t           public_key[FAITH_ED25519_PUBLIC_KEY_SIZE];
-  faith_client_id_t sender_auth_id;
-  faith_device_id_t device_id;
-};
-
-struct client_conn_t {
-  // connection id
-  faith_client_id_t   auth_id;
-  faith_device_id_t   device_id;
-
-  transport_conn_t    conn;
-  reactor_source_t    reactor_source;
-
-  enum client_state_t state;
-
-  uint32_t ev_mask;
-
-  struct client_conn_t *next;
-  struct client_conn_t *prev;
-
-  struct client_temporary_handshake_params_t temp_handshake_params;
-  faith_envl_stc_device_link_req_t          *pending_device_link_req;
-  struct client_conn_t                      *pending_device_link_conn;
-
-  int authorized;
-
-  int closing;
-  int close_after_flush;
-};
-
-struct client_identity_t {
-  uint8_t public_key[FAITH_ED25519_PUBLIC_KEY_SIZE];
-};
-
-struct client_device_session_data_t {
-  struct client_conn_t    *conn;
-  struct client_identity_t ident;
-};
-
-struct client_route_device_t {
-  faith_device_id_t                    key; /* device id */
-  struct client_device_session_data_t *value;
-};
-
-/* nested hashmap [auth id -> device id -> conn/sess data] */
-struct client_route_user_t {
-  faith_client_id_t key; /* client/auth id */
-  struct client_route_device_t
-      *value; /* a hashmap of device id -> client conn/sess data*/
-};
-
 struct server_msg_request_t {
   faith_client_id_t auth_id_sender;
   faith_client_id_t auth_id_receiver;
@@ -154,9 +87,7 @@ struct stored_msg_request_t {
   struct server_msg_request_t *value;
 };
 
-struct routing_state_t {
-  struct client_route_user_t *active_users;
-};
+
 
 struct storage_state_t {
   struct stored_msg_request_t* msg_requests;
@@ -171,7 +102,7 @@ struct server_state_t {
   atomic_uint_fast64_t  next_client_id;
   struct client_conn_t *clients;
 
-  struct routing_state_t rt;
+  sess_registry_state_t rt;
   struct storage_state_t storage;
 };
 
@@ -248,170 +179,6 @@ static void server_remove_client(struct server_state_t *s,
   cl->next = NULL;
   cl->prev = NULL;
 }
-
-static faith_status_code_t
-routing_get_user_from_auth_id(struct routing_state_t      *rt,
-                              const faith_client_id_t     *auth_id,
-                              struct client_route_user_t **o_user) {
-  if (!rt || !auth_id || !o_user)
-    return FAITH_ERR_INVALID;
-
-  struct client_route_user_t *user = hmgetp_null(rt->active_users, *auth_id);
-  *o_user = user;
-
-  return FAITH_OK;
-}
-
-static int routing_auth_id_registered(struct routing_state_t  *rt,
-                                      const faith_client_id_t *auth_id) {
-  struct client_route_user_t *user = NULL;
-  _FH_CHECK(routing_get_user_from_auth_id(rt, auth_id, &user));
-  if (_fh_rc != FAITH_OK) {
-    return 0;
-  }
-  return user != NULL;
-}
-
-static faith_status_code_t
-routing_get_devices(struct routing_state_t        *rt,
-                    const faith_client_id_t       *auth_id,
-                    struct client_route_device_t **o_devmap) {
-  if (!rt || !o_devmap)
-    return FAITH_ERR_INVALID;
-
-  *o_devmap = NULL;
-
-  struct client_route_user_t *user = NULL;
-  _FH_CHECK_RETURN(routing_get_user_from_auth_id(rt, auth_id, &user));
-  if (!user)
-    return FAITH_ERR_NOT_FOUND;
-
-  *o_devmap = user->value;
-
-  return FAITH_OK;
-}
-
-static faith_status_code_t routing_register_session(
-    struct routing_state_t *rt, const faith_client_id_t *auth_id,
-    const faith_device_id_t *device_id, struct client_conn_t *cl,
-    const uint8_t public_key[FAITH_ED25519_PUBLIC_KEY_SIZE]) {
-  if (!rt || !auth_id || !device_id || !public_key)
-    return FAITH_ERR_INVALID;
-
-  /* hmget() inserts <auth_id> if not found */
-  struct client_route_device_t *devmap = hmget(rt->active_users, *auth_id);
-
-  /* allocate new session data */
-  struct client_device_session_data_t *sess = calloc(1, sizeof(*sess));
-  if (!sess) {
-    return FAITH_ERR_NOMEM;
-  }
-
-  sess->conn = cl;
-
-  /* assign public key to new session */
-  memcpy(sess->ident.public_key, public_key, FAITH_ED25519_PUBLIC_KEY_SIZE);
-
-  /* insert session data at <auth_id, device_id pair> */
-  hmput(devmap, *device_id, sess);
-
-  /* write pointer back to avoid stale pointers */
-  hmput(rt->active_users, *auth_id, devmap);
-
-  char auth_id_hex[33];
-  char device_id_hex[33];
-
-  faith_status_code_t _fh_result = FAITH_OK;
-  _FH_CHECK_DEFER(faith_id128_to_hex(auth_id->bytes, auth_id_hex));
-  _FH_CHECK_DEFER(faith_id128_to_hex(device_id->bytes, device_id_hex));
-
-  nob_log(
-      INFO,
-      "Registered session with auth_id=%s, device_id=%s (online clients: %zu)",
-      auth_id_hex, device_id_hex, hmlen(rt->active_users));
-
-  return FAITH_OK;
-defer:
-  free(sess);
-  return _fh_result;
-}
-
-static faith_status_code_t
-routing_get_session(struct routing_state_t               *rt,
-                    const faith_client_id_t              *auth_id,
-                    const faith_device_id_t              *device_id,
-                    struct client_device_session_data_t **o_sess) {
-  if (!rt || !o_sess || !auth_id || !device_id)
-    return FAITH_ERR_INVALID;
-
-  *o_sess = NULL;
-
-  struct client_route_user_t *user = NULL;
-  _FH_CHECK_RETURN(routing_get_user_from_auth_id(rt, auth_id, &user));
-  if (!user)
-    return FAITH_ERR_NOT_FOUND;
-
-  struct client_route_device_t *devmap = user->value;
-
-  struct client_route_device_t *dev = hmgetp_null(devmap, *device_id);
-
-  // Session is registered, but exact device not registered yet, *o_sess will be
-  // NULL to indicate this state.
-  if (!dev)
-    return FAITH_OK;
-
-  *o_sess = dev->value;
-
-  return FAITH_OK;
-}
-
-static faith_status_code_t
-routing_unregister_session(struct routing_state_t  *rt,
-                           const faith_client_id_t *auth_id,
-                           const faith_device_id_t *device_id) {
-  if (!rt || !auth_id || !device_id)
-    return FAITH_ERR_INVALID;
-
-  struct client_route_user_t *user = NULL;
-  _FH_CHECK_RETURN(routing_get_user_from_auth_id(rt, auth_id, &user));
-  if (!user)
-    return FAITH_ERR_NOT_FOUND;
-
-  struct client_route_device_t *devmap = user->value;
-
-  struct client_route_device_t *dev = hmgetp_null(devmap, *device_id);
-  if (!dev)
-    return FAITH_ERR_NOT_FOUND;
-
-  /* <dev->value> is a dynamically allocated struct client_device_session_data_t
-   */
-  free(dev->value);
-  dev->value = NULL;
-
-  hmdel(devmap, *device_id);
-
-  if (hmlen(devmap) == 0) {
-    hmfree(devmap);
-    hmdel(rt->active_users, *auth_id);
-  } else {
-    /* write pointer back to avoid stale pointers */
-    hmput(rt->active_users, *auth_id, devmap);
-  }
-
-  char auth_id_hex[33];
-  char device_id_hex[33];
-
-  _FH_CHECK_RETURN(faith_id128_to_hex(auth_id->bytes, auth_id_hex));
-  _FH_CHECK_RETURN(faith_id128_to_hex(device_id->bytes, device_id_hex));
-
-  nob_log(INFO,
-          "Unregistered session with auth_id=%s, device_id=%s (online clients: "
-          "%zu)",
-          auth_id_hex, device_id_hex, hmlen(rt->active_users));
-
-  return FAITH_OK;
-}
-
 static faith_status_code_t storage_store_msg_request(
     struct storage_state_t            *st,
     const faith_request_id_t           *request_id,
@@ -479,34 +246,11 @@ storage_get_msg_request(struct storage_state_t *st,
   return FAITH_OK;
 }
 
-static void routing_destroy(struct routing_state_t *rt) {
-  if (!rt)
-    return;
-
-  ptrdiff_t user_count = hmlen(rt->active_users);
-
-  for (ptrdiff_t i = 0; i < user_count; ++i) {
-    struct client_route_device_t *devices = rt->active_users[i].value;
-    ptrdiff_t                     device_count = hmlen(devices);
-
-    for (ptrdiff_t j = 0; j < device_count; ++j) {
-      free(devices[j].value);
-      devices[j].value = NULL;
-    }
-
-    hmfree(devices);
-    rt->active_users[i].value = NULL;
-  }
-
-  hmfree(rt->active_users);
-  rt->active_users = NULL;
-}
-
 static faith_status_code_t
 server_cancel_pending_device_link_request(struct server_state_t *s,
                                           struct client_conn_t  *requesting_cl);
 
-static faith_status_code_t
+void
 server_remove_pending_device_link_request(struct client_conn_t *cl);
 
 static faith_status_code_t
@@ -548,9 +292,9 @@ static faith_status_code_t close_client(struct server_state_t *s,
 
   if (device_link_req_pending) {
 
-    struct client_route_device_t *devices = NULL;
-    faith_status_code_t           rc =
-        routing_get_devices(&s->rt, &cl->auth_id, &devices);
+    client_session_device_t *devices = NULL;
+    faith_status_code_t      rc =
+        sess_registry_get_devices(&s->rt, &cl->auth_id, &devices);
     if (rc != FAITH_OK || devices == NULL) {
       nob_log(ERROR,
               "[client=%" PRIu64
@@ -570,13 +314,13 @@ static faith_status_code_t close_client(struct server_state_t *s,
         result = rc;
     }
 
-    _FH_CHECK(server_remove_pending_device_link_request(cl));
+    server_remove_pending_device_link_request(cl);
   }
 
   if (cl->authorized) {
     // TODO: persistent sessions
     faith_status_code_t rc =
-        routing_unregister_session(&s->rt, &cl->auth_id, &cl->device_id);
+        sess_registry_unregister_session(&s->rt, &cl->auth_id, &cl->device_id);
 
     if (rc != FAITH_OK) {
       nob_log(ERROR, "[client=%" PRIu64 "] routing unregister failed: %s (%d)",
@@ -705,7 +449,7 @@ void server_destroy(struct server_state_t *s) {
     close_client(s, &cl);
   }
 
-  routing_destroy(&s->rt);
+  _FH_CHECK_SCOPED(sess_registry_destroy(&s->rt));
 
   _FH_CHECK_SCOPED(reactor_destroy(&s->reactor));
 
@@ -876,9 +620,9 @@ server_route_envelope(struct server_state_t *s, struct client_conn_t *cl_sender,
   if (envl->body_size > 0 && !envl->body)
     return FAITH_ERR_INVALID;
 
-  struct client_route_user_t *recipient_user = NULL;
-  _FH_CHECK_RETURN(routing_get_user_from_auth_id(&s->rt, recipient_auth_id,
-                                                 &recipient_user));
+  client_session_user_t *recipient_user = NULL;
+  _FH_CHECK_RETURN(sess_registry_get_user_from_auth_id(
+      &s->rt, recipient_auth_id, &recipient_user));
   if (!recipient_user) {
 
     char recipient_auth_id_hex[33];
@@ -932,19 +676,14 @@ server_route_envelope(struct server_state_t *s, struct client_conn_t *cl_sender,
   return FAITH_OK;
 }
 
-faith_status_code_t
+void
 server_remove_pending_device_link_request(struct client_conn_t *cl) {
-  if (!cl)
-    return FAITH_ERR_INVALID;
-
-  if (!cl->pending_device_link_req)
-    return FAITH_ERR_ALREADY_CONNECTED;
+  if (!cl || !cl->pending_device_link_req)
+    return;
 
   free(cl->pending_device_link_req);
   cl->pending_device_link_req = NULL;
   cl->pending_device_link_conn = NULL;
-
-  return FAITH_OK;
 }
 
 static faith_status_code_t
@@ -956,53 +695,25 @@ server_cancel_pending_device_link_request(struct server_state_t *s,
   if (requesting_cl->state != CLIENT_WAIT_FOR_DEVICE_LINK_RESPONSE)
     return FAITH_OK;
 
-  struct client_temporary_handshake_params_t *params =
+  client_temporary_handshake_params_t *params =
       &requesting_cl->temp_handshake_params;
 
-  /* <sender_auth_id> is the auth ID of the account that <requesting_cl>
-   * requested to be linked to. All devices on that account need to be
-   * notified that the request has cancelled. */
-  struct client_route_device_t *devices = NULL;
-  faith_status_code_t           rc =
-      routing_get_devices(&s->rt, &params->sender_auth_id, &devices);
+  faith_status_code_t device_loop_rc = FAITH_OK;
+  _FH_FOR_EACH_AUTH_DEVICE(
+      s, &params->sender_auth_id, authorized_cl, device_loop_rc, {
+        if (authorized_cl->pending_device_link_conn != requesting_cl)
+          continue;
 
-  if (rc == FAITH_ERR_NOT_FOUND)
-    return FAITH_OK;
+        faith_envelope_t envl = {0};
+        envl.type = FAITH_ENVELOPE_DEVICE_LINK_CANCELLED;
+        envl.recipient_id = authorized_cl->auth_id;
+        _FH_CHECK(server_send_envelope_or_close(s, authorized_cl, &envl));
+        if (_fh_rc != FAITH_OK && device_loop_rc == FAITH_OK)
+          device_loop_rc = _fh_rc;
+        server_remove_pending_device_link_request(authorized_cl);
+      });
 
-  if (rc != FAITH_OK)
-    return rc;
-
-  faith_status_code_t result = FAITH_OK;
-  ptrdiff_t           n_devices = hmlen(devices);
-
-  for (ptrdiff_t i = 0; i < n_devices; ++i) {
-    if (!devices[i].value || !devices[i].value->conn) {
-      nob_log(ERROR, "Routing table contains an invalid device entry");
-      continue;
-    }
-
-    struct client_conn_t *authorized_cl = devices[i].value->conn;
-
-    if (authorized_cl->pending_device_link_conn != requesting_cl)
-      continue;
-
-    if (authorized_cl->authorized && !authorized_cl->closing &&
-        authorized_cl->state == CLIENT_OPEN) {
-      faith_envelope_t envl = {0};
-      envl.type = FAITH_ENVELOPE_DEVICE_LINK_CANCELLED;
-      envl.recipient_id = authorized_cl->auth_id;
-      envl.body = NULL;
-      envl.body_size = 0;
-
-      rc = server_send_envelope_or_close(s, authorized_cl, &envl);
-
-      if (rc != FAITH_OK && result == FAITH_OK)
-        result = rc;
-    }
-
-  }
-
-  return result;
+  return device_loop_rc;
 }
 
 static faith_status_code_t
@@ -1096,8 +807,7 @@ server_handle_hello(struct server_state_t *s, struct client_conn_t *cl,
       faith_random_bytes((uint8_t *)&server_nonce, sizeof(server_nonce)));
 
   /* Construct temporary handshake parameters for client identity evaluation */
-  struct client_temporary_handshake_params_t *params =
-      &cl->temp_handshake_params;
+  client_temporary_handshake_params_t *params = &cl->temp_handshake_params;
 
   params->sender_auth_id = hello_envl->sender_id;
   params->device_id = device_id;
@@ -1232,7 +942,7 @@ static faith_status_code_t server_send_device_link_request(
 
 static faith_status_code_t server_handle_newly_joined_device(
     struct server_state_t *s, struct client_conn_t *cl,
-    const struct client_temporary_handshake_params_t *params) {
+    const client_temporary_handshake_params_t *params) {
   if (!s || !cl || cl->closing || !params)
     return FAITH_ERR_INVALID;
 
@@ -1254,53 +964,45 @@ static faith_status_code_t server_handle_newly_joined_device(
         cl->conn.id, cl->conn.fd, new_device_id_hex, cl_auth_id_hex);
   }
 
-  struct client_route_device_t *authorized_devices = NULL;
-
-  _FH_CHECK_RETURN(routing_get_devices(&s->rt, &params->sender_auth_id,
-                                       &authorized_devices));
-
-  ptrdiff_t n_authorized_devices = hmlen(authorized_devices);
-  if (!authorized_devices || n_authorized_devices < 1) {
-    return FAITH_ERR_INVALID;
+  if (!sess_registry_auth_id_registered(&s->rt, &params->sender_auth_id)) {
+    server_disconnect_client(s, cl, FAITH_DISCONNECT_INTERNAL_ERROR,
+                             FAITH_CLIENT_RECONNECT_FORBIDDEN, 0, 0,
+                             "The specified auth ID is in an invalid internal "
+                             "state.");
+    return FAITH_ERR_NOT_FOUND;
   }
 
   /* Send device authorization request to every already registered device
    for that auth ID */
-  for (ptrdiff_t i = 0; i < n_authorized_devices; i++) {
-    if (!authorized_devices[i].value || !authorized_devices[i].value->conn) {
-      nob_log(ERROR, "Routing table contains an invalid device entry");
-      continue;
-    }
-    struct client_conn_t *authorized_cl = authorized_devices[i].value->conn;
-    if (!authorized_cl->authorized || authorized_cl->closing ||
-        authorized_cl->state != CLIENT_OPEN)
-      continue;
+  faith_status_code_t device_loop_rc = FAITH_OK;
+  _FH_FOR_EACH_AUTH_DEVICE(
+      s, &params->sender_auth_id, authorized_cl, device_loop_rc, {
+        faith_envl_stc_device_link_req_t *req = NULL;
+        _FH_CHECK(server_send_device_link_request(
+            s, authorized_cl, cl, &params->sender_auth_id, params->public_key,
+            &params->device_id, &req));
 
-    faith_envl_stc_device_link_req_t *req = NULL;
-    _FH_CHECK(server_send_device_link_request(
-        s, authorized_cl, cl, &params->sender_auth_id, params->public_key,
-        &params->device_id, &req));
+        if (_fh_rc != FAITH_OK || !req) {
+          char sender_auth_id_hex[33];
+          _FH_CHECK_RETURN(faith_id128_to_hex(params->sender_auth_id.bytes,
+                                              sender_auth_id_hex));
+          char device_id_hex[33];
+          _FH_CHECK_RETURN(
+              faith_id128_to_hex(params->device_id.bytes, device_id_hex));
+          nob_log(ERROR,
+                  "Failed to send device link request to authorized "
+                  "device session with device_id: %s (auth_id: %s)",
+                  device_id_hex, sender_auth_id_hex);
 
-    if (_fh_rc != FAITH_OK || !req) {
-      char sender_auth_id_hex[33];
-      _FH_CHECK_RETURN(
-          faith_id128_to_hex(params->sender_auth_id.bytes, sender_auth_id_hex));
-      char device_id_hex[33];
-      _FH_CHECK_RETURN(
-          faith_id128_to_hex(params->device_id.bytes, device_id_hex));
-      nob_log(ERROR,
-              "Failed to send device link request to authorized "
-              "device session with device_id: %s (auth_id: %s)",
-              device_id_hex, sender_auth_id_hex);
+          return _fh_rc;
+        }
 
-      return _fh_rc;
-    }
-
-    /* Set pending device link request of receiving client connection. We also
-     * store the client connection that sent the device link request. */
-    authorized_cl->pending_device_link_req = req;
-    authorized_cl->pending_device_link_conn = cl;
-  }
+        /* Set pending device link request of receiving client connection. We
+         * also store the client connection that sent the device link request.
+         */
+        authorized_cl->pending_device_link_req = req;
+        authorized_cl->pending_device_link_conn = cl;
+      });
 
   /* Send DEVICE_AUTH_PENDING to the connection that requested the
    * new device */
@@ -1327,7 +1029,7 @@ static faith_status_code_t server_authorize_client(
 
   if (register_session) {
     /* register client session */
-    _FH_CHECK_RETURN(routing_register_session(&s->rt, &cl->auth_id,
+    _FH_CHECK_RETURN(sess_registry_register_session(&s->rt, &cl->auth_id,
                                               &cl->device_id, cl, public_key));
   }
 
@@ -1367,7 +1069,7 @@ static faith_status_code_t server_handle_challenge_response(
     return FAITH_ERR_BAD_ENVELOPE;
   }
 
-  struct client_temporary_handshake_params_t *params =
+  client_temporary_handshake_params_t *params =
       &cl->temp_handshake_params;
 
   if (!faith_client_id_equal(challenge_response_envl->sender_id,
@@ -1391,8 +1093,8 @@ static faith_status_code_t server_handle_challenge_response(
   uint8_t *verification_public_key = NULL;
 
   /* Looking for the mapped session of the auth ID, device ID pair */
-  struct client_device_session_data_t *sess = NULL;
-  faith_status_code_t                  sess_rc = routing_get_session(
+  client_device_session_data_t *sess = NULL;
+  faith_status_code_t                  sess_rc = sess_registry_get_session(
       &s->rt, &params->sender_auth_id, &params->device_id, &sess);
 
   /* Failure finding session, different from FAITH_ERR_NOT_FOUND */
@@ -1714,9 +1416,9 @@ server_handle_device_link_response(struct server_state_t  *s,
     }
   }
 
-  struct client_device_session_data_t *sess = NULL;
+  client_device_session_data_t *sess = NULL;
   {
-    _FH_CHECK(routing_get_session(&s->rt, &cl->auth_id, &cl->device_id, &sess));
+    _FH_CHECK(sess_registry_get_session(&s->rt, &cl->auth_id, &cl->device_id, &sess));
     /* We specifically need routing_get_session() to return FAITH_OK. This is
      * returned only if <cl->auth_id> is a registered client_route_user_t
      * and <cl->device_id> is a registered client_route_device_t of that user.
@@ -1797,7 +1499,7 @@ server_handle_device_link_response(struct server_state_t  *s,
 
   faith_status_code_t device_loop_rc = FAITH_OK;
   _FH_FOR_EACH_AUTH_DEVICE(s, &cl->auth_id, recipient, device_loop_rc, {
-    _FH_CHECK(server_remove_pending_device_link_request(cl));
+    server_remove_pending_device_link_request(cl);
   });
 
   return device_loop_rc == FAITH_OK ? rc : device_loop_rc;
@@ -1816,7 +1518,7 @@ defer: {
   
   /* Don't propagate status code */
   {
-    _FH_CHECK(server_remove_pending_device_link_request(cl));
+    server_remove_pending_device_link_request(cl);
   }
 
   /* Close the connection that requested the device link: <req_cl> */
@@ -1874,7 +1576,7 @@ server_handle_msg_request(struct server_state_t *s, struct client_conn_t *cl,
   _FH_CHECK_RETURN(
       faith_decode_msg_request_body(req_envl->body, req_envl->body_size, &req));
 
-  if (!routing_auth_id_registered(&s->rt, &req.auth_id_recv)) {
+  if (!sess_registry_auth_id_registered(&s->rt, &req.auth_id_recv)) {
 
     faith_envl_stc_msg_request_failed_t fail = {
         .cl_req_id = req.cl_req_id,
@@ -2034,9 +1736,9 @@ server_handle_msg_request_response(struct server_state_t *s, struct client_conn_
     return FAITH_ERR_UNAUTHORIZED;
 
   /* Get session of the responding client connection */
-  struct client_device_session_data_t *sess = NULL;
+  client_device_session_data_t *sess = NULL;
   _FH_CHECK_RETURN(
-      routing_get_session(&s->rt, &cl->auth_id, &cl->device_id, &sess));
+      sess_registry_get_session(&s->rt, &cl->auth_id, &cl->device_id, &sess));
 
   if (!sess)
     return FAITH_ERR_INVALID;
