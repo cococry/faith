@@ -1,20 +1,20 @@
 #include "frame.h"
 #include "conn.h"
 
-conn_read_result_t
-frame_try_full_read(transport_conn_t* conn, faith_frame_t *frame,
-                   bool verbose_logging) {
+transport_result_t frame_try_full_read(transport_conn_t *conn,
+                                       faith_frame_t    *frame,
+                                       bool              verbose_logging) {
   while (1) {
     size_t consumed = 0;
 
     if (verbose_logging) {
       nob_log(INFO,
               "[client=%" PRIu64 " fd=%i] Trying to parse frame buffer...",
-              conn->conn_id, conn->fd);
+              conn->id, conn->fd);
     }
 
-    faith_status_code_t rc =
-        frame_try_parse_from_buffer(conn->in.buf, conn->in.size, frame, &consumed);
+    faith_status_code_t rc = frame_try_parse_from_buffer(
+        conn->in.buf, conn->in.size, frame, &consumed);
 
     if (rc == FAITH_OK) {
 
@@ -23,7 +23,7 @@ frame_try_full_read(transport_conn_t* conn, faith_frame_t *frame,
             INFO,
             "[client=%" PRIu64
             " fd=%i] Successfully parsed full frame from buffer (%li bytes)",
-            conn->conn_id, conn->fd, consumed);
+            conn->id, conn->fd, consumed);
       }
 
       size_t remaining = conn->in.size - consumed;
@@ -34,7 +34,7 @@ frame_try_full_read(transport_conn_t* conn, faith_frame_t *frame,
 
       conn->in.size -= consumed;
 
-      return CONN_READ_OK;
+      return TRANSPORT_RES_COMPLETE;
     }
 
     if (rc == FAITH_ERR_INCOMPLETE) {
@@ -43,68 +43,66 @@ frame_try_full_read(transport_conn_t* conn, faith_frame_t *frame,
         nob_log(INFO,
                 "[client=%" PRIu64
                 " fd=%i] Frame incomplete, reading more bytes...",
-                conn->conn_id, conn->fd);
+                conn->id, conn->fd);
       }
-      conn_read_result_t rr = conn_read_more_ssl_bytes(conn, verbose_logging);
+      transport_result_t res = conn_read_more_ssl_bytes(conn, verbose_logging);
 
-      if (rr == CONN_READ_GOT_BYTES) {
+      if (res == TRANSPORT_RES_GOT_BYTES) {
         if (verbose_logging) {
           nob_log(INFO,
                   "[client=%" PRIu64
                   " fd=%i] Got new bytes, parsing frame again...",
-                  conn->conn_id, conn->fd);
+                  conn->id, conn->fd);
         }
         continue;
       }
 
-      if (rr == CONN_READ_WANT_READ) {
+      if (res == TRANSPORT_RES_WANT_READ) {
         if (verbose_logging) {
           nob_log(INFO,
                   "[client=%" PRIu64
                   " fd=%i] SSL_read needs to wait for socket to be readable",
-                  conn->conn_id, conn->fd);
+                  conn->id, conn->fd);
         }
-        return rr;
+        return res;
       }
 
-      if (rr == CONN_READ_WANT_WRITE) {
+      if (res == TRANSPORT_RES_WANT_WRITE) {
         if (verbose_logging) {
           nob_log(INFO,
                   "[client=%" PRIu64
                   " fd=%i] SSL_read needs to wait for socket to be writable",
-                  conn->conn_id, conn->fd);
+                  conn->id, conn->fd);
         }
-        return rr;
+        return res;
       }
 
-      if (rr == CONN_READ_CLOSED) {
+      if (res == TRANSPORT_RES_CLOSED) {
         nob_log(INFO,
                 "[client=%" PRIu64
                 " fd=%i] Connection closed while reading incomplete frame.",
-                conn->conn_id, conn->fd);
-        return rr;
+                conn->id, conn->fd);
+        return res;
       }
 
       nob_log(ERROR,
               "[client=%" PRIu64
               " fd=%i] Error while reading incomplete frame. Error=%i",
-              conn->conn_id, conn->fd, rr);
+              conn->id, conn->fd, res);
 
-      return rr;
+      return res;
     }
 
-    nob_log(ERROR, "[client=%" PRIu64 " fd=%i] Failed to read frame",
-            conn->conn_id, conn->fd);
+    nob_log(ERROR, "[client=%" PRIu64 " fd=%i] Failed to read frame", conn->id,
+            conn->fd);
 
-    return CONN_READ_ERROR;
+    return TRANSPORT_RES_ERROR;
   }
-
-
 }
 faith_status_code_t frame_try_parse_from_buffer(const uint8_t *payload,
-                                                       size_t payload_size,
-                                                       faith_frame_t *out,
-                                                       size_t *consumed_out) {
+                                                size_t         payload_size,
+                                                faith_frame_t *out,
+                                                size_t        *consumed_out) {
   if (!consumed_out || !out)
     return FAITH_ERR_INVALID;
 
