@@ -2,10 +2,14 @@
 
 #include "../protocol.h"
 
-#include "server.h"
+typedef struct {
+  uint8_t public_key[FAITH_ED25519_PUBLIC_KEY_SIZE];
+} client_identity_t;
+
+struct client_conn_t;
 
 typedef struct {
-  client_conn_t    *conn;
+  struct client_conn_t    *conn;
   client_identity_t ident;
 } client_device_session_data_t;
 
@@ -40,7 +44,7 @@ sess_registry_get_devices(sess_registry_state_t    *rt,
 
 faith_status_code_t sess_registry_register_session(
     sess_registry_state_t *rt, const faith_client_id_t *auth_id,
-    const faith_device_id_t *device_id, client_conn_t *cl,
+    const faith_device_id_t *device_id, struct client_conn_t *cl,
     const uint8_t public_key[FAITH_ED25519_PUBLIC_KEY_SIZE]);
 
 faith_status_code_t sess_registry_get_session(

@@ -87,10 +87,26 @@ bool build() {
   nob_cc_flags(&cmd);
   nob_cc_output(&cmd, BUILD_FOLDER "faithd");
   nob_cmd_append(&cmd, "-lssl", "-lcrypto");
-  nob_cc_inputs(&cmd, "src/faithd.c", "src/protocol.c", "src/transport/tls.c",
-                "src/transport/conn.c", "src/reactor/reactor.c",
-                "src/transport/frame.c", "src/logging/logging.c",
-                "src/server/sess_registry.c");
+nob_cc_inputs(
+    &cmd,
+    "src/auth/device_link.c",
+    "src/auth/handshake.c",
+    "src/client/client.c",
+    "src/delivery/routing.c",
+    "src/logging/logging.c",
+    "src/reactor/reactor.c",
+    "src/server/client_io.c",
+    "src/server/client_lifecycle.c",
+    "src/server/dispatch.c",
+    "src/server/server.c",
+    "src/server/sess_registry.c",
+    "src/server/storage.c",
+    "src/transport/conn.c",
+    "src/transport/frame.c",
+    "src/transport/tls.c",
+    "src/faithd.c",
+    "src/protocol.c"
+);
 
   if (!cmd_run(&cmd))
     return false;
