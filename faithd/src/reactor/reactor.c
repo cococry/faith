@@ -36,6 +36,10 @@ static uint32_t reactor_event_mask_to_epoll(reactor_events_t events) {
   return epoll_events;
 }
 
+/*========================================== */
+/* PUBLIC API - public api - public API */
+/*==========================================*/
+
 faith_status_code_t reactor_init(reactor_context_t *o_reactor_ctx) {
   if (!o_reactor_ctx)
     return FAITH_ERR_INVALID;
