@@ -1077,7 +1077,7 @@ static faith_status_code_t faith_client_send_hello(faith_client_t *client) {
   if (!client)
     return FAITH_ERR_INVALID;
 
-  uint8_t body[FAITH_ENVL_HELLO_BODY_SIZE];
+  uint8_t body[FAITH_ENVL_CTS_HELLO_BODY_SIZE];
 
   // HELLO {
   // header: {
@@ -1134,14 +1134,14 @@ client_handle_challenge(faith_client_t   *client,
 
   int ok = challenge_envl->type == FAITH_ENVELOPE_CHALLENGE &&
            challenge_envl->body &&
-           challenge_envl->body_size == FAITH_ENVL_HELLO_CHALLENGE_BODY_SIZE;
+           challenge_envl->body_size == FAITH_ENVL_STC_HELLO_CHALLENGE_BODY_SIZE;
   if (!ok) {
     nob_log(ERROR,
             "Unexpected or malformed server envelope response to HELLO "
             "envelope. Expected: "
             "type=FAITH_ENVELOPE_CHALLENGE, body_size=%" PRIu32
             ", Got: type=%s, body_size=%" PRIu32,
-            FAITH_ENVL_HELLO_CHALLENGE_BODY_SIZE,
+            FAITH_ENVL_STC_HELLO_CHALLENGE_BODY_SIZE,
             faith_envelope_name(challenge_envl->type),
             challenge_envl->body_size);
     return FAITH_ERR_INVALID;

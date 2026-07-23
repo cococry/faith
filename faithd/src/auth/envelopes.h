@@ -15,12 +15,12 @@
                    FAITH_DEVICE_LINK_CODE_SIZE /* code */ +                    \
                    sizeof(uint64_t) /* expires_at_ms*/)
 
-#define FAITH_ENVL_HELLO_BODY_SIZE                                             \
+#define FAITH_ENVL_CTS_HELLO_BODY_SIZE                                             \
   _FAITH_BODY_SIZE(FAITH_DEVICE_ID_SIZE /* client device id */ +               \
                    FAITH_ED25519_PUBLIC_KEY_SIZE /* client public key */ +     \
                    sizeof(uint64_t) /* client nonce */)
 
-#define FAITH_ENVL_HELLO_CHALLENGE_BODY_SIZE                                   \
+#define FAITH_ENVL_STC_HELLO_CHALLENGE_BODY_SIZE                                   \
   _FAITH_BODY_SIZE(sizeof(uint64_t) /* server nonce */)
 
 typedef struct {
