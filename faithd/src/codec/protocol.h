@@ -119,3 +119,34 @@ faith_status_code_t
 faith_decode_hello_challenge_body(const uint8_t    *payload,
                                   faith_body_size_t payload_size,
                                   faith_envl_stc_hello_challenge_t *out);
+
+
+faith_status_code_t
+faith_encode_command_body(uint8_t *out_buf, faith_body_size_t *out_size,
+                                  size_t buf_cap_in_bytes,
+                                  const faith_envl_cts_command_t *in);
+
+faith_status_code_t
+faith_decode_command_body(const uint8_t    *payload,
+                                  faith_body_size_t payload_size,
+                                  faith_envl_cts_command_t *out);
+
+faith_status_code_t
+faith_encode_command_result_body(uint8_t *out_buf, faith_body_size_t *out_size,
+                                  size_t buf_cap_in_bytes,
+                                  const faith_envl_stc_command_result_t *in);
+
+faith_status_code_t
+faith_decode_command_result_body(const uint8_t    *payload,
+                                  faith_body_size_t payload_size,
+                                  faith_envl_stc_command_result_t *out);
+
+faith_status_code_t
+faith_encode_event_body(uint8_t *out_buf, faith_body_size_t *out_size,
+                                  size_t buf_cap_in_bytes,
+                                  const faith_envl_stc_event_t *in);
+
+faith_status_code_t
+faith_decode_event_body(const uint8_t    *payload,
+                                  faith_body_size_t payload_size,
+                                  faith_envl_stc_event_t *out);

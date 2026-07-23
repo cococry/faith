@@ -496,7 +496,7 @@ faith_status_code_t faith_encode_hello_body(uint8_t           *out_buf,
                                             size_t             buf_cap_in_bytes,
                                             const faith_envl_cts_hello_t *in) {
 
-  FAITH_ENCODE_PROLOGUE(FAITH_ENVL_HELLO_BODY_SIZE);
+  FAITH_ENCODE_PROLOGUE(FAITH_ENVL_CTS_HELLO_BODY_SIZE);
 
   size_t offset = 0;
 
@@ -509,7 +509,7 @@ faith_status_code_t faith_encode_hello_body(uint8_t           *out_buf,
   FAITH_ENCODE_U64_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
                              in->client_nonce);
 
-  FAITH_ENCODE_EPILOGUE(FAITH_ENVL_HELLO_BODY_SIZE, !=);
+  FAITH_ENCODE_EPILOGUE(FAITH_ENVL_CTS_HELLO_BODY_SIZE, !=);
 
   return FAITH_OK;
 }
@@ -518,7 +518,7 @@ faith_status_code_t faith_decode_hello_body(const uint8_t    *payload,
                                             faith_body_size_t payload_size,
                                             faith_envl_cts_hello_t *out) {
 
-  FAITH_DECODE_PROLOGUE(FAITH_ENVL_HELLO_BODY_SIZE, !=);
+  FAITH_DECODE_PROLOGUE(FAITH_ENVL_CTS_HELLO_BODY_SIZE, !=);
 
   size_t offset = 0;
 
@@ -530,7 +530,7 @@ faith_status_code_t faith_decode_hello_body(const uint8_t    *payload,
 
   FAITH_DECODE_U64_BE_RETURN(payload, payload_size, offset, out->client_nonce);
 
-  FAITH_DECODE_EPILOGUE(FAITH_ENVL_HELLO_BODY_SIZE, !=);
+  FAITH_DECODE_EPILOGUE(FAITH_ENVL_CTS_HELLO_BODY_SIZE, !=);
 
   return FAITH_OK;
 }
@@ -540,14 +540,14 @@ faith_encode_hello_challenge_body(uint8_t *out_buf, faith_body_size_t *out_size,
                                   size_t buf_cap_in_bytes,
                                   const faith_envl_stc_hello_challenge_t *in) {
 
-  FAITH_ENCODE_PROLOGUE(FAITH_ENVL_HELLO_CHALLENGE_BODY_SIZE);
+  FAITH_ENCODE_PROLOGUE(FAITH_ENVL_STC_HELLO_CHALLENGE_BODY_SIZE);
 
   size_t offset = 0;
 
   FAITH_ENCODE_U64_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
                              in->server_nonce);
 
-  FAITH_ENCODE_EPILOGUE(FAITH_ENVL_HELLO_CHALLENGE_BODY_SIZE, !=);
+  FAITH_ENCODE_EPILOGUE(FAITH_ENVL_STC_HELLO_CHALLENGE_BODY_SIZE, !=);
 
   return FAITH_OK;
 }
@@ -557,13 +557,166 @@ faith_decode_hello_challenge_body(const uint8_t    *payload,
                                   faith_body_size_t payload_size,
                                   faith_envl_stc_hello_challenge_t *out) {
 
-  FAITH_DECODE_PROLOGUE(FAITH_ENVL_HELLO_CHALLENGE_BODY_SIZE, !=);
+  FAITH_DECODE_PROLOGUE(FAITH_ENVL_STC_HELLO_CHALLENGE_BODY_SIZE, !=);
 
   size_t offset = 0;
 
   FAITH_DECODE_U64_BE_RETURN(payload, payload_size, offset, out->server_nonce);
 
-  FAITH_DECODE_EPILOGUE(FAITH_ENVL_HELLO_CHALLENGE_BODY_SIZE, !=);
+  FAITH_DECODE_EPILOGUE(FAITH_ENVL_STC_HELLO_CHALLENGE_BODY_SIZE, !=);
+
+  return FAITH_OK;
+}
+
+faith_status_code_t
+faith_encode_command_body(uint8_t *out_buf, faith_body_size_t *out_size,
+                          size_t                          buf_cap_in_bytes,
+                          const faith_envl_cts_command_t *in) {
+
+  FAITH_ENCODE_PROLOGUE(FAITH_ENVL_CTS_COMMAND_BODY_SIZE_FIXED +
+                        in->payload_size);
+
+  if (in->payload_size > FAITH_COMMAND_PAYLOAD_SIZE_MAX) {
+    return FAITH_ERR_OVERFLOW;
+  }
+
+  size_t offset = 0;
+
+  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, in->cmd_id.bytes,
+                      sizeof(in->cmd_id.bytes));
+
+  FAITH_ENCODE_U32_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
+                             (uint32_t)in->type);
+
+  FAITH_ENCODE_U32_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
+                             (uint32_t)in->payload_size);
+
+  if (in->payload_size > 0) {
+    FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, in->payload,
+                        in->payload_size);
+  }
+
+  FAITH_ENCODE_EPILOGUE(
+      FAITH_ENVL_CTS_COMMAND_BODY_SIZE_FIXED + in->payload_size, !=);
+
+  return FAITH_OK;
+}
+faith_status_code_t faith_decode_command_body(const uint8_t    *payload,
+                                              faith_body_size_t payload_size,
+                                              faith_envl_cts_command_t *out) {
+
+  FAITH_DECODE_PROLOGUE(FAITH_ENVL_CTS_COMMAND_BODY_SIZE_FIXED, <);
+
+  size_t offset = 0;
+
+  FAITH_DECODE_RETURN(payload, payload_size, offset, out->cmd_id.bytes,
+                      sizeof(out->cmd_id.bytes));
+
+  FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset, out->type);
+
+  FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset, out->payload_size);
+
+  if (out->payload_size > FAITH_COMMAND_PAYLOAD_SIZE_MAX)
+    return FAITH_ERR_BAD_ENVELOPE;
+
+  if (out->payload_size > 0) {
+    out->payload = malloc(out->payload_size);
+    if (!out->payload)
+      return FAITH_ERR_NOMEM;
+
+    memcpy(out->payload, payload + offset, out->payload_size);
+  }
+
+  FAITH_DECODE_EPILOGUE_DNY(FAITH_ENVL_CTS_COMMAND_BODY_SIZE_FIXED, <);
+
+  return FAITH_OK;
+}
+
+faith_status_code_t
+faith_encode_command_result_body(uint8_t *out_buf, faith_body_size_t *out_size,
+                                 size_t buf_cap_in_bytes,
+                                 const faith_envl_stc_command_result_t *in) {
+  FAITH_ENCODE_PROLOGUE(FAITH_ENVL_STC_COMMAND_RESULT_BODY_SIZE);
+
+  size_t offset = 0;
+
+  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, in->cmd_id.bytes,
+                      sizeof(in->cmd_id.bytes));
+
+  FAITH_ENCODE_U32_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
+                             (uint32_t)in->type);
+
+  FAITH_ENCODE_U32_BE_RETURN(out_buf, buf_cap_in_bytes, offset, in->result);
+
+  FAITH_ENCODE_EPILOGUE(FAITH_ENVL_STC_COMMAND_RESULT_BODY_SIZE, !=);
+
+  return FAITH_OK;
+}
+
+faith_status_code_t
+faith_decode_command_result_body(const uint8_t                   *payload,
+                                 faith_body_size_t                payload_size,
+                                 faith_envl_stc_command_result_t *out) {
+  FAITH_DECODE_PROLOGUE(FAITH_ENVL_STC_COMMAND_RESULT_BODY_SIZE, !=);
+
+  size_t offset = 0;
+
+  FAITH_DECODE_RETURN(payload, payload_size, offset, out->cmd_id.bytes,
+                      sizeof(out->cmd_id.bytes));
+
+  FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset, out->type);
+
+  FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset, out->result);
+
+  FAITH_DECODE_EPILOGUE_DNY(FAITH_ENVL_STC_COMMAND_RESULT_BODY_SIZE, !=);
+
+  return FAITH_OK;
+}
+
+faith_status_code_t faith_encode_event_body(uint8_t           *out_buf,
+                                            faith_body_size_t *out_size,
+                                            size_t             buf_cap_in_bytes,
+                                            const faith_envl_stc_event_t *in) {
+
+  FAITH_ENCODE_PROLOGUE(FAITH_ENVL_STC_EVENT_BODY_SIZE_FIXED + in->data_size);
+
+  size_t offset = 0;
+
+  FAITH_ENCODE_U64_BE_RETURN(out_buf, buf_cap_in_bytes, offset, in->seq_num);
+  FAITH_ENCODE_U32_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
+                             (uint32_t)in->type);
+  FAITH_ENCODE_U32_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
+                             (uint32_t)in->data_size);
+
+  if (in->data_size > 0) {
+    FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, in->data,
+                        in->data_size);
+  }
+
+  FAITH_ENCODE_EPILOGUE(FAITH_ENVL_STC_EVENT_BODY_SIZE_FIXED + in->data, !=);
+
+  return FAITH_OK;
+}
+
+faith_status_code_t faith_decode_event_body(const uint8_t    *payload,
+                                            faith_body_size_t payload_size,
+                                            faith_envl_stc_event_t *out) {
+  FAITH_DECODE_PROLOGUE(FAITH_ENVL_STC_EVENT_BODY_SIZE_FIXED, <);
+
+  size_t offset = 0;
+
+  FAITH_DECODE_U64_BE_RETURN(payload, payload_size, offset, out->seq_num);
+  FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset, out->type);
+  FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset, out->data_size);
+  if (out->data_size > 0) {
+    out->data = malloc(out->data_size);
+    if (!out->data)
+      return FAITH_ERR_NOMEM;
+
+    memcpy(out->data, payload + offset, out->data_size);
+  }
+
+  FAITH_DECODE_EPILOGUE_DNY(FAITH_ENVL_STC_EVENT_BODY_SIZE_FIXED, <);
 
   return FAITH_OK;
 }

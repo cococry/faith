@@ -58,7 +58,7 @@ faith_status_code_t auth_handle_hello(server_state_t *s, client_conn_t *cl,
       .server_nonce = server_nonce,
   };
 
-  uint8_t body[FAITH_ENVL_HELLO_CHALLENGE_BODY_SIZE];
+  uint8_t body[FAITH_ENVL_STC_HELLO_CHALLENGE_BODY_SIZE];
 
   faith_body_size_t body_size = 0;
 
