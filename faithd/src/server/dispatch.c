@@ -1,11 +1,11 @@
 #include "dispatch.h"
-#include "../protocol.h"
+#include "../core/core.h"
 
 #include "client_io.h"
 #include "server.h"
 
-#include "../auth/handshake.h"
 #include "../auth/device_link.h"
+#include "../auth/handshake.h"
 
 faith_status_code_t server_dispatch_frame(server_state_t *s, client_conn_t *cl,
                                           faith_frame_t *frame) {
@@ -14,7 +14,7 @@ faith_status_code_t server_dispatch_frame(server_state_t *s, client_conn_t *cl,
 
   nob_log(INFO,
           "[client=%" PRIu64
-          " fd=%i] Server got frame: msg_type=%s payload_size=%zu",
+          " fd=%i] Server got frame: msg_type=%s payload_size=%u",
           cl->conn.id, cl->conn.fd, faith_frame_msg_name(frame->msg_type),
           frame->payload_size);
 
@@ -119,8 +119,13 @@ faith_status_code_t server_handle_ping(server_state_t *s, client_conn_t *cl,
   _FH_CHECK_RETURN(
       faith_encode_pong(payload, &payload_size, sizeof(payload), &pong));
 
-  _FH_CHECK_RETURN(
-      server_queue_frame(s, cl, payload, payload_size, FAITH_MSG_PONG));
+  faith_frame_t pong_frame = {0};
+  pong_frame.msg_type = FAITH_MSG_PONG;
+  pong_frame.proto_ver = FAITH_PROTO_VERSION;
+  pong_frame.payload = payload;
+  pong_frame.payload_size = payload_size;
+
+  _FH_CHECK_RETURN(server_queue_frame(s, cl, &pong_frame));
 
   nob_log(
       INFO,

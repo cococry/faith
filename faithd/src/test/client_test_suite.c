@@ -1,4 +1,4 @@
-#include "client/client.h"
+#include "../client/client.h"
 
 #include <errno.h>
 #include <poll.h>
@@ -74,7 +74,6 @@ int main(int argc, char **argv) {
   }
 
   faith_client_id_t recipient_id = {0};
-  faith_msg_request_t msg_request = {0};
 
   if (argc >= 2) {
     if (!client_id_from_hex(argv[1], &recipient_id)) {
@@ -97,7 +96,6 @@ int main(int argc, char **argv) {
   }
 
   bool pending_device_link_request = false;
-  bool pending_msg_request = false;
 
   printf("Type messages and press Enter. Type /quit to exit.\n");
 
@@ -192,44 +190,6 @@ int main(int argc, char **argv) {
         fflush(stdout);
         continue;
       }
-      if (pending_msg_request) {
-        if (strcmp(line, "y") == 0 || strcmp(line, "Y") == 0 ||
-            strcmp(line, "yes") == 0 || strcmp(line, "YES") == 0) {
-          pending_msg_request = false;
-
-          faith_status_code_t approve_rc =
-              faith_client_msg_request_accept(client, &msg_request);
-
-          if (approve_rc != FAITH_OK) {
-            fprintf(stderr, "faith_client_msg_request_accept() failed: %s\n",
-                    faith_status_code_name(approve_rc));
-          } else {
-            printf("Message request accepted.\n");
-          }
-        } else if (strcmp(line, "n") == 0 || strcmp(line, "N") == 0 ||
-                   strcmp(line, "no") == 0 || strcmp(line, "NO") == 0) {
-          pending_msg_request = false;
-
-          faith_status_code_t deny_rc =
-              faith_client_msg_request_deny(client, &msg_request);
-
-          if (deny_rc != FAITH_OK) {
-            fprintf(stderr, "faith_client_msg_request_deny() failed: %s\n",
-                    faith_status_code_name(deny_rc));
-          } else {
-            printf("Message request denied.\n");
-          }
-        } else {
-          printf("Please answer y or n (pending message request).\n");
-          printf("(y)es/n(o) ? ");
-          fflush(stdout);
-          continue;
-        }
-
-        printf("> ");
-        fflush(stdout);
-        continue;
-      }
 
       if (line[0] != '\0') {
         faith_status_code_t send_rc =
@@ -288,20 +248,6 @@ int main(int argc, char **argv) {
           pending_device_link_request = true;
           printf("(y)es/n(o) ? ");
           break;
-
-        case FAITH_EVENT_AUTHORIZED: 
-          if (argc > 1) {
-          faith_status_code_t rc =
-              faith_client_send_msg_request(client, recipient_id);
-          if (rc == FAITH_OK) {
-            printf("Sent message request to %s\n", argv[1]);
-          } else {
-
-            printf("Failed to sent message request to %s (Error: %s)\n",
-                   argv[1], faith_status_code_name(rc));
-          }
-        }
-          break;
         case FAITH_EVENT_DEVICE_AUTH_RESPONSE_ACK:
         case FAITH_EVENT_DEVICE_LINK_CANCELLED:
           if (pending_device_link_request) {
@@ -317,17 +263,6 @@ int main(int argc, char **argv) {
 
           printf("> ");
           break;
-        case FAITH_EVENT_MSG_REQUEST_RECEIVED: {
-          printf("Received message request.\n");
-          pending_msg_request = true;
-          memcpy(msg_request.srv_req_id.bytes, ev.value0_128,
-                 FAITH_REQUEST_ID_SIZE);
-          memcpy(msg_request.auth_id_req.bytes, ev.value1_128,
-                 FAITH_REQUEST_ID_SIZE);
-
-          printf("accept: (y)es/n(o) ? ");
-          break;
-        }
 
         default:
           if (pending_device_link_request)

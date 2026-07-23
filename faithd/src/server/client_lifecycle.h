@@ -1,12 +1,14 @@
 #pragma once
 
-#include "../protocol.h"
+#include "../core/core.h"
+#include "envelopes.h"
 
 #include "server.h"
 
 faith_status_code_t server_client_adopt_fd(server_state_t *s, int client_fd);
 
-faith_status_code_t server_close_client(server_state_t *s, client_conn_t **cl_ptr);
+faith_status_code_t server_close_client(server_state_t *s,
+                                        client_conn_t **cl_ptr);
 
 faith_status_code_t
 server_client_queue_disconnect(server_state_t *s, client_conn_t *cl,

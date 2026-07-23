@@ -1389,6 +1389,24 @@ impl TextRenderer {
         Ok(layout)
     }
 
+
+    pub fn measure_with_options(
+        &mut self,
+        text: &str,
+        font_handle: FontHandle,
+        options: TextLayoutOptions,
+    ) -> anyhow::Result<Arc<TextLayout>> {
+        self.layout_cached(text, font_handle, options)
+    }
+
+    pub fn measure(
+        &mut self,
+        text: &str,
+        font_handle: FontHandle,
+    ) -> anyhow::Result<Arc<TextLayout>> {
+        self.measure_with_options(text, font_handle, TextLayoutOptions{ max_width: std::f32::MAX})
+    }
+
     fn is_leading_forbidden_token(&self, token: &str) -> bool {
         token.chars().all(|ch| {
             matches!(

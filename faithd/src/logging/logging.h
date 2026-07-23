@@ -1,5 +1,5 @@
-#pragma once 
+#pragma once
 
 #include <stdbool.h>
 
-extern bool g_verbose_logging; 
+extern bool g_verbose_logging;

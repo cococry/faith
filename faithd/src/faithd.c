@@ -1,4 +1,3 @@
-#include "protocol.h"
 #include "server/server.h"
 
 #include "logging/logging.h"

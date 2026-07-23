@@ -99,11 +99,12 @@ faith_status_code_t tls_new_with_fd(tls_context_t *tls, int fd,
 
   (*o_state).ssl = ssl;
 
-  if(g_verbose_logging) {
-  nob_log(INFO,
-          _MODULE_NAME
-          "Initialized SSL and set accept state for TLS connection with fd: %i",
-          fd);
+  if (g_verbose_logging) {
+    nob_log(
+        INFO,
+        _MODULE_NAME
+        "Initialized SSL and set accept state for TLS connection with fd: %i",
+        fd);
   }
 
   return FAITH_OK;

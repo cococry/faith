@@ -4,8 +4,7 @@
 #include "../logging/logging.h"
 
 transport_result_t frame_try_full_read(transport_conn_t *conn,
-                                       faith_frame_t    *frame
-                                       ) {
+                                       faith_frame_t    *frame) {
   while (1) {
     size_t consumed = 0;
 

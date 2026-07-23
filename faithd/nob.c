@@ -80,18 +80,18 @@ bool command_loc(const char *file, int line, const char *arg,
   return commands->picked;
 }
 
-bool build() {
-  Cmd cmd = {0};
-
-  nob_cc(&cmd);
-  nob_cc_flags(&cmd);
-  nob_cc_output(&cmd, BUILD_FOLDER "faithd");
-  nob_cmd_append(&cmd, "-lssl", "-lcrypto");
-nob_cc_inputs(
-    &cmd,
+static const char *faithd_sources[] = {
     "src/auth/device_link.c",
     "src/auth/handshake.c",
+    "src/auth/structs.c",
     "src/client/client.c",
+    "src/codec/helpers.c",
+    "src/codec/msg.c",
+    "src/codec/protocol.c",
+    "src/codec/signatures.c",
+    "src/core/core.c",
+    "src/core/crypto.c",
+    "src/core/envelopes.c",
     "src/delivery/routing.c",
     "src/logging/logging.c",
     "src/reactor/reactor.c",
@@ -100,28 +100,138 @@ nob_cc_inputs(
     "src/server/dispatch.c",
     "src/server/server.c",
     "src/server/sess_registry.c",
-    "src/server/storage.c",
     "src/transport/conn.c",
     "src/transport/frame.c",
     "src/transport/tls.c",
     "src/faithd.c",
-    "src/protocol.c"
-);
+};
 
-  if (!cmd_run(&cmd))
-    return false;
+static const char *faithd_objects[] = {
+    BUILD_FOLDER "obj/auth_device_link.o",
+    BUILD_FOLDER "obj/auth_handshake.o",
+    BUILD_FOLDER "obj/auth_structs.o",
+    BUILD_FOLDER "obj/client_client.o",
+    BUILD_FOLDER "obj/codec_helpers.o",
+    BUILD_FOLDER "obj/codec_msg.o",
+    BUILD_FOLDER "obj/codec_protocol.o",
+    BUILD_FOLDER "obj/codec_signatures.o",
+    BUILD_FOLDER "obj/core_core.o",
+    BUILD_FOLDER "obj/core_crypto.o",
+    BUILD_FOLDER "obj/core_envelopes.o",
+    BUILD_FOLDER "obj/delivery_routing.o",
+    BUILD_FOLDER "obj/logging_logging.o",
+    BUILD_FOLDER "obj/reactor_reactor.o",
+    BUILD_FOLDER "obj/server_client_io.o",
+    BUILD_FOLDER "obj/server_client_lifecycle.o",
+    BUILD_FOLDER "obj/server_dispatch.o",
+    BUILD_FOLDER "obj/server_server.o",
+    BUILD_FOLDER "obj/server_sess_registry.o",
+    BUILD_FOLDER "obj/transport_conn.o",
+    BUILD_FOLDER "obj/transport_frame.o",
+    BUILD_FOLDER "obj/transport_tls.o",
+    BUILD_FOLDER "obj/faithd.o",
+};
+
+static const char *test_sources[] = {
+    "src/test/client_test_suite.c",
+};
+
+static const char *test_objects[] = {
+    BUILD_FOLDER "obj/client_test_suite.o",
+};
+
+static const char *test_shared_objects[] = {
+    BUILD_FOLDER "obj/codec_protocol.o", BUILD_FOLDER "obj/core_crypto.o",
+    BUILD_FOLDER "obj/core_core.o",      BUILD_FOLDER "obj/codec_helpers.o",
+    BUILD_FOLDER "obj/core_envelopes.o", BUILD_FOLDER "obj/client_client.o",
+    BUILD_FOLDER "obj/auth_structs.o",   BUILD_FOLDER "obj/codec_signatures.o",
+    BUILD_FOLDER "obj/codec_msg.o",
+};
+
+static bool compile_source_async(Procs *procs, const char *source,
+                                 const char *object) {
+  Cmd cmd = {0};
 
   nob_cc(&cmd);
   nob_cc_flags(&cmd);
-  nob_cc_output(&cmd, BUILD_FOLDER "test_suite");
-  nob_cmd_append(&cmd, "-lssl", "-lcrypto");
-  nob_cc_inputs(&cmd, "src/client_test_suite.c", "src/protocol.c",
-                "src/client/client.c");
+  nob_cmd_append(&cmd, "-c", source, "-o", object);
 
-  if (!cmd_run(&cmd))
+  if (!nob_cmd_run(&cmd, .async = procs, .max_procs = 0)) {
+    nob_cmd_free(cmd);
     return false;
+  }
 
+  nob_cmd_free(cmd);
   return true;
+}
+
+bool build(void) {
+  Procs procs = {0};
+  Cmd   cmd = {0};
+  bool  result = false;
+
+  _Static_assert(NOB_ARRAY_LEN(faithd_sources) == NOB_ARRAY_LEN(faithd_objects),
+                 "faithd source/object count mismatch");
+
+  _Static_assert(NOB_ARRAY_LEN(test_sources) == NOB_ARRAY_LEN(test_objects),
+                 "test source/object count mismatch");
+
+  if (!nob_mkdir_if_not_exists(BUILD_FOLDER))
+    goto cleanup;
+
+  if (!nob_mkdir_if_not_exists(BUILD_FOLDER "obj"))
+    goto cleanup;
+
+  for (size_t i = 0; i < NOB_ARRAY_LEN(faithd_sources); ++i) {
+    if (!compile_source_async(&procs, faithd_sources[i], faithd_objects[i]))
+      goto cleanup;
+  }
+
+  for (size_t i = 0; i < NOB_ARRAY_LEN(test_sources); ++i) {
+    if (!compile_source_async(&procs, test_sources[i], test_objects[i]))
+      goto cleanup;
+  }
+
+  if (!nob_procs_flush(&procs))
+    goto cleanup;
+
+  /* Link faithd */
+  nob_cc(&cmd);
+  nob_cc_output(&cmd, BUILD_FOLDER "faithd");
+
+  for (size_t i = 0; i < NOB_ARRAY_LEN(faithd_objects); ++i)
+    nob_cmd_append(&cmd, faithd_objects[i]);
+
+  nob_cmd_append(&cmd, "-lssl", "-lcrypto");
+
+  if (!nob_cmd_run(&cmd))
+    goto cleanup;
+
+  /* Link test_suite */
+  nob_cc(&cmd);
+  nob_cc_output(&cmd, BUILD_FOLDER "test_suite");
+
+  for (size_t i = 0; i < NOB_ARRAY_LEN(test_objects); ++i)
+    nob_cmd_append(&cmd, test_objects[i]);
+
+  for (size_t i = 0; i < NOB_ARRAY_LEN(test_shared_objects); ++i)
+    nob_cmd_append(&cmd, test_shared_objects[i]);
+
+  nob_cmd_append(&cmd, "-lssl", "-lcrypto");
+
+  if (!nob_cmd_run(&cmd))
+    goto cleanup;
+
+  result = true;
+
+cleanup:
+  if (procs.count > 0 && !nob_procs_flush(&procs))
+    result = false;
+
+  nob_cmd_free(cmd);
+  nob_da_free(procs);
+
+  return result;
 }
 
 int main(int argc, char **argv) {

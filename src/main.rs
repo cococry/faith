@@ -3,9 +3,7 @@ mod graphics;
 mod platform;
 mod ui;
 
-use std::time::Instant;
-
-use crate::{graphics::GraphicsDevice, ui::TextRenderer};
+use crate::{graphics::GraphicsDevice, ui::{TextRenderer, text::TextLayoutOptions}};
 
 use clap::Parser;
 use cli::Cli;
@@ -41,13 +39,13 @@ fn main() -> anyhow::Result<()> {
     let mut ui = UIRenderer::new(&mut renderer, conf.width, conf.height)?;
     let mut text = TextRenderer::new()?;
 
-    text.load_font("assets/NotoColorEmoji.ttf", 24)?;
     let base_font = text.load_font("assets/NotoSans-Regular.ttf", 24)?;
+    let bold_font = text.load_font("assets/NotoSans-Bold.ttf", 24)?;
+
+    text.load_font("assets/NotoColorEmoji.ttf", 24)?;
     text.load_font("assets/NotoSansArabic-Regular.ttf", 24)?;
     text.load_font("assets/NotoSansHebrew-Regular.ttf", 24)?;
-    let mixed_hebrew_arabic = "Lorem ipsum dolor eris meris keris 😀😎🚀🌟🎉🔥🍕🐱🌈💡  تَتَحَدَّث اَلْأَبْيَات عَنْ لَحْظَة وَدَاع يَسْتَغْرِب فِيهَا اَلشَّاعِر أَنْ لَا يَبْكِي مِنْ أَلَم اَلْفِرَاق، وَيَصِف حَالَة اَلْمُودِعِينَ وَبَعْضهمْ يَتَكَلَّم فِي حِين يَكْتَفِي اَلْمُحِبُّونَ بِالصَّمْتِ، لِأَنَّ حَالهمْ تَظْهَر عِشْقهمْ أَكْثَر مِمَّا يَسْتَطِيعُونَ اَلتَّعْبِير عَنْهُ بِالْكَلَامِ. وَيُقَسِّم فِي آخَر اَلْأَبْيَات عَلَى أَنَّ تَوَقُّف دَمْعه لَا يَعْنِي نِهَايَة حَيّه. تَتَحَدَّث اَلْأَبْيَات عَنْ لَحْظَة وَدَاع يَسْتَغْرِب فِيهَا اَلشَّاعِر أَنْ لَا يَبْكِي مِنْ أَلَم اَلْفِرَاق، وَيَصِف حَالَة اَلْمُودِعِينَ وَبَعْضهمْ يَتَكَلَّم فِي حِين يَكْتَفِي اَلْمُحِبُّونَ بِالصَّمْتِ، لِأَنَّ حَالهمْ تَظْهَر عِشْقهمْ أَكْثَر مِمَّا يَسْتَطِيعُونَ اَلتَّعْبِير عَنْهُ بِالْكَلَامِ. وَيُقَسِّم فِي آخَر اَلْأَبْيَات عَلَى أَنَّ تَوَقُّف دَمْعه لَا يَعْنِي نِهَايَة حَيّه. تَتَحَدَّث اَلْأَبْيَات عَنْ لَحْظَة وَدَاع يَسْتَغْرِب فِيهَا اَلشَّاعِر أَنْ لَا يَبْكِي مِنْ أَلَم اَلْفِرَاق، وَيَصِف حَالَة اَلْمُودِعِينَ وَبَعْضهمْ يَتَكَلَّم فِي حِين يَكْتَفِي اَلْمُحِبُّونَ بِالصَّمْتِ، لِأَنَّ حَالهمْ تَظْهَر عِشْقهمْ أَكْثَر مِمَّا يَسْتَطِيعُونَ اَلتَّعْبِير عَنْهُ بِالْكَلَامِ. وَيُقَسِّم فِي آخَر اَلْأَبْيَات عَلَى أَنَّ تَوَقُّف دَمْعه لَا يَعْنِي نِهَايَة حَيّه.";
 
-    let img = ui.load_image(&mut renderer, "assets/large.png")?;
 
     let mut running = true;
 
@@ -80,48 +78,34 @@ fn main() -> anyhow::Result<()> {
 
             let (width, height) = platform.size();
 
-            let layout_start = Instant::now();
-
             ui.begin(width, height);
 
-            let img_w = img.size[0] as f32 / 5.0;
-            let img_h = img.size[1] as f32 / 5.0;
-            ui.image(20.0, 20.0, img_w, img_h, img)?;
-            let layout = text.render_wrapped(
-                [20.0, img_h + 20.0 + 20.0],
-                mixed_hebrew_arabic,
-                base_font,
-                width as f32 - 40.0,
+            text.render(
+                50.0, 50.0,
+                "Faith Instant Messaging",
+                bold_font,
                 &mut renderer,
                 &mut ui,
             )?;
 
-            text.render_wrapped(
-                [20.0, img_h + 20.0 + 20.0 + layout.height],
-                &format!(
-                    "Lorem ipsum dolor. The text above is {}x{}px large.",
-                    layout.width as u32, layout.height as u32
-                ),
+            let dim1 = text.measure("❌️", base_font)?;
+            text.render(width as f32 - dim1.width - 50.0, 50.0, "❌️", base_font, &mut renderer, &mut ui)?;
+
+            let dim = text.measure("Send message", base_font)?; 
+            println!("{}x{}", dim.width, dim.height);
+   text.render(
+                (width as f32 - dim.width) / 2.0, height as f32 - dim.height - 50.0,
+                "Send message",
                 base_font,
-                width as f32 - 40.0,
                 &mut renderer,
                 &mut ui,
             )?;
 
-            let layout_time = layout_start.elapsed();
 
-            let submit_start = Instant::now();
 
             ui.end(&mut renderer)?;
             renderer.end_frame()?;
 
-            let submit_time = submit_start.elapsed();
-
-            println!(
-                "text/ui build: {:.3} ms | backend submit: {:.3} ms",
-                layout_time.as_secs_f64() * 1000.0,
-                submit_time.as_secs_f64() * 1000.0,
-            );
         }
     }
     Ok(())

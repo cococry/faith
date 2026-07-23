@@ -7,8 +7,10 @@
 
 #include <netinet/in.h>
 #include <openssl/ssl.h>
+#include <signal.h>
 #include <sys/socket.h>
 
+#include "../../third_party/nob.h"
 #include "../../third_party/stb_ds.h"
 
 static void        set_client_state(server_state_t *s, struct client_conn_t *cl,
@@ -220,6 +222,8 @@ faith_status_code_t server_init(server_state_t *s, const server_config_t *cfg) {
     return FAITH_ERR_INVALID;
 
   s->cfg = *cfg;
+
+  nob_set_log_handler(faith_log_handler);
 
   if (install_signal_handlers() != 0)
     exit(1);
