@@ -25,7 +25,7 @@ typedef enum {
 
 typedef struct client_conn_t {
   // connection id
-  faith_client_id_t auth_id;
+  faith_auth_id_t auth_id;
   faith_device_id_t device_id;
 
   transport_conn_t conn;

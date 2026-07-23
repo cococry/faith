@@ -277,7 +277,7 @@ reject: {
 }
 
 faith_status_code_t auth_authorize_client(
-    server_state_t *s, client_conn_t *cl, const faith_client_id_t *auth_id,
+    server_state_t *s, client_conn_t *cl, const faith_auth_id_t *auth_id,
     const faith_device_id_t *device_id,
     uint8_t public_key[FAITH_ED25519_PUBLIC_KEY_SIZE], int register_session) {
   if (!s || !cl || cl->closing || !auth_id || !device_id || !public_key)
@@ -309,7 +309,7 @@ faith_status_code_t auth_authorize_client(
 
 faith_status_code_t
 auth_handshake_complete(server_state_t *s, client_conn_t *cl,
-                        const faith_client_id_t *sender_id,
+                        const faith_auth_id_t *sender_id,
                         const faith_device_id_t *device_id) {
   if (!s || !cl || cl->closing || !device_id)
     return FAITH_ERR_INVALID;

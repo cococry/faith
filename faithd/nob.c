@@ -88,10 +88,11 @@ static const char *faithd_sources[] = {
     "src/codec/helpers.c",
     "src/codec/msg.c",
     "src/codec/protocol.c",
+    "src/codec/commands.c",
     "src/codec/signatures.c",
     "src/core/core.c",
     "src/core/crypto.c",
-    "src/core/envelopes.c",
+    "src/codec/envelopes.c",
     "src/delivery/routing.c",
     "src/logging/logging.c",
     "src/reactor/reactor.c",
@@ -103,6 +104,8 @@ static const char *faithd_sources[] = {
     "src/transport/conn.c",
     "src/transport/frame.c",
     "src/transport/tls.c",
+    "src/commands/conversation.c",
+    "src/commands/dispatch.c",
     "src/faithd.c",
 };
 
@@ -114,10 +117,11 @@ static const char *faithd_objects[] = {
     BUILD_FOLDER "obj/codec_helpers.o",
     BUILD_FOLDER "obj/codec_msg.o",
     BUILD_FOLDER "obj/codec_protocol.o",
+    BUILD_FOLDER "obj/codec_commands.o",
     BUILD_FOLDER "obj/codec_signatures.o",
     BUILD_FOLDER "obj/core_core.o",
     BUILD_FOLDER "obj/core_crypto.o",
-    BUILD_FOLDER "obj/core_envelopes.o",
+    BUILD_FOLDER "obj/codec_envelopes.o",
     BUILD_FOLDER "obj/delivery_routing.o",
     BUILD_FOLDER "obj/logging_logging.o",
     BUILD_FOLDER "obj/reactor_reactor.o",
@@ -129,6 +133,8 @@ static const char *faithd_objects[] = {
     BUILD_FOLDER "obj/transport_conn.o",
     BUILD_FOLDER "obj/transport_frame.o",
     BUILD_FOLDER "obj/transport_tls.o",
+    BUILD_FOLDER "obj/commands_conversation.o",
+    BUILD_FOLDER "obj/commands_dispatch.o",
     BUILD_FOLDER "obj/faithd.o",
 };
 
@@ -141,11 +147,11 @@ static const char *test_objects[] = {
 };
 
 static const char *test_shared_objects[] = {
-    BUILD_FOLDER "obj/codec_protocol.o", BUILD_FOLDER "obj/core_crypto.o",
-    BUILD_FOLDER "obj/core_core.o",      BUILD_FOLDER "obj/codec_helpers.o",
-    BUILD_FOLDER "obj/core_envelopes.o", BUILD_FOLDER "obj/client_client.o",
-    BUILD_FOLDER "obj/auth_structs.o",   BUILD_FOLDER "obj/codec_signatures.o",
-    BUILD_FOLDER "obj/codec_msg.o",
+    BUILD_FOLDER "obj/codec_protocol.o",  BUILD_FOLDER "obj/core_crypto.o",
+    BUILD_FOLDER "obj/core_core.o",       BUILD_FOLDER "obj/codec_helpers.o",
+    BUILD_FOLDER "obj/codec_envelopes.o", BUILD_FOLDER "obj/client_client.o",
+    BUILD_FOLDER "obj/auth_structs.o",    BUILD_FOLDER "obj/codec_signatures.o",
+    BUILD_FOLDER "obj/codec_msg.o",       BUILD_FOLDER "obj/codec_commands.o",
 };
 
 static bool compile_source_async(Procs *procs, const char *source,

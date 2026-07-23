@@ -30,16 +30,16 @@ static bool hex_char_to_nibble(char c, uint8_t *out) {
   return false;
 }
 
-static bool client_id_from_hex(const char *hex, faith_client_id_t *out) {
+static bool client_id_from_hex(const char *hex, faith_auth_id_t *out) {
   if (!hex || !out)
     return false;
 
-  if (strlen(hex) != FAITH_CLIENT_ID_SIZE * 2)
+  if (strlen(hex) != FAITH_AUTH_ID_SIZE * 2)
     return false;
 
-  faith_client_id_t id = {0};
+  faith_auth_id_t id = {0};
 
-  for (size_t i = 0; i < FAITH_CLIENT_ID_SIZE; ++i) {
+  for (size_t i = 0; i < FAITH_AUTH_ID_SIZE; ++i) {
     uint8_t hi = 0;
     uint8_t lo = 0;
 
@@ -73,7 +73,7 @@ int main(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 
-  faith_client_id_t recipient_id = {0};
+  faith_auth_id_t recipient_id = {0};
 
   if (argc >= 2) {
     if (!client_id_from_hex(argv[1], &recipient_id)) {
@@ -264,6 +264,10 @@ int main(int argc, char **argv) {
           printf("> ");
           break;
 
+        case FAITH_EVENT_AUTHORIZED:
+          if (argc >= 2)
+            faith_client_create_conversation(client, recipient_id);
+          break;
         default:
           if (pending_device_link_request)
             printf("(y)es/n(o) ? ");

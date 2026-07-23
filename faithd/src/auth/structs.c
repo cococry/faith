@@ -1,6 +1,6 @@
 #include "structs.h"
 
-bool faith_client_id_equal(faith_client_id_t a, faith_client_id_t b) {
+bool faith_client_id_equal(faith_auth_id_t a, faith_auth_id_t b) {
   return memcmp(a.bytes, b.bytes, 16) == 0;
 }
 

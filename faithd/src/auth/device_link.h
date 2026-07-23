@@ -26,7 +26,7 @@ device_link_queue_request_cancellation(server_state_t *s,
 
 faith_status_code_t device_link_queue_request(
     server_state_t *s, client_conn_t *recipient_cl, client_conn_t *request_cl,
-    const faith_client_id_t *auth_id,
+    const faith_auth_id_t *auth_id,
     const uint8_t public_key_new_device[FAITH_ED25519_PUBLIC_KEY_SIZE],
     const faith_device_id_t           *new_device_id,
     faith_envl_stc_device_link_req_t **o_req);

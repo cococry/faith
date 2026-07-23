@@ -2,10 +2,12 @@
 
 #include "../codec/msg.h"
 #include "../core/core.h"
-#include "../core/envelopes.h"
+#include "../codec/envelopes.h"
 
 #include "../auth/envelopes.h"
 #include "../server/envelopes.h"
+
+#include "commands.h"
 
 #include "helpers.h"
 
@@ -26,8 +28,8 @@
 
 #define FAITH_ENVL_HEADER_SIZE                                                 \
   (sizeof(uint32_t) /* envelope type */ +                                      \
-   FAITH_CLIENT_ID_SIZE /* sender id     */ +                                  \
-   FAITH_CLIENT_ID_SIZE /* recipient id  */ +                                  \
+   FAITH_AUTH_ID_SIZE /* sender id     */ +                                  \
+   FAITH_AUTH_ID_SIZE /* recipient id  */ +                                  \
    sizeof(faith_body_size_t) /* body size */)
 
 typedef struct {
