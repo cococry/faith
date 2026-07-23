@@ -27,7 +27,7 @@ static int parse_args(int argc, char **argv) {
     }
 
     if (strcmp(arg, "-p") == 0 || strcmp(arg, "--pport") == 0) {
-      if(i + 1 > argc - 1) {
+      if (i + 1 > argc - 1) {
         fprintf(stderr, "No port number specified for: %s\n", arg);
         fprintf(stderr, "Usage: -p, --port [port]\n");
         return OPTIONS_INVALID;

@@ -20,15 +20,7 @@
   X(FAITH_ENVELOPE_DEVICE_AUTH_RESPONSE_ACK, 12)                               \
   X(FAITH_ENVELOPE_DEVICE_AUTH_RESPONSE_FAILED, 13)                            \
   X(FAITH_ENVELOPE_DEVICE_LINK_CANCELLED, 14)                                  \
-  X(FAITH_ENVELOPE_CLIENT_DISCONNECT, 15)                                      \
-  X(FAITH_ENVELOPE_MSG_REQUEST, 16)                                            \
-  X(FAITH_ENVELOPE_MSG_REQUEST_RESPONSE, 17)                                   \
-  X(FAITH_ENVELOPE_MSG_REQUEST_RESPONSE_ACK, 18)                               \
-  X(FAITH_ENVELOPE_MSG_REQUEST_RESPONSE_FAILED, 19)                            \
-  X(FAITH_ENVELOPE_MSG_REQUEST_ACK, 20)                                        \
-  X(FAITH_ENVELOPE_MSG_REQUEST_FAILED, 21)                                     \
-  X(FAITH_ENVELOPE_MSG_REQUEST_RECEIVED, 22)                                   \
-  X(FAITH_ENVELOPE_MSG_REQUEST_RESPONDED, 23)
+  X(FAITH_ENVELOPE_CLIENT_DISCONNECT, 15)
 
 typedef enum {
 #define X(name, value) name = value,

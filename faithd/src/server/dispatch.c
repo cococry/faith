@@ -7,6 +7,8 @@
 #include "../auth/device_link.h"
 #include "../auth/handshake.h"
 
+#include "../delivery/routing.h"
+
 faith_status_code_t server_dispatch_frame(server_state_t *s, client_conn_t *cl,
                                           faith_frame_t *frame) {
   if (!s || !cl || !frame)
@@ -61,18 +63,12 @@ faith_status_code_t server_dispatch_envelope(server_state_t *s,
     break;
 
   case FAITH_ENVELOPE_MSG_SEND:
-    /* TODO */
+    _FH_CHECK_DEFER(delivery_route_application_msg_envelope(s, cl, &envl));
     break;
 
   case FAITH_ENVELOPE_DEVICE_AUTH_APPROVE:
   case FAITH_ENVELOPE_DEVICE_AUTH_DENY:
     _FH_CHECK_DEFER(device_link_handle_device_response(s, cl, &envl));
-    break;
-  case FAITH_ENVELOPE_MSG_REQUEST:
-    /* TODO */
-    break;
-  case FAITH_ENVELOPE_MSG_REQUEST_RESPONSE:
-    /* TODO */
     break;
   default:
     _FH_RETURN_DEFER(FAITH_ERR_BAD_ENVELOPE);

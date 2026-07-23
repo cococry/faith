@@ -75,3 +75,22 @@ delivery_route_envelope_to_auth_id(server_state_t *s, client_conn_t *cl_sender,
 
   return FAITH_OK;
 }
+
+faith_status_code_t
+delivery_route_application_msg_envelope(server_state_t *s, client_conn_t *cl,
+                                        faith_envelope_t *envl) {
+  if (!s || !cl || !envl)
+    return FAITH_ERR_INVALID;
+
+  if (envl->type != FAITH_ENVELOPE_MSG_SEND)
+    return FAITH_ERR_INVALID;
+
+  /* MSG_SEND specifically requires a nonempty body. */
+  if (envl->body_size == 0 || !envl->body)
+    return FAITH_ERR_INVALID;
+
+  _FH_CHECK_RETURN(
+      delivery_route_envelope_to_auth_id(s, cl, &envl->recipient_id, envl));
+
+  return FAITH_OK;
+}
