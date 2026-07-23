@@ -183,7 +183,7 @@ static faith_status_code_t init_listener(int port) {
   }
 
   if ((bind(listenfd, (struct sockaddr *)&servaddr, sizeof(servaddr))) != 0) {
-    nob_log(ERROR, "Socket bind failed");
+    nob_log(ERROR, "Socket bind failed on port %i: %s", port, strerror(errno));
     close(listenfd);
     return -1;
   }
@@ -196,7 +196,7 @@ static faith_status_code_t init_listener(int port) {
     return -1;
   }
 
-  nob_log(INFO, "Server listening..");
+  nob_log(INFO, "Server listening on %i...", port);
 
   return listenfd;
 }
