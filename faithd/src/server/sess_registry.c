@@ -7,7 +7,7 @@
 
 faith_status_code_t
 sess_registry_get_user_from_auth_id(sess_registry_state_t   *rt,
-                                    const faith_client_id_t *auth_id,
+                                    const faith_auth_id_t *auth_id,
                                     client_session_user_t  **o_user) {
   if (!rt || !auth_id || !o_user)
     return FAITH_ERR_INVALID;
@@ -19,7 +19,7 @@ sess_registry_get_user_from_auth_id(sess_registry_state_t   *rt,
 }
 
 bool sess_registry_auth_id_registered(sess_registry_state_t   *rt,
-                                      const faith_client_id_t *auth_id) {
+                                      const faith_auth_id_t *auth_id) {
   client_session_user_t *user = NULL;
   _FH_CHECK(sess_registry_get_user_from_auth_id(rt, auth_id, &user));
   if (_fh_rc != FAITH_OK) {
@@ -30,7 +30,7 @@ bool sess_registry_auth_id_registered(sess_registry_state_t   *rt,
 
 faith_status_code_t
 sess_registry_get_devices(sess_registry_state_t    *rt,
-                          const faith_client_id_t  *auth_id,
+                          const faith_auth_id_t  *auth_id,
                           client_session_device_t **o_devmap) {
   if (!rt || !o_devmap)
     return FAITH_ERR_INVALID;
@@ -48,7 +48,7 @@ sess_registry_get_devices(sess_registry_state_t    *rt,
 }
 
 faith_status_code_t sess_registry_register_session(
-    sess_registry_state_t *rt, const faith_client_id_t *auth_id,
+    sess_registry_state_t *rt, const faith_auth_id_t *auth_id,
     const faith_device_id_t *device_id, client_conn_t *cl,
     const uint8_t public_key[FAITH_ED25519_PUBLIC_KEY_SIZE]) {
   if (!rt || !auth_id || !device_id || !public_key)
@@ -93,7 +93,7 @@ defer:
 }
 
 faith_status_code_t sess_registry_get_session(
-    sess_registry_state_t *rt, const faith_client_id_t *auth_id,
+    sess_registry_state_t *rt, const faith_auth_id_t *auth_id,
     const faith_device_id_t *device_id, client_device_session_data_t **o_sess) {
   if (!rt || !o_sess || !auth_id || !device_id)
     return FAITH_ERR_INVALID;
@@ -121,7 +121,7 @@ faith_status_code_t sess_registry_get_session(
 
 faith_status_code_t
 sess_registry_unregister_session(sess_registry_state_t   *rt,
-                                 const faith_client_id_t *auth_id,
+                                 const faith_auth_id_t *auth_id,
                                  const faith_device_id_t *device_id) {
   if (!rt || !auth_id || !device_id)
     return FAITH_ERR_INVALID;

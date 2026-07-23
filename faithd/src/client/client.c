@@ -45,7 +45,7 @@ typedef struct {
   uint8_t   public_key[FAITH_ED25519_PUBLIC_KEY_SIZE];
   uint8_t   private_key[FAITH_ED25519_PRIVATE_KEY_SIZE];
 
-  faith_client_id_t auth_id;
+  faith_auth_id_t auth_id;
   faith_device_id_t device_id;
 } client_side_identity_t;
 
@@ -107,6 +107,10 @@ struct faith_client {
 
   client_request_id_t next_request_id;
 };
+
+static faith_status_code_t
+client_send_envelope_locked(faith_client_t         *client,
+                            const faith_envelope_t *envl);
 
 static faith_status_code_t write_bytes_sync(SSL *ssl, const uint8_t *buf,
                                             size_t size) {
@@ -438,6 +442,50 @@ static uint32_t client_next_backoff_ms(uint32_t current) {
     return 30000;
 
   return current;
+}
+
+static faith_status_code_t client_send_command(faith_client_t* client, uint8_t* payload, size_t payload_size, faith_command_type_t type) {
+  if(!client) return FAITH_ERR_INVALID;
+
+  if (payload_size > FAITH_COMMAND_PAYLOAD_SIZE_MAX)
+    return FAITH_ERR_OVERFLOW;
+
+  size_t cmd_data_size = FAITH_ENVL_CTS_COMMAND_BODY_SIZE_FIXED + payload_size;
+
+  faith_envelope_t cmd_envl = {0};
+  cmd_envl.type = FAITH_ENVELOPE_COMMAND;
+  cmd_envl.sender_id = client->ident.auth_id;
+
+  faith_envl_cts_command_t cmd = {0};
+  cmd.payload = payload;
+  cmd.payload_size = payload_size;
+  cmd.type = type;
+
+  _FH_CHECK_RETURN(faith_random_bytes((uint8_t *)&cmd.cmd_id.bytes,
+                                      sizeof(cmd.cmd_id.bytes)));
+
+  uint8_t* body = malloc(cmd_data_size);
+  if(!body) {
+    return FAITH_ERR_NOMEM;
+  }
+
+  faith_status_code_t _fh_result = FAITH_OK;
+
+  faith_body_size_t body_size = 0;
+  _FH_CHECK_DEFER(faith_encode_command_body(body, &body_size,
+                                            cmd_data_size, &cmd));
+
+  cmd_envl.body = body;
+  cmd_envl.body_size = body_size;
+
+  _FH_CHECK_DEFER(client_send_envelope_locked(client, &cmd_envl));
+
+  free(body);
+
+  return FAITH_OK;
+defer:
+  free(body);
+  return _fh_result;
 }
 
 static SSL_CTX *client_create_ssl_ctx(faith_client_t *client) {
@@ -1488,16 +1536,16 @@ static bool hex_char_to_nibble(char c, uint8_t *out) {
   return false;
 }
 
-static bool client_id_from_hex(const char *hex, faith_client_id_t *out) {
+static bool client_id_from_hex(const char *hex, faith_auth_id_t *out) {
   if (!hex || !out)
     return false;
 
-  if (strlen(hex) != FAITH_CLIENT_ID_SIZE * 2)
+  if (strlen(hex) != FAITH_AUTH_ID_SIZE * 2)
     return false;
 
-  faith_client_id_t id = {0};
+  faith_auth_id_t id = {0};
 
-  for (size_t i = 0; i < FAITH_CLIENT_ID_SIZE; ++i) {
+  for (size_t i = 0; i < FAITH_AUTH_ID_SIZE; ++i) {
     uint8_t hi = 0;
     uint8_t lo = 0;
 
@@ -1720,7 +1768,7 @@ faith_status_code_t faith_client_stop(faith_client_t *client) {
 }
 
 faith_status_code_t faith_client_send_msg(faith_client_t   *client,
-                                          faith_client_id_t recipient_auth_id,
+                                          faith_auth_id_t recipient_auth_id,
                                           const char       *msg) {
   if (!client || !msg)
     return FAITH_ERR_INVALID;
@@ -1933,6 +1981,34 @@ faith_client_deny_pending_device_auth(faith_client_t *client) {
   approval_envl.body_size = body_size;
 
   _FH_CHECK_RETURN(client_send_envelope_locked(client, &approval_envl));
+
+  return FAITH_OK;
+}
+
+faith_status_code_t
+faith_client_create_conversation(faith_client_t *client,
+                                 faith_auth_id_t conservant) {
+
+  faith_cmd_create_converstation_t cmd = {.conversant_id = conservant};
+  faith_body_size_t                payload_size = 0;
+  uint8_t payload[FAITH_CMD_CREATE_CONVERSATION_BODY_SIZE] = {0};
+  _FH_CHECK_RETURN(faith_encode_cmd_create_conversation(payload, &payload_size,
+                                                        sizeof(payload), &cmd));
+
+  if (payload_size != sizeof(payload))
+    return FAITH_ERR_INVALID;
+
+  _FH_CHECK_RETURN(client_send_command(client, payload, payload_size,
+                                       FAITH_COMMAND_CREATE_CONVERSATION));
+
+  if(g_log_enable_tracing) {
+    char auth_id_hex[33];
+    _FH_CHECK_RETURN(faith_id128_to_hex(cmd.conversant_id.bytes, auth_id_hex));
+    nob_log(INFO,
+            "[client] Successfully sent command "
+            "FAITH_COMMAND_CREATE_CONVERSATION (conversant_id: %s)",
+            auth_id_hex);
+  }
 
   return FAITH_OK;
 }

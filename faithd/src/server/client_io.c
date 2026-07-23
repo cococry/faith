@@ -5,7 +5,7 @@
 #include "../logging/logging.h"
 #include "../transport/frame.h"
 
-#include "../core/envelopes.h"
+#include "../codec/envelopes.h"
 
 #include "dispatch.h"
 

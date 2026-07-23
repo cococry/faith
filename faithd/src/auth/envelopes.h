@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../core/envelopes.h"
+#include "../codec/envelopes.h"
 
 #define FAITH_DEVICE_LINK_CODE_SIZE 16
 
@@ -9,7 +9,7 @@
                    FAITH_DEVICE_ID_SIZE /*device ID new*/)
 
 #define FAITH_ENVL_STC_DEVICE_LINK_REQ_BODY_SIZE                               \
-  _FAITH_BODY_SIZE(FAITH_CLIENT_ID_SIZE /* auth ID */ +                        \
+  _FAITH_BODY_SIZE(FAITH_AUTH_ID_SIZE /* auth ID */ +                        \
                    FAITH_ED25519_PUBLIC_KEY_SIZE /*public key new device */ +  \
                    FAITH_DEVICE_ID_SIZE /* device ID new */ +                  \
                    FAITH_DEVICE_LINK_CODE_SIZE /* code */ +                    \
@@ -25,7 +25,7 @@
 
 typedef struct {
   // Auth ID of the session that wants to link a new device
-  faith_client_id_t auth_id;
+  faith_auth_id_t auth_id;
   uint8_t           public_key_new_device[FAITH_ED25519_PUBLIC_KEY_SIZE];
   faith_device_id_t device_id_new;
 
