@@ -1,9 +1,14 @@
 #pragma once
 
+#include "../core/core.h"
+
 #include "tls.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+#define FAITH_MAX_CLIENT_OUT_QUEUE (1024u * 1024u)
+#define FAITH_MAX_CLIENT_IN_QUEUE  (1024u * 1024u)
 
 typedef enum {
   TRANSPORT_RES_COMPLETE,

@@ -1,28 +1,28 @@
 #pragma once
 
-#include "../protocol.h"
+#include "../core/core.h"
 
 #include <openssl/err.h>
 
 typedef struct {
-  long options;
-  const char* chain_file;
-  const char* pkey_file;
+  long        options;
+  const char *chain_file;
+  const char *pkey_file;
 
   long timeout;
-  long cache_size; 
+  long cache_size;
 
   int verification_mode;
 } tls_config_t;
 
 typedef struct {
-  SSL_CTX* ctx;
+  SSL_CTX     *ctx;
   tls_config_t cfg;
 } tls_context_t;
 
 typedef struct {
-  SSL* ssl;
-  int fd;
+  SSL *ssl;
+  int  fd;
 } tls_state_fd_t;
 
 void tls_init_global(void);
@@ -38,11 +38,12 @@ int tls_accept(tls_state_fd_t *state);
 
 /* INT_MAX is returned for invalid argument errors. A return value of INT_MAX
  * does not mean there was an SSL error.*/
-int tls_read(tls_state_fd_t *state, void* buf, int nread, int* o_nread);
+int tls_read(tls_state_fd_t *state, void *buf, int nread, int *o_nread);
 
 /* INT_MAX is returned for invalid argument errors. A return value of INT_MAX
  * does not mean there was an SSL error.*/
-int tls_write(tls_state_fd_t *state, const void* buf, int nwrite, int* o_nwritten);
+int tls_write(tls_state_fd_t *state, const void *buf, int nwrite,
+              int *o_nwritten);
 
 /* INT_MAX is returned for invalid argument errors. A return value of INT_MAX
  * does not mean there was an SSL error.*/

@@ -2,22 +2,25 @@
 #include "client_lifecycle.h"
 #include <openssl/ssl.h>
 
-#include "../transport/frame.h"
 #include "../logging/logging.h"
+#include "../transport/frame.h"
+
+#include "../core/envelopes.h"
 
 #include "dispatch.h"
 
-static faith_status_code_t handle_client_frame(server_state_t *s, client_conn_t *cl,
-                         faith_frame_t *frame);
+static faith_status_code_t
+handle_client_frame(server_state_t *s, client_conn_t *cl, faith_frame_t *frame);
 
-static faith_status_code_t handle_client_frame(server_state_t *s, client_conn_t *cl,
-                         faith_frame_t *frame) {
+static faith_status_code_t handle_client_frame(server_state_t *s,
+                                               client_conn_t  *cl,
+                                               faith_frame_t  *frame) {
   if (!s || !cl || !frame)
     return FAITH_ERR_INVALID;
 
   nob_log(INFO,
           "[client=%" PRIu64
-          " fd=%i] Server got frame: msg_type=%s payload_size=%zu",
+          " fd=%i] Server got frame: msg_type=%s payload_size=%u",
           cl->conn.id, cl->conn.fd, faith_frame_msg_name(frame->msg_type),
           frame->payload_size);
 
@@ -35,37 +38,33 @@ static faith_status_code_t handle_client_frame(server_state_t *s, client_conn_t 
   return FAITH_OK;
 }
 
-
 faith_status_code_t server_queue_frame(server_state_t *s, client_conn_t *cl,
-                                       const uint8_t         *payload,
-                                       size_t                 payload_size,
-                                       faith_frame_msg_type_t msg_type) {
-  if (!cl || cl->closing || !s || (!payload && payload_size != 0))
+                                       const faith_frame_t *frame) {
+  if (!cl || cl->closing || !s || !frame ||
+      (!frame->payload && frame->payload_size != 0))
     return FAITH_ERR_INVALID;
 
-  uint8_t *wire_data = NULL;
-  size_t   wire_size = 0;
+  const size_t wire_size = FAITH_FRAME_HEADER_SIZE + frame->payload_size;
+  uint8_t     *wire_data = malloc(wire_size);
+  if (!wire_data) {
+    return FAITH_ERR_NOMEM;
+  }
 
+  faith_status_code_t _fh_result = FAITH_OK;
+
+  size_t wire_size_returned = 0;
   // Allocates memory on pointer passed to <out_data>, which is <wire_data> here
-  _FH_CHECK_RETURN(faith_encode_frame(msg_type, payload, payload_size,
-                                      &wire_data, &wire_size));
+  _FH_CHECK_DEFER(
+      faith_encode_frame(wire_data, &wire_size_returned, wire_size, frame));
 
-  if (!wire_data || wire_size == 0) {
-    free(wire_data);
-    return FAITH_ERR_INVALID;
+  if (wire_size_returned != wire_size) {
+    _FH_RETURN_DEFER(FAITH_ERR_BAD_FRAME);
   }
 
-  {
-    _FH_CHECK(conn_queue_enqueue_bytes(&cl->conn.out, wire_data, wire_size));
-
-    if (_fh_rc != FAITH_OK) {
-      free(wire_data);
-      return _fh_rc;
-    }
-  }
+  _FH_CHECK_DEFER(
+      conn_queue_enqueue_bytes(&cl->conn.out, wire_data, wire_size));
 
   free(wire_data);
-  wire_data = NULL;
 
   if (!(cl->reactor_source.interests & REACTOR_WRITABLE)) {
     _FH_CHECK(reactor_modify_interests(&s->reactor, &cl->reactor_source,
@@ -81,9 +80,13 @@ faith_status_code_t server_queue_frame(server_state_t *s, client_conn_t *cl,
   }
 
   nob_log(INFO, "[client=%" PRIu64 " fd=%d] queued frame: %s (%zu bytes)",
-          cl->conn.id, cl->conn.fd, faith_frame_msg_name(msg_type), wire_size);
+          cl->conn.id, cl->conn.fd, faith_frame_msg_name(frame->msg_type),
+          wire_size);
 
   return FAITH_OK;
+defer:
+  free(wire_data);
+  return _fh_result;
 }
 
 faith_status_code_t server_queue_envelope(server_state_t *s, client_conn_t *cl,
@@ -101,8 +104,13 @@ faith_status_code_t server_queue_envelope(server_state_t *s, client_conn_t *cl,
   faith_status_code_t _fh_result = FAITH_OK;
   _FH_CHECK_DEFER(faith_encode_envelope(payload, &payload_size, cap, envl));
 
-  _FH_CHECK_DEFER(
-      server_queue_frame(s, cl, payload, payload_size, FAITH_MSG_ENVL));
+  faith_frame_t frame = {0};
+  frame.msg_type = FAITH_MSG_ENVL;
+  frame.proto_ver = FAITH_PROTO_VERSION;
+  frame.payload = payload;
+  frame.payload_size = payload_size;
+
+  _FH_CHECK_DEFER(server_queue_frame(s, cl, &frame));
 
   nob_log(INFO,
           "[client=%" PRIu64
@@ -210,7 +218,8 @@ faith_status_code_t server_drive_tls_handshake(server_state_t *s,
   return FAITH_OK;
 }
 
-faith_status_code_t server_drive_client_read(server_state_t *s, client_conn_t *cl) {
+faith_status_code_t server_drive_client_read(server_state_t *s,
+                                             client_conn_t  *cl) {
   if (!s || !cl || cl->closing)
     return -1;
   faith_frame_t frame;
@@ -221,7 +230,7 @@ faith_status_code_t server_drive_client_read(server_state_t *s, client_conn_t *c
   case TRANSPORT_RES_COMPLETE: {
 
     _FH_CHECK(handle_client_frame(s, cl, &frame));
-    faith_frame_free(&frame);
+    faith_free_frame(&frame);
 
     if (_fh_rc != FAITH_OK) {
       server_client_queue_disconnect(
@@ -278,18 +287,19 @@ faith_status_code_t server_drive_client_read(server_state_t *s, client_conn_t *c
             cl->conn.id, cl->conn.fd);
 
     server_client_queue_disconnect(s, cl, FAITH_DISCONNECT_BAD_PROTOCOL,
-                             FAITH_CLIENT_RECONNECT_ALLOWED, 0, 0,
-                             "Server failed to read client frame.");
+                                   FAITH_CLIENT_RECONNECT_ALLOWED, 0, 0,
+                                   "Server failed to read client frame.");
     return -1;
   }
 
 fail_ev_mask:
-  nob_log(ERROR, "[client=%" PRIu64 " fd=%d] reactor_modify_interests failed: %s",
+  nob_log(ERROR,
+          "[client=%" PRIu64 " fd=%d] reactor_modify_interests failed: %s",
           cl->conn.id, cl->conn.fd, strerror(errno));
 
   server_client_queue_disconnect(s, cl, FAITH_DISCONNECT_INTERNAL_ERROR,
-                           FAITH_CLIENT_RECONNECT_ALLOWED, 0, 0,
-                           "Failed to modify client event mask.");
+                                 FAITH_CLIENT_RECONNECT_ALLOWED, 0, 0,
+                                 "Failed to modify client event mask.");
 
   return -1;
 }

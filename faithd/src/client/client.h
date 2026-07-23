@@ -2,7 +2,8 @@
 
 #include <stdint.h>
 
-#include "../protocol.h"
+#include "../auth/structs.h"
+#include "../core/core.h"
 
 #define FAITH_EVENT_TYPES(X)                                                   \
   X(FAITH_EVENT_NONE, 0)                                                       \
@@ -56,7 +57,7 @@ typedef struct {
   uint8_t value1_128[16];
   uint8_t value2_128[16];
 
-  char     message[256];
+  char message[256];
 
   char  *chat_message;
   size_t chat_message_size;
@@ -70,18 +71,9 @@ void            faith_client_destroy(faith_client_t *client);
 faith_status_code_t faith_client_start(faith_client_t *client);
 faith_status_code_t faith_client_stop(faith_client_t *client);
 
-faith_status_code_t
-faith_client_send_msg(faith_client_t   *client,
-                          faith_client_id_t recipient_auth_id, const char *msg);
-
-faith_status_code_t faith_client_send_msg_request(faith_client_t   *client,
-                          faith_client_id_t recipient_auth_id);
-
-faith_status_code_t faith_client_msg_request_accept(
-    faith_client_t *client, const faith_msg_request_t* req);
-
-faith_status_code_t faith_client_msg_request_deny(
-    faith_client_t *client, const faith_msg_request_t* req);
+faith_status_code_t faith_client_send_msg(faith_client_t   *client,
+                                          faith_client_id_t recipient_auth_id,
+                                          const char       *msg);
 
 int faith_client_event_fd(faith_client_t *client);
 
@@ -89,9 +81,11 @@ faith_status_code_t faith_client_next_event(faith_client_t *client,
                                             faith_event_t  *out);
 faith_status_code_t faith_client_free_event(faith_event_t *ev);
 
-faith_status_code_t faith_client_approve_pending_device_auth(faith_client_t* client);
+faith_status_code_t
+faith_client_approve_pending_device_auth(faith_client_t *client);
 
-faith_status_code_t faith_client_deny_pending_device_auth(faith_client_t* client);
+faith_status_code_t
+faith_client_deny_pending_device_auth(faith_client_t *client);
 
 faith_status_code_t faith_client_reconnect(faith_client_t *client);
 

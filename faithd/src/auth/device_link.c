@@ -3,6 +3,8 @@
 #include "../server/client_io.h"
 #include "../server/client_lifecycle.h"
 
+#include "../codec/signatures.h"
+
 #include "../delivery/routing.h"
 
 #include "../logging/logging.h"

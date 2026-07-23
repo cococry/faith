@@ -1,10 +1,9 @@
 #pragma once
 
-#include "../protocol.h"
+#include "../auth/envelopes.h"
 #include "../reactor/reactor.h"
 #include "../transport/conn.h"
 #include "sess_registry.h"
-#include "storage.h"
 
 #include "../auth/structs.h"
 
@@ -39,9 +38,9 @@ typedef struct client_conn_t {
   struct client_conn_t *next;
   struct client_conn_t *prev;
 
-  client_auth_handshake_params_t temp_handshake_params;
-  faith_envl_stc_device_link_req_t   *pending_device_link_req;
-  struct client_conn_t               *pending_device_link_conn;
+  client_auth_handshake_params_t    temp_handshake_params;
+  faith_envl_stc_device_link_req_t *pending_device_link_req;
+  struct client_conn_t             *pending_device_link_conn;
 
   int authorized;
 
@@ -63,7 +62,6 @@ typedef struct {
   struct client_conn_t *clients;
 
   sess_registry_state_t rt;
-  storage_state_t       storage;
 
   server_config_t cfg;
 } server_state_t;

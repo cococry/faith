@@ -4,23 +4,25 @@
 #include "device_link.h"
 #include "structs.h"
 
+#include "../codec/protocol.h"
+#include "../codec/signatures.h"
 
-faith_status_code_t
-auth_handle_hello(server_state_t *s, client_conn_t *cl,
-                    const faith_envelope_t *hello_envl) {
+faith_status_code_t auth_handle_hello(server_state_t *s, client_conn_t *cl,
+                                      const faith_envelope_t *hello_envl) {
   // HELLO {
-  // header: {
-  // sender_id: auth_id
-  // }
-  //  body: {
-  //    device_id,
-  //    public_key,
-  //    client_nonce
-  //  }
+  //   header: {
+  //     sender_id: auth_id
+  //   }
+  //   body: {
+  //     device_id,
+  //     public_key,
+  //     client_nonce
+  //   }
   // }
   //
-  if (!cl || cl->closing || !hello_envl)
+  if (!s || !cl || cl->closing || !hello_envl)
     return FAITH_ERR_INVALID;
+
   if (hello_envl->type != FAITH_ENVELOPE_HELLO)
     return FAITH_ERR_INVALID;
 
@@ -31,54 +33,44 @@ auth_handle_hello(server_state_t *s, client_conn_t *cl,
     return FAITH_ERR_BAD_ENVELOPE;
   }
 
-  /* Reading body from envelope */
-
-  if (hello_envl->body_size != FAITH_ENVL_HELLO_BODY_SIZE || !hello_envl->body)
-    return FAITH_ERR_BAD_FRAME;
-
-  uint8_t public_key[FAITH_ED25519_PUBLIC_KEY_SIZE];
-
-  /* 1. Deserialize device ID */
-  size_t            offset = 0;
-  faith_device_id_t device_id;
-  memcpy(device_id.bytes, hello_envl->body, sizeof(device_id.bytes));
-
-  offset += sizeof(device_id.bytes);
-
-  /* 2. Deserialize public key */
-  memcpy(public_key, hello_envl->body + offset, sizeof(public_key));
-
-  offset += sizeof(public_key);
-
-  /* 3. Deserialize nonce */
-  uint64_t nonce = faith_read_u64_be(hello_envl->body + offset);
+  faith_envl_cts_hello_t hello;
+  _FH_CHECK_RETURN(
+      faith_decode_hello_body(hello_envl->body, hello_envl->body_size, &hello));
 
   uint64_t server_nonce;
   _FH_CHECK_RETURN(
       faith_random_bytes((uint8_t *)&server_nonce, sizeof(server_nonce)));
 
-  /* Construct temporary handshake parameters for client identity evaluation */
+  /* Construct temporary handshake parameters for identity evaluation. */
   client_auth_handshake_params_t *params = &cl->temp_handshake_params;
 
   params->sender_auth_id = hello_envl->sender_id;
-  params->device_id = device_id;
+  params->device_id = hello.device_id;
 
-  memcpy(params->public_key, public_key, sizeof(params->public_key));
+  memcpy(params->public_key, hello.public_key, sizeof(params->public_key));
 
   params->server_nonce = server_nonce;
-  params->nonce = nonce;
+  params->nonce = hello.client_nonce;
 
-  /* Send CHALLENGE envelope */
+  /* Send CHALLENGE envelope. */
 
-  faith_envelope_t challenge_envl;
-  challenge_envl.type = FAITH_ENVELOPE_CHALLENGE;
-  challenge_envl.recipient_id = hello_envl->sender_id;
+  faith_envl_stc_hello_challenge_t challenge = {
+      .server_nonce = server_nonce,
+  };
 
-  uint8_t body[FAITH_ENVL_HELLO_CHALLENGE_BODY_SIZE] = {0};
-  _FH_CHECK_RETURN(faith_write_u64_be(body, server_nonce));
+  uint8_t body[FAITH_ENVL_HELLO_CHALLENGE_BODY_SIZE];
 
-  challenge_envl.body = body;
-  challenge_envl.body_size = (faith_body_size_t)sizeof(body);
+  faith_body_size_t body_size = 0;
+
+  _FH_CHECK_RETURN(faith_encode_hello_challenge_body(body, &body_size,
+                                                     sizeof(body), &challenge));
+
+  faith_envelope_t challenge_envl = {
+      .type = FAITH_ENVELOPE_CHALLENGE,
+      .recipient_id = hello_envl->sender_id,
+      .body = body,
+      .body_size = body_size,
+  };
 
   _FH_CHECK_RETURN(server_queue_envelope_or_mark_dead(s, cl, &challenge_envl));
 
@@ -110,8 +102,7 @@ faith_status_code_t auth_handle_challenge_response(
     return FAITH_ERR_BAD_ENVELOPE;
   }
 
-  client_auth_handshake_params_t*params =
-      &cl->temp_handshake_params;
+  client_auth_handshake_params_t *params = &cl->temp_handshake_params;
 
   if (!faith_client_id_equal(challenge_response_envl->sender_id,
                              params->sender_auth_id)) {
@@ -135,7 +126,7 @@ faith_status_code_t auth_handle_challenge_response(
 
   /* Looking for the mapped session of the auth ID, device ID pair */
   client_device_session_data_t *sess = NULL;
-  faith_status_code_t                  sess_rc = sess_registry_get_session(
+  faith_status_code_t           sess_rc = sess_registry_get_session(
       &s->rt, &params->sender_auth_id, &params->device_id, &sess);
 
   /* Failure finding session, different from FAITH_ERR_NOT_FOUND */
@@ -222,11 +213,11 @@ faith_status_code_t auth_handle_challenge_response(
   sign_msg.client_nonce = params->nonce;
   sign_msg.server_nonce = params->server_nonce;
 
-  size_t msg_size = 0;
+  size_t  msg_size = 0;
   uint8_t msg_buf[FAITH_SIGNATURE_HELLO_HANDSHAKE_SIZE];
   {
-    _FH_CHECK(faith_gen_sign_buf_hello_handshake(msg_buf, &msg_size, sizeof(msg_buf),
-                                                 &sign_msg));
+    _FH_CHECK(faith_gen_sign_buf_hello_handshake(msg_buf, &msg_size,
+                                                 sizeof(msg_buf), &sign_msg));
     if (_fh_rc != FAITH_OK) {
       nob_log(ERROR,
               "[client=%" PRIu64
@@ -262,8 +253,8 @@ faith_status_code_t auth_handle_challenge_response(
   }
 
   _FH_CHECK(auth_authorize_client(s, cl, &params->sender_auth_id,
-                                    &params->device_id, verification_public_key,
-                                    sess == NULL));
+                                  &params->device_id, verification_public_key,
+                                  sess == NULL));
   return _fh_rc;
 reject: {
 
@@ -318,8 +309,8 @@ faith_status_code_t auth_authorize_client(
 
 faith_status_code_t
 auth_handshake_complete(server_state_t *s, client_conn_t *cl,
-                          const faith_client_id_t *sender_id,
-                          const faith_device_id_t *device_id) {
+                        const faith_client_id_t *sender_id,
+                        const faith_device_id_t *device_id) {
   if (!s || !cl || cl->closing || !device_id)
     return FAITH_ERR_INVALID;
 
@@ -361,9 +352,8 @@ faith_status_code_t auth_queue_auth_pending(server_state_t *s,
 
   faith_envelope_t device_auth_pending_envl = {0};
   device_auth_pending_envl.type = FAITH_ENVELOPE_DEVICE_AUTH_PENDING;
-  _FH_CHECK_RETURN(server_queue_envelope_or_mark_dead(s, recipient_cl,
-                                                 &device_auth_pending_envl));
+  _FH_CHECK_RETURN(server_queue_envelope_or_mark_dead(
+      s, recipient_cl, &device_auth_pending_envl));
 
   return FAITH_OK;
 }
-
