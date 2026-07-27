@@ -73,7 +73,7 @@ faith_status_code_t server_dispatch_envelope(server_state_t *s,
     _FH_CHECK_DEFER(device_link_handle_device_response(s, cl, &envl));
     break;
   case FAITH_ENVELOPE_COMMAND:
-    _FH_CHECK_DEFER(commands_dispatch_command(s, cl, &envl));
+    _FH_CHECK_DEFER(command_dispatch(s, cl, &envl));
     break;
   default:
     _FH_RETURN_DEFER(FAITH_ERR_BAD_ENVELOPE);

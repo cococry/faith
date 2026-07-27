@@ -7,6 +7,9 @@
 
 #include "../delivery/routing.h"
 
+#define NOB_IMPLEMENTATION
+#include "../../third_party/nob.h"
+
 #include "../logging/logging.h"
 #include "handshake.h"
 
@@ -272,7 +275,7 @@ device_link_handle_device_response(server_state_t *s, client_conn_t *cl,
 
 defer: {
   /* Copies for logging */
-  faith_auth_id_t client_id = req->auth_id;
+  faith_auth_id_t   client_id = req->auth_id;
   faith_device_id_t device_id_new = req->device_id_new;
 
   /* Remove the pending device link request from <cl>,
@@ -427,7 +430,7 @@ device_link_queue_request_cancellation(server_state_t *s,
 faith_status_code_t device_link_queue_request(
     server_state_t *s, client_conn_t *recipient_cl, client_conn_t *request_cl,
     const faith_auth_id_t *auth_id,
-    const uint8_t public_key_new_device[FAITH_ED25519_PUBLIC_KEY_SIZE],
+    const uint8_t          public_key_new_device[FAITH_ED25519_PUBLIC_KEY_SIZE],
     const faith_device_id_t           *new_device_id,
     faith_envl_stc_device_link_req_t **o_req) {
   if (!s || !auth_id || !public_key_new_device || !new_device_id ||

@@ -6,7 +6,7 @@
 #include "../auth/structs.h"
 
 #define FAITH_SIGNATURE_DEVICE_LINK_RESPONSE_SIZE                              \
-  (FAITH_AUTH_ID_SIZE /* auth ID */ +                                        \
+  (FAITH_AUTH_ID_SIZE /* auth ID */ +                                          \
    FAITH_DEVICE_ID_SIZE /* new device ID */ +                                  \
    FAITH_ED25519_PUBLIC_KEY_SIZE /* new device public key */ +                 \
    FAITH_DEVICE_LINK_CODE_SIZE /* device-link verification code */ +           \
@@ -15,20 +15,20 @@
    sizeof(uint32_t) /* approve/deny response type */)
 
 #define FAITH_SIGNATURE_MSG_REQUEST_RESPONSE_SIZE                              \
-  (FAITH_AUTH_ID_SIZE /* auth ID requesting */ +                             \
-   FAITH_AUTH_ID_SIZE /* auth ID receiving */ +                              \
+  (FAITH_AUTH_ID_SIZE /* auth ID requesting */ +                               \
+   FAITH_AUTH_ID_SIZE /* auth ID receiving */ +                                \
    FAITH_DEVICE_ID_SIZE /* device id receiving */) +                           \
       FAITH_REQUEST_ID_SIZE /* server request ID */ +                          \
       sizeof(uint32_t) /* type */
 
 #define FAITH_SIGNATURE_HELLO_HANDSHAKE_SIZE                                   \
-  (FAITH_AUTH_ID_SIZE /* auth ID */ +                                        \
+  (FAITH_AUTH_ID_SIZE /* auth ID */ +                                          \
    FAITH_DEVICE_ID_SIZE /* client device ID */ +                               \
    FAITH_ED25519_PUBLIC_KEY_SIZE /* client public key */ +                     \
    sizeof(uint64_t) /* client nonce */ + sizeof(uint64_t) /* server nonce */)
 
 typedef struct {
-  faith_auth_id_t auth_id;
+  faith_auth_id_t   auth_id;
   faith_device_id_t device_id;
 
   uint8_t  public_key[FAITH_ED25519_PUBLIC_KEY_SIZE];
@@ -38,7 +38,7 @@ typedef struct {
 } faith_signature_hello_handshake_t;
 
 typedef struct {
-  faith_auth_id_t auth_id;
+  faith_auth_id_t   auth_id;
   faith_device_id_t device_id_new;
   uint8_t           public_key_new_device[FAITH_ED25519_PUBLIC_KEY_SIZE];
 

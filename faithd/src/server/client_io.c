@@ -9,35 +9,6 @@
 
 #include "dispatch.h"
 
-static faith_status_code_t
-handle_client_frame(server_state_t *s, client_conn_t *cl, faith_frame_t *frame);
-
-static faith_status_code_t handle_client_frame(server_state_t *s,
-                                               client_conn_t  *cl,
-                                               faith_frame_t  *frame) {
-  if (!s || !cl || !frame)
-    return FAITH_ERR_INVALID;
-
-  nob_log(INFO,
-          "[client=%" PRIu64
-          " fd=%i] Server got frame: msg_type=%s payload_size=%u",
-          cl->conn.id, cl->conn.fd, faith_frame_msg_name(frame->msg_type),
-          frame->payload_size);
-
-  switch (frame->msg_type) {
-  case FAITH_MSG_PING:
-    _FH_CHECK_RETURN(server_handle_ping(s, cl, frame));
-    break;
-  case FAITH_MSG_ENVL:
-    _FH_CHECK_RETURN(server_dispatch_envelope(s, cl, frame));
-    break;
-  default:
-    return FAITH_ERR_BAD_FRAME;
-  }
-
-  return FAITH_OK;
-}
-
 faith_status_code_t server_queue_frame(server_state_t *s, client_conn_t *cl,
                                        const faith_frame_t *frame) {
   if (!cl || cl->closing || !s || !frame ||
@@ -229,7 +200,7 @@ faith_status_code_t server_drive_client_read(server_state_t *s,
   switch (res) {
   case TRANSPORT_RES_COMPLETE: {
 
-    _FH_CHECK(handle_client_frame(s, cl, &frame));
+    _FH_CHECK(server_dispatch_frame(s, cl, &frame));
     faith_free_frame(&frame);
 
     if (_fh_rc != FAITH_OK) {

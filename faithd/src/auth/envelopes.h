@@ -9,23 +9,23 @@
                    FAITH_DEVICE_ID_SIZE /*device ID new*/)
 
 #define FAITH_ENVL_STC_DEVICE_LINK_REQ_BODY_SIZE                               \
-  _FAITH_BODY_SIZE(FAITH_AUTH_ID_SIZE /* auth ID */ +                        \
+  _FAITH_BODY_SIZE(FAITH_AUTH_ID_SIZE /* auth ID */ +                          \
                    FAITH_ED25519_PUBLIC_KEY_SIZE /*public key new device */ +  \
                    FAITH_DEVICE_ID_SIZE /* device ID new */ +                  \
                    FAITH_DEVICE_LINK_CODE_SIZE /* code */ +                    \
                    sizeof(uint64_t) /* expires_at_ms*/)
 
-#define FAITH_ENVL_CTS_HELLO_BODY_SIZE                                             \
+#define FAITH_ENVL_CTS_HELLO_BODY_SIZE                                         \
   _FAITH_BODY_SIZE(FAITH_DEVICE_ID_SIZE /* client device id */ +               \
                    FAITH_ED25519_PUBLIC_KEY_SIZE /* client public key */ +     \
                    sizeof(uint64_t) /* client nonce */)
 
-#define FAITH_ENVL_STC_HELLO_CHALLENGE_BODY_SIZE                                   \
+#define FAITH_ENVL_STC_HELLO_CHALLENGE_BODY_SIZE                               \
   _FAITH_BODY_SIZE(sizeof(uint64_t) /* server nonce */)
 
 typedef struct {
   // Auth ID of the session that wants to link a new device
-  faith_auth_id_t auth_id;
+  faith_auth_id_t   auth_id;
   uint8_t           public_key_new_device[FAITH_ED25519_PUBLIC_KEY_SIZE];
   faith_device_id_t device_id_new;
 

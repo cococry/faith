@@ -5,6 +5,8 @@
 #include "../auth/structs.h"
 #include "../core/core.h"
 
+#define FAITH_CLIENT_COMMAND_TIMEOUT 10000 // 10 seconds
+
 #define FAITH_EVENT_TYPES(X)                                                   \
   X(FAITH_EVENT_NONE, 0)                                                       \
   X(FAITH_EVENT_CONNECTING, 1)                                                 \
@@ -20,12 +22,8 @@
   X(FAITH_EVENT_DEVICE_LINK_CANCELLED, 11)                                     \
   X(FAITH_EVENT_AUTHORIZED, 12)                                                \
   X(FAITH_EVENT_SERVER_DISCONNECT, 13)                                         \
-  X(FAITH_EVENT_MSG_REQUEST_RECEIVED, 14)                                      \
-  X(FAITH_EVENT_MSG_REQUEST_RESPONDED, 15)                                     \
-  X(FAITH_EVENT_MSG_REQUEST_ACK, 16)                                           \
-  X(FAITH_EVENT_MSG_REQUEST_FAILED, 17)                                        \
-  X(FAITH_EVENT_MSG_REQUEST_RESPONSE_ACK, 18)                                  \
-  X(FAITH_EVENT_MSG_REQUEST_RESPONSE_FAILED, 19)
+  X(FAITH_EVENT_COMMAND_RESULT, 14)                                            \
+  X(FAITH_EVENT_COMMAND_FAILED, 15)
 
 typedef enum {
 #define X(name, value) name = value,
@@ -71,9 +69,9 @@ void            faith_client_destroy(faith_client_t *client);
 faith_status_code_t faith_client_start(faith_client_t *client);
 faith_status_code_t faith_client_stop(faith_client_t *client);
 
-faith_status_code_t faith_client_send_msg(faith_client_t   *client,
+faith_status_code_t faith_client_send_msg(faith_client_t *client,
                                           faith_auth_id_t recipient_auth_id,
-                                          const char       *msg);
+                                          const char     *msg);
 
 int faith_client_event_fd(faith_client_t *client);
 
@@ -92,6 +90,5 @@ faith_client_create_conversation(faith_client_t *client,
                                  faith_auth_id_t conservant);
 
 faith_status_code_t faith_client_reconnect(faith_client_t *client);
-
 
 const char *faith_event_name(faith_event_type_t ev);

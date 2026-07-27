@@ -646,6 +646,9 @@ faith_encode_command_result_body(uint8_t *out_buf, faith_body_size_t *out_size,
   FAITH_ENCODE_U32_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
                              (uint32_t)in->type);
 
+  FAITH_ENCODE_U32_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
+                             (uint32_t)in->err);
+
   FAITH_ENCODE_U32_BE_RETURN(out_buf, buf_cap_in_bytes, offset, in->result);
 
   FAITH_ENCODE_EPILOGUE(FAITH_ENVL_STC_COMMAND_RESULT_BODY_SIZE, !=);
@@ -665,6 +668,8 @@ faith_decode_command_result_body(const uint8_t                   *payload,
                       sizeof(out->cmd_id.bytes));
 
   FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset, out->type);
+
+  FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset, out->err);
 
   FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset, out->result);
 

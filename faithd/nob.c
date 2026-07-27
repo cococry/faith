@@ -84,7 +84,6 @@ static const char *faithd_sources[] = {
     "src/auth/device_link.c",
     "src/auth/handshake.c",
     "src/auth/structs.c",
-    "src/client/client.c",
     "src/codec/helpers.c",
     "src/codec/msg.c",
     "src/codec/protocol.c",
@@ -113,7 +112,6 @@ static const char *faithd_objects[] = {
     BUILD_FOLDER "obj/auth_device_link.o",
     BUILD_FOLDER "obj/auth_handshake.o",
     BUILD_FOLDER "obj/auth_structs.o",
-    BUILD_FOLDER "obj/client_client.o",
     BUILD_FOLDER "obj/codec_helpers.o",
     BUILD_FOLDER "obj/codec_msg.o",
     BUILD_FOLDER "obj/codec_protocol.o",
@@ -140,18 +138,20 @@ static const char *faithd_objects[] = {
 
 static const char *test_sources[] = {
     "src/test/client_test_suite.c",
+    "src/client/client.c",
 };
 
 static const char *test_objects[] = {
     BUILD_FOLDER "obj/client_test_suite.o",
+    BUILD_FOLDER "obj/client_client.o",
 };
 
 static const char *test_shared_objects[] = {
-    BUILD_FOLDER "obj/codec_protocol.o",  BUILD_FOLDER "obj/core_crypto.o",
-    BUILD_FOLDER "obj/core_core.o",       BUILD_FOLDER "obj/codec_helpers.o",
-    BUILD_FOLDER "obj/codec_envelopes.o", BUILD_FOLDER "obj/client_client.o",
-    BUILD_FOLDER "obj/auth_structs.o",    BUILD_FOLDER "obj/codec_signatures.o",
-    BUILD_FOLDER "obj/codec_msg.o",       BUILD_FOLDER "obj/codec_commands.o",
+    BUILD_FOLDER "obj/codec_protocol.o",   BUILD_FOLDER "obj/core_crypto.o",
+    BUILD_FOLDER "obj/core_core.o",        BUILD_FOLDER "obj/codec_helpers.o",
+    BUILD_FOLDER "obj/codec_envelopes.o",  BUILD_FOLDER "obj/auth_structs.o",
+    BUILD_FOLDER "obj/codec_signatures.o", BUILD_FOLDER "obj/codec_msg.o",
+    BUILD_FOLDER "obj/codec_commands.o",
 };
 
 static bool compile_source_async(Procs *procs, const char *source,

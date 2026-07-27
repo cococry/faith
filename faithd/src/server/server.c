@@ -13,8 +13,6 @@
 #include "../../third_party/nob.h"
 #include "../../third_party/stb_ds.h"
 
-static void        set_client_state(server_state_t *s, struct client_conn_t *cl,
-                                    client_state_t state);
 static const char *client_state_name(client_state_t state);
 static void        accept_clients(server_state_t *s);
 static void        handle_client_event(server_state_t *s, client_conn_t *cl,
