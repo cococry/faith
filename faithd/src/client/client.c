@@ -9,6 +9,7 @@
 #include <openssl/ssl.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,6 +19,9 @@
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
+
+#define STB_DS_IMPLEMENTATION
+#include "../../third_party/stb_ds.h"
 
 #define NOB_IMPLEMENTATION
 #include "../../third_party/nob.h"
@@ -45,9 +49,21 @@ typedef struct {
   uint8_t   public_key[FAITH_ED25519_PUBLIC_KEY_SIZE];
   uint8_t   private_key[FAITH_ED25519_PRIVATE_KEY_SIZE];
 
-  faith_auth_id_t auth_id;
+  faith_auth_id_t   auth_id;
   faith_device_id_t device_id;
 } client_side_identity_t;
+
+typedef struct {
+  uint64_t             deadline_ms;
+  faith_command_type_t type;
+  void (*on_result)(faith_client_t                        *client,
+                    const faith_envl_stc_command_result_t *res);
+} pending_command_t;
+
+typedef struct {
+  faith_command_id_t key;
+  pending_command_t  value;
+} pending_command_entry_t;
 
 struct faith_client {
   char     host[256];
@@ -66,6 +82,7 @@ struct faith_client {
   pthread_mutex_t lock;
   pthread_mutex_t write_lock;
   pthread_mutex_t ping_lock;
+  pthread_mutex_t command_lock;
 
   pthread_t reader_thread;
   pthread_t pinger_thread;
@@ -105,8 +122,54 @@ struct faith_client {
   pthread_mutex_t reconnect_lock;
   pthread_cond_t  reconnect_cond;
 
-  client_request_id_t next_request_id;
+  pending_command_entry_t *pending_command_map;
 };
+
+static faith_status_code_t
+pending_command_insert(faith_client_t *client, const faith_command_id_t *id,
+                       const pending_command_t *cmd) {
+  if (!client || !id || !cmd)
+    return FAITH_ERR_INVALID;
+
+  faith_status_code_t _fh_result = FAITH_OK;
+
+  pthread_mutex_lock(&client->command_lock);
+
+  pending_command_entry_t *existing =
+      hmgetp_null(client->pending_command_map, *id);
+
+  if (existing)
+    _FH_RETURN_DEFER(FAITH_ERR_ALREADY_EXISTS);
+
+  hmput(client->pending_command_map, *id, *cmd);
+
+defer:
+  pthread_mutex_unlock(&client->command_lock);
+  return _fh_result;
+}
+
+static faith_status_code_t pending_command_take(faith_client_t *client,
+                                                const faith_command_id_t *id,
+                                                pending_command_t *o_cmd) {
+  if (!client || !id || !o_cmd)
+    return FAITH_ERR_INVALID;
+
+  faith_status_code_t _fh_result = FAITH_OK;
+
+  pthread_mutex_lock(&client->command_lock);
+
+  pending_command_entry_t *cmd = hmgetp_null(client->pending_command_map, *id);
+  if (!cmd)
+    _FH_RETURN_DEFER(FAITH_ERR_NOT_FOUND);
+
+  hmdel(client->pending_command_map, *id);
+
+defer:
+  pthread_mutex_unlock(&client->command_lock);
+
+  *o_cmd = cmd->value;
+  return _fh_result;
+}
 
 static faith_status_code_t
 client_send_envelope_locked(faith_client_t         *client,
@@ -420,12 +483,65 @@ static void _sleep_ms(unsigned ms) {
     ;
 }
 
+static faith_status_code_t pending_commands_expire(faith_client_t *client) {
+  if (!client)
+    return FAITH_ERR_INVALID;
+
+  if (hmlen(client->pending_command_map) == 0)
+    return FAITH_OK;
+
+  uint64_t now_ms = faith_now_ms();
+
+  faith_command_id_t *expired_ids = NULL;
+
+  pthread_mutex_lock(&client->command_lock);
+
+  ptrdiff_t len = hmlen(client->pending_command_map);
+
+  for (ptrdiff_t i = 0; i < len; ++i) {
+    pending_command_entry_t *entry = &client->pending_command_map[i];
+
+    if (entry->value.deadline_ms <= now_ms)
+      arrput(expired_ids, entry->key);
+  }
+
+  pthread_mutex_unlock(&client->command_lock);
+
+  for (ptrdiff_t i = 0; i < arrlen(expired_ids); ++i) {
+    pending_command_t pending;
+
+    if (pending_command_take(client, &expired_ids[i], &pending) != FAITH_OK) {
+      continue;
+    }
+
+    if (pending.on_result) {
+      faith_envl_stc_command_result_t res = {
+          .cmd_id = expired_ids[i],
+          .result = FAITH_COMMAND_RESULT_NOT_HANDLED,
+          .err = FAITH_COMMAND_ERR_TIMED_OUT,
+          .type = pending.type};
+      pending.on_result(client, &res);
+    }
+  }
+
+  arrfree(expired_ids);
+  return FAITH_OK;
+}
+
 static void _sleep_heartbeat_interval(faith_client_t *client) {
-  for (int i = 0; i < 100; i++) {
-    if (!client_is_running(client) || !atomic_load(&client->connected))
+  const uint64_t interval_ms = 10 * 1000;
+  const uint64_t poll_ms = 250;
+  const uint64_t deadline_ms = faith_now_ms() + interval_ms;
+
+  while (client_is_running(client) && atomic_load(&client->connected)) {
+    pending_commands_expire(client);
+
+    uint64_t now_ms = faith_now_ms();
+    if (now_ms >= deadline_ms)
       return;
 
-    _sleep_ms(100);
+    uint64_t remaining_ms = deadline_ms - now_ms;
+    _sleep_ms(remaining_ms < poll_ms ? remaining_ms : poll_ms);
   }
 }
 
@@ -444,17 +560,18 @@ static uint32_t client_next_backoff_ms(uint32_t current) {
   return current;
 }
 
-static faith_status_code_t client_send_command(faith_client_t* client, uint8_t* payload, size_t payload_size, faith_command_type_t type) {
-  if(!client) return FAITH_ERR_INVALID;
+static faith_status_code_t client_send_command(
+    faith_client_t *client, uint8_t *payload, size_t payload_size,
+    faith_command_type_t type,
+    void (*on_result)(faith_client_t                        *client,
+                      const faith_envl_stc_command_result_t *res)) {
+  if (!client)
+    return FAITH_ERR_INVALID;
 
   if (payload_size > FAITH_COMMAND_PAYLOAD_SIZE_MAX)
     return FAITH_ERR_OVERFLOW;
 
   size_t cmd_data_size = FAITH_ENVL_CTS_COMMAND_BODY_SIZE_FIXED + payload_size;
-
-  faith_envelope_t cmd_envl = {0};
-  cmd_envl.type = FAITH_ENVELOPE_COMMAND;
-  cmd_envl.sender_id = client->ident.auth_id;
 
   faith_envl_cts_command_t cmd = {0};
   cmd.payload = payload;
@@ -464,26 +581,51 @@ static faith_status_code_t client_send_command(faith_client_t* client, uint8_t* 
   _FH_CHECK_RETURN(faith_random_bytes((uint8_t *)&cmd.cmd_id.bytes,
                                       sizeof(cmd.cmd_id.bytes)));
 
-  uint8_t* body = malloc(cmd_data_size);
-  if(!body) {
+  uint8_t *body = malloc(cmd_data_size);
+  if (!body) {
     return FAITH_ERR_NOMEM;
   }
 
   faith_status_code_t _fh_result = FAITH_OK;
+  bool                command_pending = false;
 
   faith_body_size_t body_size = 0;
-  _FH_CHECK_DEFER(faith_encode_command_body(body, &body_size,
-                                            cmd_data_size, &cmd));
+  _FH_CHECK_DEFER(
+      faith_encode_command_body(body, &body_size, cmd_data_size, &cmd));
 
+  pending_command_t pending = {0};
+  pending.deadline_ms = faith_now_ms() + FAITH_CLIENT_COMMAND_TIMEOUT;
+  pending.type = type;
+  pending.on_result = on_result;
+  _FH_CHECK_DEFER(pending_command_insert(client, &cmd.cmd_id, &pending));
+
+  command_pending = true;
+
+  faith_envelope_t cmd_envl = {0};
+  cmd_envl.type = FAITH_ENVELOPE_COMMAND;
+  cmd_envl.sender_id = client->ident.auth_id;
   cmd_envl.body = body;
   cmd_envl.body_size = body_size;
-
   _FH_CHECK_DEFER(client_send_envelope_locked(client, &cmd_envl));
 
   free(body);
 
+  if (g_log_enable_tracing) {
+    char cmd_id_hex[33];
+    _FH_CHECK_RETURN(faith_id128_to_hex(cmd.cmd_id.bytes, cmd_id_hex));
+    nob_log(INFO, "[client] Successfully queued command %s (ID: %s)",
+            faith_command_type_name(cmd.type), cmd_id_hex);
+  }
+
   return FAITH_OK;
 defer:
+  if (command_pending) {
+    pending_command_t ignored;
+    _FH_CHECK(pending_command_take(client, &cmd.cmd_id, &ignored));
+    if (_fh_rc != FAITH_OK) {
+      _fh_result = _fh_rc;
+    }
+  }
   free(body);
   return _fh_result;
 }
@@ -745,18 +887,6 @@ client_handle_disconnect(faith_client_t *client, const faith_envelope_t *envl) {
   if (!client || !envl)
     return FAITH_ERR_INVALID;
 
-  if (envl->body_size < FAITH_ENVL_STC_CLIENT_DISCONNECT_BODY_SIZE_FIXED ||
-      envl->body_size > FAITH_ENVL_STC_CLIENT_DISCONNECT_BODY_SIZE_MAX) {
-    nob_log(ERROR,
-            "[client] Invalid CLIENT_DISCONNECT body size: "
-            "body_size=%" PRIu32 ", min=%zu, max=%zu",
-            envl->body_size,
-            (size_t)FAITH_ENVL_STC_CLIENT_DISCONNECT_BODY_SIZE_FIXED,
-            (size_t)FAITH_ENVL_STC_CLIENT_DISCONNECT_BODY_SIZE_MAX);
-
-    return FAITH_ERR_BAD_ENVELOPE;
-  }
-
   faith_envl_stc_client_disconnect_t disconnect = {0};
 
   _FH_CHECK_RETURN(faith_decode_client_disconnect_body(
@@ -797,18 +927,46 @@ client_handle_disconnect(faith_client_t *client, const faith_envelope_t *envl) {
 }
 
 static faith_status_code_t
-client_next_request_id(faith_client_t      *client,
-                       client_request_id_t *request_id_out) {
-  if (!client || !request_id_out)
+client_handle_command_result(faith_client_t         *client,
+                             const faith_envelope_t *envl) {
+  if (!client || !envl)
     return FAITH_ERR_INVALID;
 
-  client_request_id_t id = atomic_fetch_add(&client->next_request_id, 1);
+  faith_envl_stc_command_result_t res = {0};
 
-  if (id == 0) {
-    id = atomic_fetch_add(&client->next_request_id, 1);
+  _FH_CHECK_RETURN(
+      faith_decode_command_result_body(envl->body, envl->body_size, &res));
+
+  pending_command_t   cmd = {0};
+  faith_status_code_t rc = pending_command_take(client, &res.cmd_id, &cmd);
+
+  if (res.type != cmd.type) {
+    char buf[33];
+    _FH_CHECK_RETURN(faith_id128_to_hex(res.cmd_id.bytes, buf));
+    nob_log(ERROR,
+            "[client] Got invalid command type for command with ID: %s "
+            "(Expected %s, got %s).",
+            buf, faith_command_type_name(cmd.type),
+            faith_command_type_name(res.type));
+    return FAITH_ERR_INVALID;
   }
 
-  *request_id_out = id;
+  if (rc == FAITH_ERR_NOT_FOUND) {
+    char buf[33];
+    _FH_CHECK_RETURN(faith_id128_to_hex(res.cmd_id.bytes, buf));
+    nob_log(WARNING,
+            "[client] Got result for command with ID: %s that has no result "
+            "pending.",
+            buf);
+    return FAITH_OK;
+  }
+  if (rc != FAITH_OK)
+    return rc;
+
+  if (cmd.on_result) {
+    cmd.on_result(client, &res);
+  }
+
   return FAITH_OK;
 }
 
@@ -975,29 +1133,26 @@ static faith_status_code_t client_handle_envelope(faith_client_t *client,
   case FAITH_ENVELOPE_HELLO_OK:
     _FH_CHECK_RETURN(client_handle_hello_ok(client, &envl));
     break;
-  case FAITH_ENVELOPE_MSG_SEND: {
+  case FAITH_ENVELOPE_MSG_SEND:
     _FH_CHECK_RETURN(client_handle_msg_send(client, &envl));
     break;
-  }
-  case FAITH_ENVELOPE_DEVICE_LINK_REQUEST: {
+  case FAITH_ENVELOPE_DEVICE_LINK_REQUEST:
     _FH_CHECK_RETURN(client_handle_device_link_request(client, &envl));
     break;
-  }
-  case FAITH_ENVELOPE_DEVICE_AUTH_RESPONSE_ACK: {
+  case FAITH_ENVELOPE_DEVICE_AUTH_RESPONSE_ACK:
     _FH_CHECK_RETURN(client_handle_device_auth_response_ack(client, &envl));
     break;
-  }
-  case FAITH_ENVELOPE_DEVICE_AUTH_RESPONSE_FAILED: {
+  case FAITH_ENVELOPE_DEVICE_AUTH_RESPONSE_FAILED:
     _FH_CHECK_RETURN(client_handle_device_auth_response_failed(client, &envl));
     break;
-  }
-  case FAITH_ENVELOPE_DEVICE_LINK_CANCELLED: {
+  case FAITH_ENVELOPE_DEVICE_LINK_CANCELLED:
     _FH_CHECK_RETURN(client_handle_device_link_cancelled(client, &envl));
     break;
-  }
   case FAITH_ENVELOPE_CLIENT_DISCONNECT:
     _FH_CHECK_RETURN(client_handle_disconnect(client, &envl));
     break;
+  case FAITH_ENVELOPE_COMMAND_RESULT:
+    _FH_CHECK_RETURN(client_handle_command_result(client, &envl));
   default:
     break;
   }
@@ -1180,9 +1335,10 @@ client_handle_challenge(faith_client_t   *client,
   if (!client || !challenge_envl)
     return FAITH_ERR_INVALID;
 
-  int ok = challenge_envl->type == FAITH_ENVELOPE_CHALLENGE &&
-           challenge_envl->body &&
-           challenge_envl->body_size == FAITH_ENVL_STC_HELLO_CHALLENGE_BODY_SIZE;
+  int ok =
+      challenge_envl->type == FAITH_ENVELOPE_CHALLENGE &&
+      challenge_envl->body &&
+      challenge_envl->body_size == FAITH_ENVL_STC_HELLO_CHALLENGE_BODY_SIZE;
   if (!ok) {
     nob_log(ERROR,
             "Unexpected or malformed server envelope response to HELLO "
@@ -1603,8 +1759,6 @@ faith_client_t *faith_client_create(const faith_client_config_t *cfg) {
   if (!client)
     return NULL;
 
-  atomic_init(&client->next_request_id, 1);
-
   nob_set_log_handler(faith_log_handler);
 
   client->sockfd = -1;
@@ -1633,9 +1787,12 @@ faith_client_t *faith_client_create(const faith_client_config_t *cfg) {
   if (pthread_mutex_init(&client->ping_lock, NULL) != 0)
     goto fail_write_lock;
 
+  if (pthread_mutex_init(&client->command_lock, NULL) != 0)
+    goto fail_ping_lock;
+
   client->event_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
   if (client->event_fd < 0)
-    goto fail_ping_lock;
+    goto fail_command_lock;
 
   _FH_CHECK(client_new_identity(&client->ident));
   if (_fh_rc != FAITH_OK) {
@@ -1646,7 +1803,7 @@ faith_client_t *faith_client_create(const faith_client_config_t *cfg) {
     goto fail_event_fd;
 
   if (pthread_cond_init(&client->reconnect_cond, NULL) != 0)
-    goto fail_reconnect_lock;
+    goto fail_reconnect_cond;
 
   client->auto_reconnect_allowed = true;
   client->manual_reconnect_requested = false;
@@ -1655,17 +1812,16 @@ faith_client_t *faith_client_create(const faith_client_config_t *cfg) {
 
   return client;
 
-fail_reconnect_lock:
-  pthread_mutex_destroy(&client->reconnect_lock);
+fail_reconnect_cond:
+  pthread_cond_destroy(&client->reconnect_cond);
 fail_event_fd:
   close(client->event_fd);
-
+fail_command_lock:
+  pthread_mutex_destroy(&client->command_lock);
 fail_ping_lock:
   pthread_mutex_destroy(&client->ping_lock);
-
 fail_write_lock:
   pthread_mutex_destroy(&client->write_lock);
-
 fail_lock:
   pthread_mutex_destroy(&client->lock);
 
@@ -1767,9 +1923,9 @@ faith_status_code_t faith_client_stop(faith_client_t *client) {
   return FAITH_OK;
 }
 
-faith_status_code_t faith_client_send_msg(faith_client_t   *client,
+faith_status_code_t faith_client_send_msg(faith_client_t *client,
                                           faith_auth_id_t recipient_auth_id,
-                                          const char       *msg) {
+                                          const char     *msg) {
   if (!client || !msg)
     return FAITH_ERR_INVALID;
 
@@ -1985,6 +2141,42 @@ faith_client_deny_pending_device_auth(faith_client_t *client) {
   return FAITH_OK;
 }
 
+static faith_status_code_t
+send_command_result_event(faith_client_t                        *client,
+                          const faith_envl_stc_command_result_t *res) {
+
+  char cmd_id_hex[33];
+  _FH_CHECK_RETURN(faith_id128_to_hex(res->cmd_id.bytes, cmd_id_hex));
+
+  char error_msg[128];
+  snprintf(error_msg, sizeof(error_msg), " (Error: %s)",
+           faith_command_result_err_name(res->err));
+  char msg[256];
+
+  snprintf(msg, sizeof(msg), "Got result of command %s (ID: %s): %s%s",
+           faith_command_type_name(res->type), cmd_id_hex,
+           faith_command_result_name(res->result),
+           res->err != FAITH_COMMAND_ERR_NONE ? error_msg : "");
+
+  _FH_CHECK_RETURN(client_push_event(client, FAITH_EVENT_COMMAND_RESULT,
+                                     (uint64_t)res->type, (uint64_t)res->result,
+                                     msg));
+
+  return FAITH_OK;
+}
+
+static void
+on_create_conversation_res(faith_client_t                        *client,
+                           const faith_envl_stc_command_result_t *res) {
+  if (!client || !res) {
+    nob_log(ERROR, "[client] Invalid NULL arguments received for "
+                   "on_create_conversation_res()");
+    return;
+  }
+
+  _FH_CHECK(send_command_result_event(client, res));
+}
+
 faith_status_code_t
 faith_client_create_conversation(faith_client_t *client,
                                  faith_auth_id_t conservant) {
@@ -1999,16 +2191,8 @@ faith_client_create_conversation(faith_client_t *client,
     return FAITH_ERR_INVALID;
 
   _FH_CHECK_RETURN(client_send_command(client, payload, payload_size,
-                                       FAITH_COMMAND_CREATE_CONVERSATION));
-
-  if(g_log_enable_tracing) {
-    char auth_id_hex[33];
-    _FH_CHECK_RETURN(faith_id128_to_hex(cmd.conversant_id.bytes, auth_id_hex));
-    nob_log(INFO,
-            "[client] Successfully sent command "
-            "FAITH_COMMAND_CREATE_CONVERSATION (conversant_id: %s)",
-            auth_id_hex);
-  }
+                                       FAITH_COMMAND_CREATE_CONVERSATION,
+                                       on_create_conversation_res));
 
   return FAITH_OK;
 }

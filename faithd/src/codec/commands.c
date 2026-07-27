@@ -32,3 +32,39 @@ faith_decode_cmd_create_conversation(const uint8_t    *payload,
 
   return FAITH_OK;
 }
+
+const char *faith_command_type_name(faith_command_type_t type) {
+  switch (type) {
+#define X(name, value)                                                         \
+  case name:                                                                   \
+    return #name;
+    FAITH_COMMAND_TYPES(X)
+#undef X
+  default:
+    return "FAITH_COMMAND_TYPE_UNKNOWN";
+  }
+}
+const char *faith_command_result_name(faith_command_result_t res) {
+
+  switch (res) {
+#define X(name, value)                                                         \
+  case name:                                                                   \
+    return #name;
+    FAITH_COMMAND_RESULTS(X)
+#undef X
+  default:
+    return "FAITH_COMMAND_RESULT_UNKNOWN";
+  }
+}
+const char *faith_command_result_err_name(faith_command_result_err_t err) {
+
+  switch (err) {
+#define X(name, value)                                                         \
+  case name:                                                                   \
+    return #name;
+    FAITH_COMMAND_RESULT_ERRS(X)
+#undef X
+  default:
+    return "FAITH_COMMAND_ERR_UNKNOWN";
+  }
+}

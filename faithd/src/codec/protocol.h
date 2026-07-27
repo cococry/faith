@@ -1,8 +1,8 @@
 #pragma once
 
+#include "../codec/envelopes.h"
 #include "../codec/msg.h"
 #include "../core/core.h"
-#include "../codec/envelopes.h"
 
 #include "../auth/envelopes.h"
 #include "../server/envelopes.h"
@@ -27,9 +27,8 @@
   (_FAITH_BODY_SIZE(FAITH_FRAME_LENGTH_SIZE + FAITH_FRAME_METADATA_SIZE))
 
 #define FAITH_ENVL_HEADER_SIZE                                                 \
-  (sizeof(uint32_t) /* envelope type */ +                                      \
-   FAITH_AUTH_ID_SIZE /* sender id     */ +                                  \
-   FAITH_AUTH_ID_SIZE /* recipient id  */ +                                  \
+  (sizeof(uint32_t) /* envelope type */ + FAITH_AUTH_ID_SIZE /* sender id */ + \
+   FAITH_AUTH_ID_SIZE /* recipient id  */ +                                    \
    sizeof(faith_body_size_t) /* body size */)
 
 typedef struct {
@@ -122,33 +121,30 @@ faith_decode_hello_challenge_body(const uint8_t    *payload,
                                   faith_body_size_t payload_size,
                                   faith_envl_stc_hello_challenge_t *out);
 
-
 faith_status_code_t
 faith_encode_command_body(uint8_t *out_buf, faith_body_size_t *out_size,
-                                  size_t buf_cap_in_bytes,
-                                  const faith_envl_cts_command_t *in);
+                          size_t                          buf_cap_in_bytes,
+                          const faith_envl_cts_command_t *in);
 
-faith_status_code_t
-faith_decode_command_body(const uint8_t    *payload,
-                                  faith_body_size_t payload_size,
-                                  faith_envl_cts_command_t *out);
+faith_status_code_t faith_decode_command_body(const uint8_t    *payload,
+                                              faith_body_size_t payload_size,
+                                              faith_envl_cts_command_t *out);
 
 faith_status_code_t
 faith_encode_command_result_body(uint8_t *out_buf, faith_body_size_t *out_size,
-                                  size_t buf_cap_in_bytes,
-                                  const faith_envl_stc_command_result_t *in);
+                                 size_t buf_cap_in_bytes,
+                                 const faith_envl_stc_command_result_t *in);
 
 faith_status_code_t
-faith_decode_command_result_body(const uint8_t    *payload,
-                                  faith_body_size_t payload_size,
-                                  faith_envl_stc_command_result_t *out);
+faith_decode_command_result_body(const uint8_t                   *payload,
+                                 faith_body_size_t                payload_size,
+                                 faith_envl_stc_command_result_t *out);
 
-faith_status_code_t
-faith_encode_event_body(uint8_t *out_buf, faith_body_size_t *out_size,
-                                  size_t buf_cap_in_bytes,
-                                  const faith_envl_stc_event_t *in);
+faith_status_code_t faith_encode_event_body(uint8_t           *out_buf,
+                                            faith_body_size_t *out_size,
+                                            size_t             buf_cap_in_bytes,
+                                            const faith_envl_stc_event_t *in);
 
-faith_status_code_t
-faith_decode_event_body(const uint8_t    *payload,
-                                  faith_body_size_t payload_size,
-                                  faith_envl_stc_event_t *out);
+faith_status_code_t faith_decode_event_body(const uint8_t    *payload,
+                                            faith_body_size_t payload_size,
+                                            faith_envl_stc_event_t *out);
