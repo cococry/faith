@@ -698,7 +698,8 @@ faith_status_code_t faith_encode_event_body(uint8_t           *out_buf,
                         in->data_size);
   }
 
-  FAITH_ENCODE_EPILOGUE(FAITH_ENVL_STC_EVENT_BODY_SIZE_FIXED + in->data_size, !=);
+  FAITH_ENCODE_EPILOGUE(FAITH_ENVL_STC_EVENT_BODY_SIZE_FIXED + in->data_size,
+                        !=);
 
   return FAITH_OK;
 }

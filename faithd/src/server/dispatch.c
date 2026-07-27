@@ -7,8 +7,8 @@
 #include "../auth/device_link.h"
 #include "../auth/handshake.h"
 
-#include "../delivery/routing.h"
 #include "../delivery/events.h"
+#include "../delivery/routing.h"
 
 #include "../commands/dispatch.h"
 

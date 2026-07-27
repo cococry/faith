@@ -5,20 +5,21 @@
 #include "event_inbox.h"
 
 faith_status_code_t delivery_queue_event(server_state_t *s, client_conn_t *cl,
-                                       faith_event_codec_type_t type,
-                                       uint8_t                 *data,
-                                       faith_body_size_t        data_size) {
+                                         faith_event_codec_type_t type,
+                                         uint8_t                 *data,
+                                         faith_body_size_t        data_size) {
   if (!cl || (!data && data_size != 0) || (data && data_size == 0))
     return FAITH_ERR_INVALID;
 
-  if(!cl->authorized) return FAITH_ERR_UNAUTHORIZED;
+  if (!cl->authorized)
+    return FAITH_ERR_UNAUTHORIZED;
 
   client_device_session_data_t *sess = NULL;
   _FH_CHECK_RETURN(
       sess_registry_get_session(&s->rt, &cl->auth_id, &cl->device_id, &sess));
 
-  if(!sess) return FAITH_ERR_UNAUTHORIZED;
-
+  if (!sess)
+    return FAITH_ERR_UNAUTHORIZED;
 
   faith_envl_stc_event_t event = {0};
   event.type = type;
@@ -51,7 +52,8 @@ defer:
 faith_status_code_t delivery_handle_event_acked(server_state_t   *s,
                                                 client_conn_t    *cl,
                                                 faith_envelope_t *envl) {
-  if(!s || !cl || !envl) return FAITH_ERR_INVALID;
+  if (!s || !cl || !envl)
+    return FAITH_ERR_INVALID;
 
   if (envl->type != FAITH_ENVELOPE_EVENT_ACK)
     return FAITH_ERR_BAD_ENVELOPE;
@@ -63,7 +65,8 @@ faith_status_code_t delivery_handle_event_acked(server_state_t   *s,
   _FH_CHECK_RETURN(
       sess_registry_get_session(&s->rt, &cl->auth_id, &cl->device_id, &sess));
 
-  if(!sess) return FAITH_ERR_UNAUTHORIZED;
+  if (!sess)
+    return FAITH_ERR_UNAUTHORIZED;
 
   faith_envl_cts_event_ack_t ack = {0};
   _FH_CHECK_RETURN(
