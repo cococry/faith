@@ -50,7 +50,8 @@ typedef struct {
   faith_conversation_id_t conversation_id;
 } faith_event_conversation_created_t;
 
-#define FAITH_EVENT_CONVERSATION_CREATED_DATA_SIZE _FAITH_BODY_SIZE(FAITH_CONVERSATION_ID_SIZE)
+#define FAITH_EVENT_CONVERSATION_CREATED_DATA_SIZE                             \
+  _FAITH_BODY_SIZE(FAITH_CONVERSATION_ID_SIZE)
 
 faith_status_code_t faith_encode_event_conversation_created(
     uint8_t *out_buf, faith_body_size_t *out_size, size_t buf_cap_in_bytes,

@@ -3,8 +3,9 @@
 #include "../../third_party/stb_ds.h"
 #include <stdint.h>
 
-void device_event_inbox_init(device_event_inbox_t* o_inbox) {
-  if(!o_inbox) return;
+void device_event_inbox_init(device_event_inbox_t *o_inbox) {
+  if (!o_inbox)
+    return;
 
   o_inbox->events = NULL;
   o_inbox->last_acked_seq = UINT64_MAX;
@@ -21,8 +22,10 @@ device_event_inbox_queue_event(device_event_inbox_t         *inbox,
   return FAITH_OK;
 }
 
-faith_status_code_t device_event_inbox_advance_seq(device_event_inbox_t *inbox) {
-  if(!inbox) return FAITH_ERR_INVALID;
+faith_status_code_t
+device_event_inbox_advance_seq(device_event_inbox_t *inbox) {
+  if (!inbox)
+    return FAITH_ERR_INVALID;
 
   /* Dont allow UINT64_MAX */
   if (inbox->next_seq >= UINT64_MAX - 1)
@@ -51,8 +54,7 @@ faith_status_code_t device_event_inbox_ack_seq(device_event_inbox_t *inbox,
   return FAITH_OK;
 }
 
-faith_status_code_t 
-device_event_inbox_destroy(device_event_inbox_t *inbox) {
+faith_status_code_t device_event_inbox_destroy(device_event_inbox_t *inbox) {
   if (!inbox)
     return FAITH_ERR_INVALID;
 
