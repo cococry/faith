@@ -123,6 +123,8 @@ struct faith_client {
   pthread_cond_t  reconnect_cond;
 
   pending_command_entry_t *pending_command_map;
+
+  uint64_t last_acked_ev_seq;
 };
 
 static faith_status_code_t
@@ -162,7 +164,7 @@ static faith_status_code_t pending_command_take(faith_client_t *client,
   if (!cmd)
     _FH_RETURN_DEFER(FAITH_ERR_NOT_FOUND);
 
-  hmdel(client->pending_command_map, *id);
+  (void)hmdel(client->pending_command_map, *id);
 
 defer:
   pthread_mutex_unlock(&client->command_lock);
@@ -280,7 +282,7 @@ static faith_status_code_t read_frame_sync(SSL *ssl, faith_frame_t *out) {
       read_rc == FAITH_ERR_IO)
     return read_rc;
   else if (read_rc == FAITH_ERR_CLOSED) {
-    return FAITH_OK;
+    return FAITH_ERR_CLOSED;
   }
 
   const uint32_t frame_size = faith_read_u32_be(len_buf);
@@ -926,6 +928,102 @@ client_handle_disconnect(faith_client_t *client, const faith_envelope_t *envl) {
   return FAITH_OK;
 }
 
+
+static faith_status_code_t
+client_send_ack_event(faith_client_t *client, uint64_t seq_num,
+                      faith_event_codec_type_t event_type) {
+
+  if(!client || seq_num == UINT64_MAX) return FAITH_ERR_INVALID;
+
+  uint8_t           body[FAITH_ENVL_CTS_EVENT_ACK_BODY_SIZE] = {0};
+  faith_body_size_t body_size = 0;
+
+  faith_envl_cts_event_ack_t ack = {0};
+  ack.seq_num = seq_num;
+  ack.type = event_type;
+
+  _FH_CHECK_RETURN(
+      faith_encode_event_ack_body(body, &body_size, sizeof(body), &ack));
+
+  faith_envelope_t envl = {0};
+  envl.type = FAITH_ENVELOPE_EVENT_ACK;
+  envl.body = body;
+  envl.body_size = body_size;
+
+  _FH_CHECK_RETURN(client_send_envelope_locked(client, &envl));
+
+  return FAITH_OK;
+}
+
+static faith_status_code_t client_handle_event_conversation_created(faith_client_t* client, const faith_envl_stc_event_t* event) {
+  if(!client || !event) return FAITH_ERR_INVALID;
+
+  faith_event_conversation_created_t conv_created = {0};
+  _FH_CHECK_RETURN(faith_decode_event_conversation_created(
+      event->data, event->data_size, &conv_created));
+
+  char buf[33];
+  _FH_CHECK_RETURN(faith_id128_to_hex(conv_created.conversation_id.bytes, buf));
+  nob_log(INFO, "[client] Conversation %s was created by the server.", buf);
+
+  return FAITH_OK;
+}
+static faith_status_code_t
+client_dispatch_event(faith_client_t* client, const faith_envl_stc_event_t* event) {
+  if(!client || !event) return FAITH_ERR_INVALID;
+
+  switch(event->type) {
+  case FAITH_EVENT_CONVERSATION_CREATED:
+    _FH_CHECK_RETURN(client_handle_event_conversation_created(client, event));
+    break;
+  default:
+    break;
+  }
+
+  return FAITH_OK;
+}
+
+static faith_status_code_t client_ack_event(faith_client_t* client, const faith_envl_stc_event_t* event) {
+  if(!client || !event) return FAITH_ERR_INVALID;
+
+  /* duplicate event */
+  if (client->last_acked_ev_seq != UINT64_MAX) {
+    if (event->seq_num <= client->last_acked_ev_seq)
+      return FAITH_OK;
+  }
+
+  /* TODO: Handle out of order events */
+
+  _FH_CHECK_RETURN(client_send_ack_event(client, event->seq_num, event->type));
+
+  client->last_acked_ev_seq = event->seq_num;
+
+  return FAITH_OK;
+}
+
+static faith_status_code_t
+client_handle_event(faith_client_t         *client,
+                             const faith_envelope_t *envl) {
+  if (!client || !envl)
+    return FAITH_ERR_INVALID;
+
+  faith_envl_stc_event_t event = {0};
+
+  if (event.seq_num == UINT64_MAX) {
+    nob_log(ERROR, "[client] Received event (%s) with invalid sequence number.",
+            faith_event_codec_type_name(event.type));
+    return FAITH_ERR_INVALID;
+  }
+
+  _FH_CHECK_RETURN(
+      faith_decode_event_body(envl->body, envl->body_size, &event));
+
+  _FH_CHECK_RETURN(client_dispatch_event(client, &event));
+
+  _FH_CHECK_RETURN(client_ack_event(client, &event));
+
+  return FAITH_OK;
+}
 static faith_status_code_t
 client_handle_command_result(faith_client_t         *client,
                              const faith_envelope_t *envl) {
@@ -1153,6 +1251,10 @@ static faith_status_code_t client_handle_envelope(faith_client_t *client,
     break;
   case FAITH_ENVELOPE_COMMAND_RESULT:
     _FH_CHECK_RETURN(client_handle_command_result(client, &envl));
+    break;
+  case FAITH_ENVELOPE_EVENT:
+    _FH_CHECK_RETURN(client_handle_event(client, &envl));
+    break;
   default:
     break;
   }
@@ -1168,8 +1270,6 @@ static void *reader(void *arg) {
 
     faith_frame_t frame;
     if (read_frame_sync(client->ssl, &frame) != FAITH_OK) {
-      _FH_CHECK(client_push_event(client, FAITH_EVENT_DISCONNECTED, 0, 0,
-                                  "Failed to read server frame"));
       break;
     }
 
@@ -1179,7 +1279,7 @@ static void *reader(void *arg) {
       break;
     }
     case FAITH_MSG_ENVL: {
-      client_handle_envelope(client, &frame);
+      _FH_CHECK(client_handle_envelope(client, &frame));
       break;
     }
     default:
@@ -1280,8 +1380,6 @@ static faith_status_code_t faith_client_send_hello(faith_client_t *client) {
   if (!client)
     return FAITH_ERR_INVALID;
 
-  uint8_t body[FAITH_ENVL_CTS_HELLO_BODY_SIZE];
-
   // HELLO {
   // header: {
   // sender_id: auth_id
@@ -1294,32 +1392,24 @@ static faith_status_code_t faith_client_send_hello(faith_client_t *client) {
   // }
   //
 
-  size_t offset = 0;
-  size_t device_id_size = sizeof(client->ident.device_id.bytes);
-  /* 1. Serialize device ID */
-  memcpy(body, client->ident.device_id.bytes, device_id_size);
-  offset += device_id_size;
+  faith_envl_cts_hello_t hello = {0};
+  hello.device_id = client->ident.device_id;
+  memcpy(hello.public_key, client->ident.public_key,
+         FAITH_ED25519_PUBLIC_KEY_SIZE);
+  _FH_CHECK_RETURN(faith_random_bytes((uint8_t *)&hello.client_nonce,
+                                      sizeof(hello.client_nonce)));
 
-  /* 2. Serialize public key*/
-  memcpy(body + offset, client->ident.public_key,
-         sizeof(client->ident.public_key));
+  uint8_t body[FAITH_ENVL_CTS_HELLO_BODY_SIZE] = {0};
+  faith_body_size_t body_size = 0;
 
-  offset += sizeof(client->ident.public_key);
-
-  /* 3. Serialize nonce */
-  uint64_t nonce;
-  _FH_CHECK_RETURN(faith_random_bytes((uint8_t *)&nonce, sizeof(nonce)));
-
-  _FH_CHECK_RETURN(faith_write_u64_be(body + offset, nonce));
+  _FH_CHECK_RETURN(faith_encode_hello_body(body, &body_size, sizeof(body), &hello));
 
   /* Store nonce in temporary client state */
-  client->nonce_tmp = nonce;
+  client->nonce_tmp = hello.client_nonce;
 
   faith_envelope_t envl = {0};
   envl.type = FAITH_ENVELOPE_HELLO;
-
-  memcpy(envl.sender_id.bytes, client->ident.auth_id.bytes,
-         sizeof(envl.sender_id));
+  envl.sender_id = client->ident.auth_id;
 
   envl.body = body;
   envl.body_size = sizeof(body);
@@ -1670,53 +1760,6 @@ faith_status_code_t faith_client_init_global(int log_enable_tracing) {
   return FAITH_OK;
 }
 
-static bool hex_char_to_nibble(char c, uint8_t *out) {
-  if (!out)
-    return false;
-
-  if (c >= '0' && c <= '9') {
-    *out = (uint8_t)(c - '0');
-    return true;
-  }
-
-  if (c >= 'a' && c <= 'f') {
-    *out = (uint8_t)(c - 'a' + 10);
-    return true;
-  }
-
-  if (c >= 'A' && c <= 'F') {
-    *out = (uint8_t)(c - 'A' + 10);
-    return true;
-  }
-
-  return false;
-}
-
-static bool client_id_from_hex(const char *hex, faith_auth_id_t *out) {
-  if (!hex || !out)
-    return false;
-
-  if (strlen(hex) != FAITH_AUTH_ID_SIZE * 2)
-    return false;
-
-  faith_auth_id_t id = {0};
-
-  for (size_t i = 0; i < FAITH_AUTH_ID_SIZE; ++i) {
-    uint8_t hi = 0;
-    uint8_t lo = 0;
-
-    if (!hex_char_to_nibble(hex[i * 2 + 0], &hi))
-      return false;
-
-    if (!hex_char_to_nibble(hex[i * 2 + 1], &lo))
-      return false;
-
-    id.bytes[i] = (uint8_t)((hi << 4) | lo);
-  }
-
-  *out = id;
-  return true;
-}
 
 static faith_status_code_t
 client_new_identity(client_side_identity_t *o_ident) {
@@ -1763,6 +1806,8 @@ faith_client_t *faith_client_create(const faith_client_config_t *cfg) {
 
   client->sockfd = -1;
   client->event_fd = -1;
+
+  client->last_acked_ev_seq = UINT64_MAX;
 
   snprintf(client->host, sizeof(client->host), "%s", cfg->host);
   client->port = cfg->port;
