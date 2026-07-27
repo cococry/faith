@@ -93,7 +93,8 @@
   X(FAITH_ERR_ALREADY_CONNECTED, 23)                                           \
   X(FAITH_ERR_ALREADY_EXISTS, 24)                                              \
   X(FAITH_ERR_ALREADY_REMOVED, 25)                                             \
-  X(FAITH_ERR_EPOLL, 26)
+  X(FAITH_ERR_EPOLL, 26)                                                       \
+  X(FAITH_ERR_RESYNC_REQUIRED, 27)
 
 typedef enum {
 #define X(name, value) name = value,

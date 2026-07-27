@@ -8,37 +8,20 @@
 #include "../auth/handshake.h"
 
 #include "../delivery/routing.h"
+#include "../delivery/events.h"
 
 #include "../commands/dispatch.h"
 
-faith_status_code_t server_dispatch_frame(server_state_t *s, client_conn_t *cl,
-                                          faith_frame_t *frame) {
-  if (!s || !cl || !frame)
-    return FAITH_ERR_INVALID;
+static faith_status_code_t server_dispatch_envelope(server_state_t *s,
+                                                    client_conn_t  *cl,
+                                                    faith_frame_t  *frame);
 
-  nob_log(INFO,
-          "[client=%" PRIu64
-          " fd=%i] Server got frame: msg_type=%s payload_size=%u",
-          cl->conn.id, cl->conn.fd, faith_frame_msg_name(frame->msg_type),
-          frame->payload_size);
+static faith_status_code_t
+server_handle_ping(server_state_t *s, client_conn_t *cl, faith_frame_t *frame);
 
-  switch (frame->msg_type) {
-  case FAITH_MSG_PING:
-    _FH_CHECK_RETURN(server_handle_ping(s, cl, frame));
-    break;
-  case FAITH_MSG_ENVL:
-    _FH_CHECK_RETURN(server_dispatch_envelope(s, cl, frame));
-    break;
-  default:
-    return FAITH_ERR_BAD_FRAME;
-  }
-
-  return FAITH_OK;
-}
-
-faith_status_code_t server_dispatch_envelope(server_state_t *s,
-                                             client_conn_t  *cl,
-                                             faith_frame_t  *frame) {
+static faith_status_code_t server_dispatch_envelope(server_state_t *s,
+                                                    client_conn_t  *cl,
+                                                    faith_frame_t  *frame) {
   if (!s || !frame || !cl)
     return FAITH_ERR_INVALID;
 
@@ -75,6 +58,9 @@ faith_status_code_t server_dispatch_envelope(server_state_t *s,
   case FAITH_ENVELOPE_COMMAND:
     _FH_CHECK_DEFER(command_dispatch(s, cl, &envl));
     break;
+  case FAITH_ENVELOPE_EVENT_ACK:
+    _FH_CHECK_RETURN(delivery_handle_event_acked(s, cl, &envl));
+    break;
   default:
     _FH_RETURN_DEFER(FAITH_ERR_BAD_ENVELOPE);
   }
@@ -92,8 +78,8 @@ defer:
   return _fh_result;
 }
 
-faith_status_code_t server_handle_ping(server_state_t *s, client_conn_t *cl,
-                                       faith_frame_t *frame) {
+static faith_status_code_t
+server_handle_ping(server_state_t *s, client_conn_t *cl, faith_frame_t *frame) {
   if (!s || !cl || cl->closing || !frame)
     return FAITH_ERR_INVALID;
 
@@ -133,6 +119,31 @@ faith_status_code_t server_handle_ping(server_state_t *s, client_conn_t *cl,
       "[client=%" PRIu64
       " fd=%i] Server sent PONG to client. nonce=%lu, server_sent_at_ms=%lu",
       cl->conn.id, cl->conn.fd, ping.nonce, server_sent_at_ms);
+
+  return FAITH_OK;
+}
+
+faith_status_code_t server_dispatch_frame(server_state_t *s, client_conn_t *cl,
+                                          faith_frame_t *frame) {
+  if (!s || !cl || !frame)
+    return FAITH_ERR_INVALID;
+
+  nob_log(INFO,
+          "[client=%" PRIu64
+          " fd=%i] Server got frame: msg_type=%s payload_size=%u",
+          cl->conn.id, cl->conn.fd, faith_frame_msg_name(frame->msg_type),
+          frame->payload_size);
+
+  switch (frame->msg_type) {
+  case FAITH_MSG_PING:
+    _FH_CHECK_RETURN(server_handle_ping(s, cl, frame));
+    break;
+  case FAITH_MSG_ENVL:
+    _FH_CHECK_RETURN(server_dispatch_envelope(s, cl, frame));
+    break;
+  default:
+    return FAITH_ERR_BAD_FRAME;
+  }
 
   return FAITH_OK;
 }

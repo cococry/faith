@@ -65,6 +65,9 @@ faith_status_code_t sess_registry_register_session(
 
   sess->conn = cl;
 
+  /* init event inbox for this device */
+  device_event_inbox_init(&sess->inbox);
+
   /* assign public key to new session */
   memcpy(sess->ident.public_key, public_key, FAITH_ED25519_PUBLIC_KEY_SIZE);
 
@@ -142,11 +145,11 @@ sess_registry_unregister_session(sess_registry_state_t   *rt,
   free(dev->value);
   dev->value = NULL;
 
-  hmdel(devmap, *device_id);
+  (void)hmdel(devmap, *device_id);
 
   if (hmlen(devmap) == 0) {
     hmfree(devmap);
-    hmdel(rt->active_users, *auth_id);
+    (void)hmdel(rt->active_users, *auth_id);
   } else {
     /* write pointer back to avoid stale pointers */
     hmput(rt->active_users, *auth_id, devmap);

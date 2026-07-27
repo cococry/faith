@@ -1048,6 +1048,20 @@ typedef int STBDS_SIPHASH_2_4_can_only_be_used_in_64_bit_builds[sizeof(size_t) =
 #pragma warning(disable:4127) // conditional expression is constant, for do..while(0) and sizeof()==
 #endif
 
+#if defined(__has_c_attribute)
+  #if __has_c_attribute(fallthrough)
+    #define FAITH_FALLTHROUGH [[fallthrough]]
+  #endif
+#endif
+
+#ifndef FAITH_FALLTHROUGH
+  #if defined(__GNUC__) && __GNUC__ >= 7
+    #define FAITH_FALLTHROUGH __attribute__((fallthrough))
+  #else
+    #define FAITH_FALLTHROUGH ((void)0)
+  #endif
+#endif
+
 static size_t stbds_siphash_bytes(void *p, size_t len, size_t seed)
 {
   unsigned char *d = (unsigned char *)p;
@@ -1125,27 +1139,27 @@ static size_t stbds_siphash_bytes(void *p, size_t len, size_t seed)
 #if SIZE_MAX > UINT32_MAX
   case 7:
     data |= (size_t)d[6] << 48;
-    /* fall through */
+    FAITH_FALLTHROUGH;
   case 6:
     data |= (size_t)d[5] << 40;
-    /* fall through */
+    FAITH_FALLTHROUGH;
   case 5:
     data |= (size_t)d[4] << 32;
-    /* fall through */
+    FAITH_FALLTHROUGH;
 #endif
 
   case 4:
     data |= (size_t)d[3] << 24;
-    /* fall through */
+    FAITH_FALLTHROUGH;
   case 3:
     data |= (size_t)d[2] << 16;
-    /* fall through */
+    FAITH_FALLTHROUGH;
   case 2:
     data |= (size_t)d[1] << 8;
-    /* fall through */
+    FAITH_FALLTHROUGH;
   case 1:
     data |= (size_t)d[0];
-    /* fall through */
+    FAITH_FALLTHROUGH;
   case 0:
     break;
   }
