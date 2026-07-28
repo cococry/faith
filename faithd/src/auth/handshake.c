@@ -7,6 +7,8 @@
 #include "../codec/protocol.h"
 #include "../codec/signatures.h"
 
+#include "../delivery/events.h"
+
 faith_status_code_t auth_handle_hello(server_state_t *s, client_conn_t *cl,
                                       const faith_envelope_t *hello_envl) {
   // HELLO {
@@ -252,10 +254,13 @@ faith_status_code_t auth_handle_challenge_response(
     return FAITH_OK;
   }
 
-  _FH_CHECK(auth_authorize_client(s, cl, &params->sender_auth_id,
-                                  &params->device_id, verification_public_key,
-                                  sess == NULL));
-  return _fh_rc;
+  _FH_CHECK_RETURN(
+      auth_authorize_client(s, cl, &params->sender_auth_id, &params->device_id,
+                            verification_public_key, sess == NULL));
+
+  _FH_CHECK_RETURN(delivery_queue_pending_events(s, cl));
+
+  return FAITH_OK;
 reject: {
 
   /* =============================== */
@@ -279,7 +284,7 @@ reject: {
 faith_status_code_t auth_authorize_client(
     server_state_t *s, client_conn_t *cl, const faith_auth_id_t *auth_id,
     const faith_device_id_t *device_id,
-    uint8_t public_key[FAITH_ED25519_PUBLIC_KEY_SIZE], int register_session) {
+    uint8_t public_key[FAITH_ED25519_PUBLIC_KEY_SIZE], bool register_session) {
   if (!s || !cl || cl->closing || !auth_id || !device_id || !public_key)
     return FAITH_ERR_INVALID;
 
@@ -291,13 +296,14 @@ faith_status_code_t auth_authorize_client(
   if (register_session) {
     /* Register client session */
     _FH_CHECK_RETURN(sess_registry_register_session(
-        &s->rt, &cl->auth_id, &cl->device_id, cl, public_key));
+        &s->rt, &cl->ident.auth_id, &cl->ident.device_id, cl, public_key));
   }
 
   char cl_auth_id_hex[33];
   char cl_device_id_hex[33];
-  _FH_CHECK_RETURN(faith_id128_to_hex(cl->auth_id.bytes, cl_auth_id_hex));
-  _FH_CHECK_RETURN(faith_id128_to_hex(cl->device_id.bytes, cl_device_id_hex));
+  _FH_CHECK_RETURN(faith_id128_to_hex(cl->ident.auth_id.bytes, cl_auth_id_hex));
+  _FH_CHECK_RETURN(
+      faith_id128_to_hex(cl->ident.device_id.bytes, cl_device_id_hex));
 
   nob_log(INFO,
           "[client=%" PRIu64 " fd=%i] Client passed authorization for "
@@ -324,8 +330,8 @@ auth_handshake_complete(server_state_t *s, client_conn_t *cl,
 
   _FH_CHECK_RETURN(server_queue_envelope_or_mark_dead(s, cl, &hello_ok_envl));
 
-  cl->auth_id = *sender_id;
-  cl->device_id = *device_id;
+  cl->ident.auth_id = *sender_id;
+  cl->ident.device_id = *device_id;
 
   server_set_client_state(s, cl, CLIENT_OPEN);
 
@@ -334,8 +340,9 @@ auth_handshake_complete(server_state_t *s, client_conn_t *cl,
 
   faith_status_code_t _fh_result = FAITH_OK;
 
-  _FH_CHECK_RETURN(faith_id128_to_hex(cl->auth_id.bytes, auth_id_hex));
-  _FH_CHECK_RETURN(faith_id128_to_hex(cl->device_id.bytes, device_id_hex));
+  _FH_CHECK_RETURN(faith_id128_to_hex(cl->ident.auth_id.bytes, auth_id_hex));
+  _FH_CHECK_RETURN(
+      faith_id128_to_hex(cl->ident.device_id.bytes, device_id_hex));
 
   nob_log(INFO,
           "[client=%" PRIu64

@@ -6,6 +6,7 @@
 #include "../codec/signatures.h"
 
 #include "../delivery/routing.h"
+#include "structs.h"
 
 #define NOB_IMPLEMENTATION
 #include "../../third_party/nob.h"
@@ -20,7 +21,7 @@ static faith_status_code_t send_device_auth_response_failed(server_state_t *s,
 
   faith_envelope_t failed_envl = {
       .type = FAITH_ENVELOPE_DEVICE_AUTH_RESPONSE_FAILED,
-      .recipient_id = cl->auth_id,
+      .recipient_id = cl->ident.auth_id,
       .body = NULL,
       .body_size = 0,
   };
@@ -79,8 +80,9 @@ device_link_handle_device_response(server_state_t *s, client_conn_t *cl,
   if (!cl->authorized) {
     char auth_id_hex[33];
     char device_id_hex[33];
-    _FH_CHECK_RETURN(faith_id128_to_hex(cl->auth_id.bytes, auth_id_hex));
-    _FH_CHECK_RETURN(faith_id128_to_hex(cl->device_id.bytes, device_id_hex));
+    _FH_CHECK_RETURN(faith_id128_to_hex(cl->ident.auth_id.bytes, auth_id_hex));
+    _FH_CHECK_RETURN(
+        faith_id128_to_hex(cl->ident.device_id.bytes, device_id_hex));
 
     nob_log(ERROR,
             "[client=%" PRIu64 " fd=%i] Server got unauthorized %s"
@@ -160,7 +162,7 @@ device_link_handle_device_response(server_state_t *s, client_conn_t *cl,
   memcpy(sign_msg.code, req->code, sizeof(req->code));
 
   sign_msg.expires_at_ms = req->expires_at_ms;
-  sign_msg.device_id_responding = cl->device_id;
+  sign_msg.device_id_responding = cl->ident.device_id;
 
   sign_msg.type = response_envl->type == FAITH_ENVELOPE_DEVICE_AUTH_APPROVE
                       ? FAITH_DEVICE_LINK_APPROVE
@@ -186,11 +188,12 @@ device_link_handle_device_response(server_state_t *s, client_conn_t *cl,
 
   client_device_session_data_t *sess = NULL;
   {
-    _FH_CHECK(
-        sess_registry_get_session(&s->rt, &cl->auth_id, &cl->device_id, &sess));
+    _FH_CHECK(sess_registry_get_session(&s->rt, &cl->ident.auth_id,
+                                        &cl->ident.device_id, &sess));
     /* We specifically need routing_get_session() to return FAITH_OK. This is
-     * returned only if <cl->auth_id> is a registered client_route_user_t
-     * and <cl->device_id> is a registered client_route_device_t of that user.
+     * returned only if <cl->ident.auth_id> is a registered client_route_user_t
+     * and <cl->ident.device_id> is a registered client_route_device_t of that
+     * user.
      * */
     if (_fh_rc != FAITH_OK) {
       _fh_result = _fh_rc;
@@ -202,10 +205,10 @@ device_link_handle_device_response(server_state_t *s, client_conn_t *cl,
     }
   }
 
-  /* This means cl->auth_id is registered but cl->device_id is not, effectively
-   * telling us that the client connection is not yet authorized. Because we
-   * checked cl->authorized above, this should never happen with correct
-   * behaviour.*/
+  /* This means cl->ident.auth_id is registered but cl->ident.device_id is not,
+   * effectively telling us that the client connection is not yet authorized.
+   * Because we checked cl->authorized above, this should never happen with
+   * correct behaviour.*/
   if (!sess) {
     nob_log(ERROR,
             "[client=%" PRIu64
@@ -265,11 +268,12 @@ device_link_handle_device_response(server_state_t *s, client_conn_t *cl,
   faith_envelope_t ack_envl = {0};
   ack_envl.type = FAITH_ENVELOPE_DEVICE_AUTH_RESPONSE_ACK;
   _FH_CHECK_RETURN(
-      delivery_route_envelope_to_auth_id(s, cl, &cl->auth_id, &ack_envl));
+      delivery_route_envelope_to_auth_id(s, cl, &cl->ident.auth_id, &ack_envl));
 
   faith_status_code_t device_loop_rc = FAITH_OK;
-  _FH_FOR_EACH_AUTH_DEVICE(s, &cl->auth_id, recipient, device_loop_rc,
-                           { device_link_remove_request(cl); });
+  _FH_FOR_EACH_AUTH_DEVICE_CONNECTION(s, &cl->ident.auth_id, recipient,
+                                      device_loop_rc,
+                                      { device_link_remove_request(cl); });
 
   return device_loop_rc == FAITH_OK ? rc : device_loop_rc;
 
@@ -352,7 +356,7 @@ device_link_new_device(server_state_t *s, client_conn_t *cl,
   /* Send device authorization request to every already registered device
    for that auth ID */
   faith_status_code_t device_loop_rc = FAITH_OK;
-  _FH_FOR_EACH_AUTH_DEVICE(
+  _FH_FOR_EACH_AUTH_DEVICE_CONNECTION(
       s, &params->sender_auth_id, authorized_cl, device_loop_rc, {
         faith_envl_stc_device_link_req_t *req = NULL;
         _FH_CHECK(device_link_queue_request(
@@ -384,9 +388,8 @@ device_link_new_device(server_state_t *s, client_conn_t *cl,
   /* Send DEVICE_AUTH_PENDING to the connection that requested the
    * new device */
   _FH_CHECK_RETURN(auth_queue_auth_pending(s, cl));
-  /* temporarily assign <cl->auth_id> for disconnection purposes later. this
-   * does not mean that the client is authorized. */
-  cl->auth_id = params->sender_auth_id;
+
+  cl->pending_auth_id = params->sender_auth_id;
   server_set_client_state(s, cl, CLIENT_WAIT_FOR_DEVICE_LINK_RESPONSE);
 
   return FAITH_OK;
@@ -405,7 +408,7 @@ device_link_queue_request_cancellation(server_state_t *s,
       &requesting_cl->temp_handshake_params;
 
   faith_status_code_t device_loop_rc = FAITH_OK;
-  _FH_FOR_EACH_AUTH_DEVICE(
+  _FH_FOR_EACH_AUTH_DEVICE_CONNECTION(
       s, &params->sender_auth_id, authorized_cl, device_loop_rc, {
         if (authorized_cl->pending_device_link_conn != requesting_cl)
           continue;
@@ -413,7 +416,7 @@ device_link_queue_request_cancellation(server_state_t *s,
         /* Send DEVICE_LINK_CANCELLED to the authorized device */
         faith_envelope_t envl = {0};
         envl.type = FAITH_ENVELOPE_DEVICE_LINK_CANCELLED;
-        envl.recipient_id = authorized_cl->auth_id;
+        envl.recipient_id = authorized_cl->ident.auth_id;
         _FH_CHECK(server_queue_envelope_or_mark_dead(s, authorized_cl, &envl));
 
         if (_fh_rc != FAITH_OK && device_loop_rc == FAITH_OK)
@@ -446,9 +449,9 @@ faith_status_code_t device_link_queue_request(
     char auth_id_hex[33];
     char device_id_hex[33];
     _FH_CHECK_RETURN(
-        faith_id128_to_hex(recipient_cl->auth_id.bytes, auth_id_hex));
+        faith_id128_to_hex(recipient_cl->ident.auth_id.bytes, auth_id_hex));
     _FH_CHECK_RETURN(
-        faith_id128_to_hex(recipient_cl->device_id.bytes, device_id_hex));
+        faith_id128_to_hex(recipient_cl->ident.device_id.bytes, device_id_hex));
     nob_log(ERROR,
             "Not sending device link request to "
             "device with device_id: %s (auth_id: %s). Client connection is "
@@ -462,9 +465,9 @@ faith_status_code_t device_link_queue_request(
     char auth_id_hex[33];
     char device_id_hex[33];
     _FH_CHECK_RETURN(
-        faith_id128_to_hex(recipient_cl->auth_id.bytes, auth_id_hex));
+        faith_id128_to_hex(recipient_cl->ident.auth_id.bytes, auth_id_hex));
     _FH_CHECK_RETURN(
-        faith_id128_to_hex(recipient_cl->device_id.bytes, device_id_hex));
+        faith_id128_to_hex(recipient_cl->ident.device_id.bytes, device_id_hex));
     nob_log(ERROR,
             "Not sending device link request to "
             "device with device_id: %s (auth_id: %s). Another device link "

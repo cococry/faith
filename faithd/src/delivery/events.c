@@ -4,21 +4,100 @@
 #include "../server/client_io.h"
 #include "event_inbox.h"
 
-faith_status_code_t delivery_queue_event(server_state_t *s, client_conn_t *cl,
-                                         faith_event_codec_type_t type,
-                                         uint8_t                 *data,
-                                         faith_body_size_t        data_size) {
-  if (!cl || (!data && data_size != 0) || (data && data_size == 0))
+#include "../../third_party/stb_ds.h"
+
+#define DIV_UP(x, y) (((x) + (y) - 1) / (y))
+
+static faith_status_code_t
+queue_event_online_user(server_state_t *s, struct client_conn_t *cl,
+                        device_event_inbox_t         *inbox,
+                        const faith_envl_stc_event_t *event) {
+  if (!s || !cl || !inbox || !event)
     return FAITH_ERR_INVALID;
 
-  if (!cl->authorized)
-    return FAITH_ERR_UNAUTHORIZED;
+  faith_status_code_t _fh_result = FAITH_OK;
+
+  size_t   cap = FAITH_ENVL_STC_EVENT_BODY_SIZE_FIXED + event->data_size;
+  uint8_t *body = malloc(cap);
+  faith_body_size_t body_size = 0;
+  _FH_CHECK_DEFER(faith_encode_event_body(body, &body_size, cap, event));
+
+  faith_envelope_t envl = {0};
+  envl.type = FAITH_ENVELOPE_EVENT;
+  envl.recipient_id = cl->ident.auth_id;
+  envl.body = body;
+  envl.body_size = body_size;
+
+  _FH_CHECK_DEFER(server_queue_envelope_or_mark_dead(s, cl, &envl));
+
+  _FH_CHECK_DEFER(device_event_inbox_advance_seq(inbox));
+
+defer:
+  free(body);
+  return _fh_result;
+}
+
+static faith_status_code_t
+queue_event_offline_user(device_event_inbox_t         *inbox,
+                         const faith_envl_stc_event_t *event) {
+  if (!inbox || !event)
+    return FAITH_ERR_INVALID;
+
+  _FH_CHECK_RETURN(device_event_inbox_push_event(inbox, event));
+  return FAITH_OK;
+}
+
+static faith_status_code_t
+queue_event_batch_envl(server_state_t *s, struct client_conn_t *cl,
+                       const faith_envl_stc_event_batch_t *batch_envl) {
+  if (!batch_envl)
+    return FAITH_ERR_INVALID;
+
+  size_t batch_data_cap =
+      FAITH_ENVL_STC_EVENT_BATCH_BODY_SIZE_FIXED + batch_envl->events_data_size;
+  uint8_t *body = malloc(batch_data_cap);
+  if (!body) {
+    return FAITH_ERR_NOMEM;
+  }
+
+  faith_status_code_t _fh_result = FAITH_OK;
+  faith_body_size_t   body_size = 0;
+  _FH_CHECK_DEFER(faith_encode_event_batch_body(body, &body_size,
+                                                batch_data_cap, batch_envl));
+
+  faith_envelope_t envl = {0};
+  envl.type = FAITH_ENVELOPE_EVENT_BATCH;
+  envl.recipient_id = cl->ident.auth_id;
+  envl.body = body;
+  envl.body_size = body_size;
+
+  _FH_CHECK_DEFER(server_queue_envelope_or_mark_dead(s, cl, &envl));
+
+defer:
+  free(body);
+  return _fh_result;
+}
+
+faith_status_code_t delivery_queue_event(server_state_t          *s,
+                                         const faith_auth_id_t   *auth_id,
+                                         const faith_device_id_t *device_id,
+                                         const faith_event_codec_type_t type,
+                                         uint8_t                       *data,
+                                         faith_body_size_t data_size) {
+  if (!auth_id || !device_id || (!data && data_size != 0) ||
+      (data && data_size == 0))
+    return FAITH_ERR_INVALID;
 
   client_device_session_data_t *sess = NULL;
   _FH_CHECK_RETURN(
-      sess_registry_get_session(&s->rt, &cl->auth_id, &cl->device_id, &sess));
+      sess_registry_get_session(&s->rt, auth_id, device_id, &sess));
 
   if (!sess)
+    return FAITH_ERR_NOT_FOUND;
+
+  bool online = sess->conn != NULL;
+
+  if (online && !sess->conn->authorized)
     return FAITH_ERR_UNAUTHORIZED;
 
   faith_envl_stc_event_t event = {0};
@@ -27,26 +106,52 @@ faith_status_code_t delivery_queue_event(server_state_t *s, client_conn_t *cl,
   event.data_size = data_size;
   event.seq_num = sess->inbox.next_seq;
 
-  faith_status_code_t _fh_result = FAITH_OK;
+  if (online) {
+    _FH_CHECK_RETURN(
+        queue_event_online_user(s, sess->conn, &sess->inbox, &event));
+    return FAITH_OK;
+  }
 
-  size_t            cap = FAITH_ENVL_STC_EVENT_BODY_SIZE_FIXED + data_size;
-  uint8_t          *body = malloc(cap);
-  faith_body_size_t body_size = 0;
-  _FH_CHECK_DEFER(faith_encode_event_body(body, &body_size, cap, &event));
+  _FH_CHECK_RETURN(queue_event_offline_user(&sess->inbox, &event));
+  return FAITH_OK;
+}
 
-  faith_envelope_t envl = {0};
-  envl.type = FAITH_ENVELOPE_EVENT;
-  envl.recipient_id = cl->auth_id;
-  envl.body = body;
-  envl.body_size = body_size;
+faith_status_code_t delivery_queue_pending_events(server_state_t *s,
+                                                  client_conn_t  *cl) {
+  if (!s || !cl) {
+    return FAITH_ERR_INVALID;
+  }
+  client_device_session_data_t *sess = NULL;
+  _FH_CHECK_RETURN(sess_registry_get_session(&s->rt, &cl->ident.auth_id,
+                                             &cl->ident.device_id, &sess));
 
-  _FH_CHECK_DEFER(server_queue_envelope_or_mark_dead(s, cl, &envl));
+  if (!sess)
+    return FAITH_ERR_NOT_FOUND;
 
-  _FH_CHECK_DEFER(device_event_inbox_advance_seq(&sess->inbox));
+  size_t n_events = arrlen(sess->inbox.events);
 
-defer:
-  free(body);
-  return _fh_result;
+  for (size_t offset = 0; offset < n_events; offset += 256) {
+    size_t remaining = n_events - offset;
+
+    faith_envl_stc_event_t *batch = &sess->inbox.events[offset];
+
+    size_t in_batch = remaining < FAITH_EVENT_BATCH_MAX_EVENTS
+                          ? remaining
+                          : FAITH_EVENT_BATCH_MAX_EVENTS;
+
+    faith_body_size_t events_data_size = 0;
+    _FH_CHECK_RETURN(
+        faith_codec_event_batch_data_size(batch, in_batch, &events_data_size));
+
+    faith_envl_stc_event_batch_t batch_envl = {0};
+    batch_envl.events_data_size = events_data_size;
+    batch_envl.events = batch;
+    batch_envl.n_events = (uint16_t)in_batch;
+
+    _FH_CHECK_RETURN(queue_event_batch_envl(s, cl, &batch_envl));
+  }
+
+  return FAITH_OK;
 }
 
 faith_status_code_t delivery_handle_event_acked(server_state_t   *s,
@@ -62,17 +167,17 @@ faith_status_code_t delivery_handle_event_acked(server_state_t   *s,
     return FAITH_ERR_UNAUTHORIZED;
 
   client_device_session_data_t *sess = NULL;
-  _FH_CHECK_RETURN(
-      sess_registry_get_session(&s->rt, &cl->auth_id, &cl->device_id, &sess));
+  _FH_CHECK_RETURN(sess_registry_get_session(&s->rt, &cl->ident.auth_id,
+                                             &cl->ident.device_id, &sess));
 
   if (!sess)
-    return FAITH_ERR_UNAUTHORIZED;
+    return FAITH_ERR_NOT_FOUND;
 
   faith_envl_cts_event_ack_t ack = {0};
   _FH_CHECK_RETURN(
       faith_decode_event_ack_body(envl->body, envl->body_size, &ack));
 
-  device_event_inbox_ack_seq(&sess->inbox, ack.seq_num);
+  _FH_CHECK_RETURN(device_event_inbox_remove_until(&sess->inbox, ack.seq_num));
 
   return FAITH_OK;
 }

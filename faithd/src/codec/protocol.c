@@ -1,7 +1,10 @@
 #include "protocol.h"
 
 #include "../../third_party/nob.h"
+#include "../../third_party/stb_ds.h"
 
+#include "core.h"
+#include "events.h"
 #include "helpers.h"
 
 faith_status_code_t faith_encode_frame(uint8_t *out_buf, size_t *out_size,
@@ -44,13 +47,13 @@ frame_too_large:
           "Failed to encode frame; Frame is too large, "
           "frame_size=%u, MAX_FRAME_LEN=%i",
           (uint32_t)frame_size, (int32_t)FAITH_MAX_FRAME_LEN);
-  return FAITH_ERR_FRAME_TOO_LARGE;
+  return FAITH_ERR_TOO_LARGE;
 payload_too_large:
   nob_log(ERROR,
           "Failed to encode frame; Payload is too large, "
           "payload_size=%u, MAX_PAYLOAD_SIZE=%i",
           (uint32_t)in->payload_size, (int32_t)FAITH_MAX_PAYLOAD_SIZE);
-  return FAITH_ERR_FRAME_TOO_LARGE;
+  return FAITH_ERR_TOO_LARGE;
 }
 
 faith_status_code_t faith_decode_frame(const uint8_t *payload,
@@ -86,7 +89,7 @@ faith_status_code_t faith_decode_frame(const uint8_t *payload,
             "payload_size=%zu MAX_PAYLOAD_SIZE=%zu",
             payload_size, (size_t)FAITH_MAX_PAYLOAD_SIZE);
 
-    return FAITH_ERR_FRAME_TOO_LARGE;
+    return FAITH_ERR_TOO_LARGE;
   }
 
   if (frame_size > FAITH_MAX_FRAME_LEN) {
@@ -94,7 +97,7 @@ faith_status_code_t faith_decode_frame(const uint8_t *payload,
             "Failed to parse frame from buffer; Frame is too large, "
             "frame_size=%i MAX_FRAME_LEN=%i",
             (int32_t)frame_size, (int32_t)FAITH_MAX_FRAME_LEN);
-    return FAITH_ERR_FRAME_TOO_LARGE;
+    return FAITH_ERR_TOO_LARGE;
   }
 
   size_t total_frame_size = FAITH_FRAME_LENGTH_SIZE + frame_size;
@@ -112,22 +115,29 @@ faith_status_code_t faith_decode_frame(const uint8_t *payload,
   if (proto_ver != FAITH_PROTO_VERSION)
     return FAITH_ERR_UNSUPPORTED_VER;
 
-  FAITH_DECODE_EPILOGUE_DNY(FAITH_FRAME_HEADER_SIZE, <);
-
   out->proto_ver = proto_ver;
   out->msg_type = msg_type;
   out->frame_size = frame_size;
   out->payload_size = frame_size - FAITH_FRAME_METADATA_SIZE;
+
+  faith_status_code_t _fh_result = FAITH_OK;
 
   if (out->payload_size > 0) {
     out->payload = malloc(out->payload_size);
     if (!out->payload)
       return FAITH_ERR_NOMEM;
 
-    memcpy(out->payload, payload + FAITH_FRAME_HEADER_SIZE, out->payload_size);
+    FAITH_DECODE_DEFER(payload, payload_size, offset, out->payload,
+                       out->payload_size);
   }
 
+  FAITH_DECODE_EPILOGUE_DEFER(FAITH_FRAME_HEADER_SIZE + out->payload_size, <);
+
   return FAITH_OK;
+defer:
+  free(out->payload);
+  out->payload = NULL;
+  return _fh_result;
 }
 
 void faith_free_frame(faith_frame_t *frame) {
@@ -261,30 +271,28 @@ faith_status_code_t faith_decode_envelope(const uint8_t    *payload,
 
   FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset, out->body_size);
 
-  FAITH_DECODE_EPILOGUE_DNY(FAITH_ENVL_HEADER_SIZE, <);
-
   if (out->body_size != payload_size - offset) {
     return FAITH_ERR_BAD_FRAME;
   }
 
-  uint8_t *body = NULL;
+  faith_status_code_t _fh_result = FAITH_OK;
+
   if (out->body_size != 0) {
-    body = malloc(out->body_size);
-    if (!body)
+    out->body = malloc(out->body_size);
+    if (!out->body)
       return FAITH_ERR_NOMEM;
 
-    memcpy(body, payload + offset, out->body_size);
-    offset += out->body_size;
+    FAITH_DECODE_DEFER(payload, payload_size, offset, out->body,
+                       out->body_size);
   }
 
-  if (offset != payload_size) {
-    free(body);
-    return FAITH_ERR_BAD_FRAME;
-  }
-
-  out->body = body;
+  FAITH_DECODE_EPILOGUE_DEFER(FAITH_ENVL_HEADER_SIZE + out->body_size, !=);
 
   return FAITH_OK;
+defer:
+  free(out->body);
+  out->body = NULL;
+  return _fh_result;
 }
 
 faith_status_code_t
@@ -619,17 +627,26 @@ faith_status_code_t faith_decode_command_body(const uint8_t    *payload,
   if (out->payload_size > FAITH_COMMAND_PAYLOAD_SIZE_MAX)
     return FAITH_ERR_BAD_ENVELOPE;
 
+  faith_status_code_t _fh_result = FAITH_OK;
+
   if (out->payload_size > 0) {
     out->payload = malloc(out->payload_size);
     if (!out->payload)
       return FAITH_ERR_NOMEM;
 
-    memcpy(out->payload, payload + offset, out->payload_size);
+    FAITH_DECODE_DEFER(payload, payload_size, offset, out->payload,
+                       out->payload_size);
   }
 
-  FAITH_DECODE_EPILOGUE_DNY(FAITH_ENVL_CTS_COMMAND_BODY_SIZE_FIXED, <);
+  FAITH_DECODE_EPILOGUE_DEFER(
+      FAITH_ENVL_CTS_COMMAND_BODY_SIZE_FIXED + out->payload_size, !=);
 
   return FAITH_OK;
+
+defer:
+  free(out->payload);
+  out->payload = NULL;
+  return _fh_result;
 }
 
 faith_status_code_t
@@ -673,7 +690,7 @@ faith_decode_command_result_body(const uint8_t                   *payload,
 
   FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset, out->result);
 
-  FAITH_DECODE_EPILOGUE_DNY(FAITH_ENVL_STC_COMMAND_RESULT_BODY_SIZE, !=);
+  FAITH_DECODE_EPILOGUE(FAITH_ENVL_STC_COMMAND_RESULT_BODY_SIZE, !=);
 
   return FAITH_OK;
 }
@@ -684,6 +701,10 @@ faith_status_code_t faith_encode_event_body(uint8_t           *out_buf,
                                             const faith_envl_stc_event_t *in) {
 
   FAITH_ENCODE_PROLOGUE(FAITH_ENVL_STC_EVENT_BODY_SIZE_FIXED + in->data_size);
+
+  if (in->data_size != 0 && !in->data) {
+    return FAITH_ERR_INVALID;
+  }
 
   size_t offset = 0;
 
@@ -714,17 +735,230 @@ faith_status_code_t faith_decode_event_body(const uint8_t    *payload,
   FAITH_DECODE_U64_BE_RETURN(payload, payload_size, offset, out->seq_num);
   FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset, out->type);
   FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset, out->data_size);
+
+  faith_status_code_t _fh_result = FAITH_OK;
+
   if (out->data_size > 0) {
     out->data = malloc(out->data_size);
     if (!out->data)
       return FAITH_ERR_NOMEM;
 
-    memcpy(out->data, payload + offset, out->data_size);
+    FAITH_DECODE_DEFER(payload, payload_size, offset, out->data,
+                       out->data_size);
   }
 
-  FAITH_DECODE_EPILOGUE_DNY(FAITH_ENVL_STC_EVENT_BODY_SIZE_FIXED, <);
+  FAITH_DECODE_EPILOGUE_DEFER(
+      FAITH_ENVL_STC_EVENT_BODY_SIZE_FIXED + out->data_size, !=);
 
   return FAITH_OK;
+defer:
+  free(out->data);
+  out->data = NULL;
+  return _fh_result;
+}
+
+faith_status_code_t
+faith_codec_event_batch_data_size(faith_envl_stc_event_t *events,
+                                  uint16_t                n_events,
+                                  faith_body_size_t      *o_size) {
+  if (!events || !o_size)
+    return FAITH_ERR_INVALID;
+
+  *o_size = 0;
+
+  if (n_events > FAITH_EVENT_BATCH_MAX_EVENTS) {
+    nob_log(ERROR,
+            "Invalid EVENT_BATCH body: event count %" PRIu16
+            " exceeds maximum %u.",
+            n_events, FAITH_EVENT_BATCH_MAX_EVENTS);
+    return FAITH_ERR_INVALID;
+  }
+
+  size_t total_data_size = 0;
+
+  if (n_events != 0) {
+    for (uint16_t i = 0; i < n_events; i++) {
+      size_t body_size = (size_t)FAITH_ENVL_STC_EVENT_BODY_SIZE_FIXED +
+                         (size_t)events[i].data_size;
+
+      if (body_size > UINT16_MAX) {
+        nob_log(ERROR,
+                "Cannot encode EVENT_BATCH: event %" PRIu16
+                " body size (%zu bytes) exceeds UINT16_MAX.",
+                i, body_size);
+        return FAITH_ERR_TOO_LARGE;
+      }
+
+      size_t encoded_elem_size = sizeof(uint16_t) + body_size;
+
+      if (encoded_elem_size > UINT32_MAX - total_data_size) {
+        nob_log(ERROR,
+                "Cannot encode EVENT_BATCH: adding event %" PRIu16
+                " would make the total event data exceed UINT32_MAX.",
+                i);
+        return FAITH_ERR_TOO_LARGE;
+      }
+
+      total_data_size += encoded_elem_size;
+    }
+  }
+
+  if (total_data_size > SIZE_MAX - FAITH_ENVL_STC_EVENT_BATCH_BODY_SIZE_FIXED)
+    return FAITH_ERR_TOO_LARGE;
+
+  *o_size = total_data_size;
+
+  return FAITH_OK;
+}
+
+faith_status_code_t
+faith_encode_event_batch_body(uint8_t *out_buf, faith_body_size_t *out_size,
+                              size_t buf_cap_in_bytes,
+                              const faith_envl_stc_event_batch_t *in) {
+  if (!in || (!in->events && in->n_events != 0))
+    return FAITH_ERR_INVALID;
+
+  size_t encoded_size =
+      FAITH_ENVL_STC_EVENT_BATCH_BODY_SIZE_FIXED + in->events_data_size;
+
+  FAITH_ENCODE_PROLOGUE(encoded_size);
+
+  size_t offset = 0;
+
+  FAITH_ENCODE_U16_BE_RETURN(out_buf, buf_cap_in_bytes, offset, in->n_events);
+  FAITH_ENCODE_U32_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
+                             (uint32_t)in->events_data_size);
+
+  for (uint16_t i = 0; i < in->n_events; i++) {
+    size_t body_size = (size_t)FAITH_ENVL_STC_EVENT_BODY_SIZE_FIXED +
+                       (size_t)in->events[i].data_size;
+
+    /* encode element size */
+    FAITH_ENCODE_U16_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
+                               (uint16_t)body_size);
+
+    faith_body_size_t returned_body_size = 0;
+    /* encode element body*/
+    _FH_CHECK_RETURN(
+        faith_encode_event_body(out_buf + offset, &returned_body_size,
+                                buf_cap_in_bytes - offset, &in->events[i]));
+
+    if ((size_t)returned_body_size != body_size) {
+      nob_log(ERROR,
+              "EVENT encoder returned an unexpected body size: "
+              "expected %zu bytes, got %" PRIu32 " bytes.",
+              body_size, returned_body_size);
+      return FAITH_ERR_INVALID;
+    }
+    offset += body_size;
+  }
+
+  FAITH_ENCODE_EPILOGUE(encoded_size, !=);
+
+  return FAITH_OK;
+}
+
+faith_status_code_t
+faith_decode_event_batch_body(const uint8_t                *payload,
+                              faith_body_size_t             payload_size,
+                              faith_envl_stc_event_batch_t *out) {
+
+  FAITH_DECODE_PROLOGUE(FAITH_ENVL_STC_EVENT_BATCH_BODY_SIZE_FIXED, <);
+
+  out->n_events = 0;
+  out->events_data_size = 0;
+  out->events = NULL;
+
+  size_t offset = 0;
+
+  FAITH_DECODE_U16_BE_RETURN(payload, payload_size, offset, out->n_events);
+
+  if (out->n_events > FAITH_EVENT_BATCH_MAX_EVENTS) {
+    nob_log(ERROR,
+            "Invalid EVENT_BATCH body: event count %" PRIu16
+            " exceeds maximum %u.",
+            out->n_events, FAITH_EVENT_BATCH_MAX_EVENTS);
+    return FAITH_ERR_BAD_ENVELOPE;
+  }
+
+  FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset,
+                             out->events_data_size);
+
+  size_t decoded_size = (size_t)FAITH_ENVL_STC_EVENT_BATCH_BODY_SIZE_FIXED +
+                        (size_t)out->events_data_size;
+
+  if ((size_t)payload_size < decoded_size) {
+    nob_log(ERROR,
+            "Invalid EVENT_BATCH body: declared events data size (%" PRIu32
+            " bytes) exceeds remaining payload size (%" PRIu32 " bytes).",
+            out->events_data_size,
+            payload_size - FAITH_ENVL_STC_EVENT_BATCH_BODY_SIZE_FIXED);
+
+    return FAITH_ERR_OVERFLOW;
+  }
+
+  size_t events_end = offset + (size_t)out->events_data_size;
+
+  if (events_end != (size_t)payload_size) {
+    nob_log(ERROR, "Invalid EVENT_BATCH body: payload has %zu trailing bytes.",
+            (size_t)payload_size - events_end);
+    return FAITH_ERR_BAD_ENVELOPE;
+  }
+
+  faith_status_code_t _fh_result = FAITH_OK;
+
+  if (out->n_events != 0) {
+    arrsetlen(out->events, out->n_events);
+  }
+
+  uint16_t decoded_events = 0;
+  for (uint16_t i = 0; i < out->n_events; i++) {
+    /* decode element size */
+    uint16_t elem_size = 0;
+    FAITH_DECODE_U16_BE_DEFER(payload, payload_size, offset, elem_size);
+
+    if (elem_size < FAITH_ENVL_STC_EVENT_BODY_SIZE_FIXED) {
+      nob_log(ERROR,
+              "Invalid EVENT_BATCH body: event %" PRIu16
+              " declares an invalid body size of %" PRIu16
+              " bytes. The minimum required size for an event is: %" PRIu32
+              " bytes.",
+              i, elem_size, FAITH_ENVL_STC_EVENT_BODY_SIZE_FIXED);
+      _FH_RETURN_DEFER(FAITH_ERR_BAD_ENVELOPE);
+    }
+
+    if (offset > payload_size || payload_size - offset < (size_t)elem_size) {
+      nob_log(ERROR,
+              "Invalid EVENT_BATCH body: event %" PRIu16 " declares %" PRIu16
+              " bytes, but only %zu bytes remain.",
+              i, elem_size, events_end - offset);
+      _FH_RETURN_DEFER(FAITH_ERR_BAD_FRAME);
+    }
+
+    /* decode element body */
+    _FH_CHECK_DEFER(faith_decode_event_body(
+        payload + offset, (faith_body_size_t)elem_size, &out->events[i]));
+
+    decoded_events++;
+
+    offset += (size_t)elem_size;
+  }
+
+  FAITH_DECODE_EPILOGUE_DEFER(decoded_size, !=);
+
+  return FAITH_OK;
+
+defer:
+  for (size_t i = 0; i < decoded_events; i++) {
+    free(out->events[i].data);
+    out->events[i].data = NULL;
+  }
+  arrfree(out->events);
+  out->events_data_size = 0;
+  out->n_events = 0;
+  out->events = NULL;
+
+  return _fh_result;
 }
 
 faith_status_code_t

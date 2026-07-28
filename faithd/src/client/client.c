@@ -66,7 +66,7 @@ typedef struct {
 } pending_command_entry_t;
 
 typedef struct {
-  bool occupied;
+  bool                   occupied;
   faith_envl_stc_event_t event;
 } buffered_event_slot_t;
 
@@ -303,7 +303,7 @@ static faith_status_code_t read_frame_sync(SSL *ssl, faith_frame_t *out) {
             "Failed to read frame; Frame is too large, "
             "frame_size=%i MAX_FRAME_LEN=%i",
             (int32_t)frame_size, (int32_t)FAITH_MAX_FRAME_LEN);
-    return FAITH_ERR_FRAME_TOO_LARGE;
+    return FAITH_ERR_TOO_LARGE;
   }
 
   _FH_CHECK_RETURN(read_bytes_sync(ssl, hdr_buf, sizeof(hdr_buf)));
@@ -322,7 +322,7 @@ static faith_status_code_t read_frame_sync(SSL *ssl, faith_frame_t *out) {
             "frame_size=%u MAX_FRAME_LEN=%i",
             out->payload_size, (int32_t)FAITH_MAX_FRAME_LEN);
 
-    return FAITH_ERR_FRAME_TOO_LARGE;
+    return FAITH_ERR_TOO_LARGE;
   }
 
   if (out->payload_size == 0)
@@ -936,9 +936,8 @@ client_handle_disconnect(faith_client_t *client, const faith_envelope_t *envl) {
   return FAITH_OK;
 }
 
-static faith_status_code_t
-client_send_ack_until(faith_client_t *client, uint64_t seq_num,
-                      faith_event_codec_type_t event_type) {
+static faith_status_code_t client_send_ack_until(faith_client_t *client,
+                                                 uint64_t        seq_num) {
 
   if (!client || seq_num == UINT64_MAX)
     return FAITH_ERR_INVALID;
@@ -948,7 +947,6 @@ client_send_ack_until(faith_client_t *client, uint64_t seq_num,
 
   faith_envl_cts_event_ack_t ack = {0};
   ack.seq_num = seq_num;
-  ack.type = event_type;
 
   _FH_CHECK_RETURN(
       faith_encode_event_ack_body(body, &body_size, sizeof(body), &ack));
@@ -985,6 +983,8 @@ client_dispatch_event(faith_client_t               *client,
   if (!client || !event)
     return FAITH_ERR_INVALID;
 
+  faith_status_code_t _fh_result = FAITH_OK;
+
   switch (event->type) {
   case FAITH_EVENT_CONVERSATION_CREATED:
     _FH_CHECK_RETURN(client_handle_event_conversation_created(client, event));
@@ -995,28 +995,31 @@ client_dispatch_event(faith_client_t               *client,
 
   client->ev_last_dispatched_seq = event->seq_num;
 
-  return FAITH_OK;
+  return _fh_result;
 }
 
-static faith_status_code_t client_buffer_event(faith_client_t* client, const faith_envl_stc_event_t* event) {
-  if(!client || !event) return FAITH_ERR_INVALID;
+static faith_status_code_t
+client_buffer_event(faith_client_t               *client,
+                    const faith_envl_stc_event_t *event) {
+  if (!client || !event)
+    return FAITH_ERR_INVALID;
 
-  size_t index = event->seq_num % EV_REORDER_WINDOW_SIZE;
-  buffered_event_slot_t* slot = &client->ev_reorder_window[index];
+  size_t                 index = event->seq_num % EV_REORDER_WINDOW_SIZE;
+  buffered_event_slot_t *slot = &client->ev_reorder_window[index];
 
-  if(slot->occupied) {
+  if (slot->occupied) {
     /* duplicate buffered event */
-    if(event->seq_num == slot->event.seq_num) return FAITH_OK;
+    if (event->seq_num == slot->event.seq_num)
+      return FAITH_OK;
 
     /* invalid state */
     return FAITH_ERR_INVALID;
   }
 
   slot->occupied = true;
-  slot->event = *event;
-  uint8_t* data_copy = NULL;
+  uint8_t *data_copy = NULL;
 
-  if(event->data_size > 0) {
+  if (event->data_size > 0) {
     data_copy = malloc(event->data_size);
     if (!data_copy)
       return FAITH_ERR_NOMEM;
@@ -1032,8 +1035,9 @@ static faith_status_code_t client_buffer_event(faith_client_t* client, const fai
 }
 
 static faith_status_code_t client_drain_reorder_buffer(faith_client_t *client) {
-  for(;;) {
-    if(client->ev_last_dispatched_seq == UINT64_MAX) return FAITH_ERR_OVERFLOW;
+  for (;;) {
+    if (client->ev_last_dispatched_seq == UINT64_MAX)
+      return FAITH_ERR_OVERFLOW;
 
     uint64_t next_seq = client->ev_last_dispatched_seq + 1;
     size_t   index = next_seq % EV_REORDER_WINDOW_SIZE;
@@ -1046,40 +1050,40 @@ static faith_status_code_t client_drain_reorder_buffer(faith_client_t *client) {
     /* advances <ev_last_dispatched_seq> of the client */
     _FH_CHECK_RETURN(client_dispatch_event(client, &slot->event));
 
-    free(slot->event.data);
-    slot->event.data = NULL;
-    slot->event.data_size = 0;
-
     slot->occupied = false;
   }
 }
 
 static faith_status_code_t
-client_ack_event(faith_client_t *client, const faith_envl_stc_event_t *event) {
-  if (!client || !event)
+client_process_event(faith_client_t               *client,
+                     const faith_envl_stc_event_t *event, bool *o_saw_duplicate,
+                     bool *o_made_progress) {
+  if (!client || !event || !o_saw_duplicate || !o_made_progress)
     return FAITH_ERR_INVALID;
+
+  if (event->seq_num == UINT64_MAX) {
+    nob_log(ERROR, "[client] Received event (%s) with invalid sequence number.",
+            faith_event_codec_type_name(event->type));
+    return FAITH_ERR_INVALID;
+  }
 
   /* duplicate event */
   if (client->ev_last_dispatched_seq != UINT64_MAX &&
       event->seq_num <= client->ev_last_dispatched_seq) {
-    /* resend ACKs for all prior events up until the last successfully
-     * processed/dispatched event */
-    _FH_CHECK(client_send_ack_until(client, client->ev_last_dispatched_seq,
-                                    event->type));
-    return _fh_rc;
+
+    *o_saw_duplicate = true;
+    return FAITH_OK;
   }
 
   uint64_t expected_seq = client->ev_last_dispatched_seq == UINT64_MAX
                               ? 0
                               : client->ev_last_dispatched_seq + 1;
 
-  if(event->seq_num == expected_seq) {
+  if (event->seq_num == expected_seq) {
     _FH_CHECK_RETURN(client_dispatch_event(client, event));
     _FH_CHECK_RETURN(client_drain_reorder_buffer(client));
 
-    _FH_CHECK_RETURN(client_send_ack_until(
-        client, client->ev_last_dispatched_seq, event->type));
-
+    *o_made_progress = true;
     return FAITH_OK;
   }
 
@@ -1095,19 +1099,56 @@ static faith_status_code_t client_handle_event(faith_client_t         *client,
 
   faith_envl_stc_event_t event = {0};
 
-  if (event.seq_num == UINT64_MAX) {
-    nob_log(ERROR, "[client] Received event (%s) with invalid sequence number.",
-            faith_event_codec_type_name(event.type));
-    return FAITH_ERR_INVALID;
-  }
-
   _FH_CHECK_RETURN(
       faith_decode_event_body(envl->body, envl->body_size, &event));
 
-  _FH_CHECK_RETURN(client_ack_event(client, &event));
+  bool saw_duplicate = false;
+  bool made_progress = false;
+  _FH_CHECK_RETURN(
+      client_process_event(client, &event, &saw_duplicate, &made_progress));
+
+  if (saw_duplicate || made_progress) {
+    _FH_CHECK_RETURN(
+        client_send_ack_until(client, client->ev_last_dispatched_seq));
+  }
+
+  free(event.data);
 
   return FAITH_OK;
 }
+
+static faith_status_code_t
+client_handle_event_batch(faith_client_t         *client,
+                          const faith_envelope_t *envl) {
+  if (!client || !envl)
+    return FAITH_ERR_INVALID;
+
+  faith_status_code_t          _fh_result = FAITH_OK;
+  faith_envl_stc_event_batch_t batch = {0};
+  _FH_CHECK_DEFER(
+      faith_decode_event_batch_body(envl->body, envl->body_size, &batch));
+
+  bool saw_duplicate = false;
+  bool made_progress = false;
+  for (uint16_t i = 0; i < batch.n_events; i++) {
+    faith_envl_stc_event_t *event = &batch.events[i];
+    _FH_CHECK_DEFER(
+        client_process_event(client, event, &saw_duplicate, &made_progress));
+  }
+  if ((made_progress || saw_duplicate) &&
+      client->ev_last_dispatched_seq != UINT64_MAX) {
+    _FH_CHECK_DEFER(
+        client_send_ack_until(client, client->ev_last_dispatched_seq));
+  }
+
+defer:
+  for (size_t i = 0; i < batch.n_events; i++) {
+    free(batch.events[i].data);
+  }
+  arrfree(batch.events);
+  return _fh_result;
+}
+
 static faith_status_code_t
 client_handle_command_result(faith_client_t         *client,
                              const faith_envelope_t *envl) {
@@ -1338,6 +1379,9 @@ static faith_status_code_t client_handle_envelope(faith_client_t *client,
     break;
   case FAITH_ENVELOPE_EVENT:
     _FH_CHECK_RETURN(client_handle_event(client, &envl));
+    break;
+  case FAITH_ENVELOPE_EVENT_BATCH:
+    _FH_CHECK_RETURN(client_handle_event_batch(client, &envl));
     break;
   default:
     break;
@@ -1851,8 +1895,6 @@ client_new_identity(client_side_identity_t *o_ident) {
     return FAITH_ERR_INVALID;
 
   /* Generate 128 bit random device & auth identities */
-
-  /*client_id_from_hex("9379839402f90a5aa848b418953cecd2", &o_ident->auth_id);*/
 
   _FH_CHECK_RETURN(faith_random_bytes(o_ident->auth_id.bytes,
                                       sizeof(o_ident->auth_id.bytes)));
