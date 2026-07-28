@@ -1,19 +1,14 @@
 #pragma once
 
+#include "../application/user.h"
 #include "../auth/structs.h"
 #include "../core/core.h"
 #include "../delivery/event_inbox.h"
 
 typedef struct {
-  uint8_t public_key[FAITH_ED25519_PUBLIC_KEY_SIZE];
-} client_identity_t;
-
-struct client_conn_t;
-
-typedef struct {
-  struct client_conn_t *conn;
-  client_identity_t     ident;
-  device_event_inbox_t  inbox;
+  struct client_conn_t       *conn;
+  application_user_identity_t ident;
+  device_event_inbox_t        inbox;
 } client_device_session_data_t;
 
 typedef struct {

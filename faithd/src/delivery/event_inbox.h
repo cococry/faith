@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../codec/events.h"
+
 #include <stdint.h>
 
 typedef struct {
@@ -14,11 +15,12 @@ typedef struct {
 void device_event_inbox_init(device_event_inbox_t *o_inbox);
 
 faith_status_code_t
-device_event_inbox_queue_event(device_event_inbox_t         *inbox,
-                               const faith_envl_stc_event_t *event);
+device_event_inbox_push_event(device_event_inbox_t         *inbox,
+                              const faith_envl_stc_event_t *event);
 
 faith_status_code_t device_event_inbox_advance_seq(device_event_inbox_t *inbox);
-faith_status_code_t device_event_inbox_ack_seq(device_event_inbox_t *inbox,
-                                               uint64_t              acked_seq);
+
+faith_status_code_t device_event_inbox_remove_until(device_event_inbox_t *inbox,
+                                                    uint64_t until_seq);
 
 faith_status_code_t device_event_inbox_destroy(device_event_inbox_t *inbox);

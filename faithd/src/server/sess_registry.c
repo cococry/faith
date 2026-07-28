@@ -69,6 +69,8 @@ faith_status_code_t sess_registry_register_session(
   device_event_inbox_init(&sess->inbox);
 
   /* assign public key to new session */
+  sess->ident.auth_id = cl->ident.auth_id;
+  sess->ident.device_id = cl->ident.device_id;
   memcpy(sess->ident.public_key, public_key, FAITH_ED25519_PUBLIC_KEY_SIZE);
 
   /* insert session data at <auth_id, device_id pair> */

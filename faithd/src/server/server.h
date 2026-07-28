@@ -24,9 +24,8 @@ typedef enum {
 } client_state_t;
 
 typedef struct client_conn_t {
-  // connection id
-  faith_auth_id_t   auth_id;
-  faith_device_id_t device_id;
+  application_user_identity_t ident;
+  faith_auth_id_t             pending_auth_id;
 
   transport_conn_t conn;
   reactor_source_t reactor_source;

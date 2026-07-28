@@ -81,7 +81,7 @@ faith_status_code_t server_close_client(server_state_t *s,
 
     client_session_device_t *devices = NULL;
     faith_status_code_t      rc =
-        sess_registry_get_devices(&s->rt, &cl->auth_id, &devices);
+        sess_registry_get_devices(&s->rt, &cl->ident.auth_id, &devices);
     if (rc != FAITH_OK || devices == NULL) {
       nob_log(ERROR,
               "[client=%" PRIu64
@@ -105,15 +105,12 @@ faith_status_code_t server_close_client(server_state_t *s,
   }
 
   if (cl->authorized) {
-    // TODO: persistent sessions
-    faith_status_code_t rc =
-        sess_registry_unregister_session(&s->rt, &cl->auth_id, &cl->device_id);
+    client_device_session_data_t *sess = NULL;
+    _FH_CHECK_RETURN(sess_registry_get_session(&s->rt, &cl->ident.auth_id,
+                                               &cl->ident.device_id, &sess));
 
-    if (rc != FAITH_OK) {
-      nob_log(ERROR, "[client=%" PRIu64 "] routing unregister failed: %s (%d)",
-              cl->conn.id, faith_status_code_name(rc), (int)rc);
-
-      result = rc;
+    if (sess) {
+      sess->conn = NULL;
     }
   }
 
@@ -205,7 +202,9 @@ server_client_queue_disconnect(server_state_t *s, struct client_conn_t *cl,
 
   faith_envelope_t envl = {0};
   envl.type = FAITH_ENVELOPE_CLIENT_DISCONNECT;
-  envl.recipient_id = cl->auth_id;
+  envl.recipient_id = cl->state == CLIENT_WAIT_FOR_DEVICE_LINK_RESPONSE
+                          ? cl->pending_auth_id
+                          : cl->ident.auth_id;
   envl.body = body;
   envl.body_size = body_size;
 

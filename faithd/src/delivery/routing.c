@@ -44,34 +44,37 @@ delivery_route_envelope_to_auth_id(server_state_t *s, client_conn_t *cl_sender,
       faith_id128_to_hex(recipient_auth_id->bytes, recipient_auth_id_hex));
 
   faith_status_code_t device_loop_rc = FAITH_OK;
-  _FH_FOR_EACH_AUTH_DEVICE(s, recipient_auth_id, recipient, device_loop_rc, {
-    faith_envelope_t routing_envl = *envl;
-    routing_envl.sender_id = cl_sender->auth_id;
-    routing_envl.recipient_id = *recipient_auth_id;
-    _FH_CHECK(server_queue_envelope_or_mark_dead(s, recipient, &routing_envl));
+  _FH_FOR_EACH_AUTH_DEVICE_CONNECTION(
+      s, recipient_auth_id, recipient_cl, device_loop_rc, {
+        faith_envelope_t routing_envl = *envl;
+        routing_envl.sender_id = cl_sender->ident.auth_id;
+        routing_envl.recipient_id = *recipient_auth_id;
+        _FH_CHECK(
+            server_queue_envelope_or_mark_dead(s, recipient_cl, &routing_envl));
 
-    char recipient_device_id_hex[33];
-    _FH_CHECK_RETURN(faith_id128_to_hex(recipient->device_id.bytes,
-                                        recipient_device_id_hex));
+        char recipient_device_id_hex[33];
+        _FH_CHECK_RETURN(faith_id128_to_hex(recipient_cl->ident.device_id.bytes,
+                                            recipient_device_id_hex));
 
-    if (_fh_rc != FAITH_OK) {
-      nob_log(ERROR,
-              "[client=%" PRIu64
-              " fd=%i] Envelope %s: Failed to route envelope to "
-              "recipient device (auth_id: %s, device_id: %s).",
-              cl_sender->conn.id, cl_sender->conn.fd,
-              faith_envelope_name(envl->type), recipient_auth_id_hex,
-              recipient_device_id_hex);
-      continue;
-    }
+        if (_fh_rc != FAITH_OK) {
+          nob_log(ERROR,
+                  "[client=%" PRIu64
+                  " fd=%i] Envelope %s: Failed to route envelope to "
+                  "recipient device (auth_id: %s, device_id: %s).",
+                  cl_sender->conn.id, cl_sender->conn.fd,
+                  faith_envelope_name(envl->type), recipient_auth_id_hex,
+                  recipient_device_id_hex);
+          continue;
+        }
 
-    nob_log(
-        INFO,
-        "[client=%" PRIu64 " fd=%i] Envelope %s: Routed envelope to recipient "
-        "device (auth_id: %s, device_id: %s).",
-        cl_sender->conn.id, cl_sender->conn.fd, faith_envelope_name(envl->type),
-        recipient_auth_id_hex, recipient_device_id_hex);
-  });
+        nob_log(INFO,
+                "[client=%" PRIu64
+                " fd=%i] Envelope %s: Routed envelope to recipient "
+                "device (auth_id: %s, device_id: %s).",
+                cl_sender->conn.id, cl_sender->conn.fd,
+                faith_envelope_name(envl->type), recipient_auth_id_hex,
+                recipient_device_id_hex);
+      });
 
   return FAITH_OK;
 }

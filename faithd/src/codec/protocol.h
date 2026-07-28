@@ -8,6 +8,7 @@
 #include "../server/envelopes.h"
 
 #include "commands.h"
+#include "core.h"
 #include "events.h"
 
 #include "helpers.h"
@@ -149,6 +150,20 @@ faith_status_code_t faith_encode_event_body(uint8_t           *out_buf,
 faith_status_code_t faith_decode_event_body(const uint8_t    *payload,
                                             faith_body_size_t payload_size,
                                             faith_envl_stc_event_t *out);
+
+faith_status_code_t
+faith_codec_event_batch_data_size(faith_envl_stc_event_t *events,
+                                  uint16_t n_events, faith_body_size_t *o_size);
+
+faith_status_code_t
+faith_encode_event_batch_body(uint8_t *out_buf, faith_body_size_t *out_size,
+                              size_t buf_cap_in_bytes,
+                              const faith_envl_stc_event_batch_t *in);
+
+faith_status_code_t
+faith_decode_event_batch_body(const uint8_t                *payload,
+                              faith_body_size_t             payload_size,
+                              faith_envl_stc_event_batch_t *out);
 
 faith_status_code_t
 faith_encode_event_ack_body(uint8_t *out_buf, faith_body_size_t *out_size,

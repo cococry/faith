@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../application/conversation.h"
 #include "../auth/structs.h"
 #include "core.h"
 #include "helpers.h"
@@ -10,10 +11,16 @@
                    sizeof(faith_body_size_t) /* data size */                   \
   )
 
+#define FAITH_ENVL_STC_EVENT_BATCH_BODY_SIZE_FIXED                             \
+  _FAITH_BODY_SIZE(sizeof(uint16_t) /* number of events*/ +                    \
+                   sizeof(uint32_t) /* events data size */)
+
 #define FAITH_ENVL_CTS_EVENT_ACK_BODY_SIZE                                     \
   _FAITH_BODY_SIZE(sizeof(uint64_t) /* sequence number */)
 
 #define FAITH_EVENTS_CODEC(X) X(FAITH_EVENT_CONVERSATION_CREATED, 0)
+
+#define FAITH_EVENT_BATCH_MAX_EVENTS 256u
 
 typedef enum {
 #define X(name, value) name = value,
@@ -33,18 +40,17 @@ typedef struct {
 } faith_envl_stc_event_t;
 
 typedef struct {
+  uint16_t n_events;
+
+  faith_body_size_t       events_data_size;
+  faith_envl_stc_event_t *events;
+} faith_envl_stc_event_batch_t;
+
+typedef struct {
   /* The server-generated sequence number
    * of the event that was acknowledged */
   uint64_t seq_num;
-
-  faith_event_codec_type_t type;
 } faith_envl_cts_event_ack_t;
-
-#define FAITH_CONVERSATION_ID_SIZE 16
-
-typedef struct {
-  uint8_t bytes[FAITH_CONVERSATION_ID_SIZE];
-} faith_conversation_id_t;
 
 typedef struct {
   faith_conversation_id_t conversation_id;

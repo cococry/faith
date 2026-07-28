@@ -74,7 +74,7 @@
   X(FAITH_ERR_OVERFLOW, 4)                                                     \
   X(FAITH_ERR_UNDERFLOW, 5)                                                    \
   X(FAITH_ERR_IO, 6)                                                           \
-  X(FAITH_ERR_FRAME_TOO_LARGE, 7)                                              \
+  X(FAITH_ERR_TOO_LARGE, 7)                                                    \
   X(FAITH_ERR_BAD_FRAME, 8)                                                    \
   X(FAITH_ERR_CLOSED, 9)                                                       \
   X(FAITH_ERR_UNSUPPORTED_VER, 10)                                             \

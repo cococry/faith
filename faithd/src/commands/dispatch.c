@@ -32,7 +32,7 @@ queue_command_result(server_state_t *s, client_conn_t *cl,
   envl.body = body;
   envl.body_size = body_size;
   envl.type = FAITH_ENVELOPE_COMMAND_RESULT;
-  envl.recipient_id = cl->auth_id;
+  envl.recipient_id = cl->ident.auth_id;
 
   _FH_CHECK_RETURN(server_queue_envelope_or_mark_dead(s, cl, &envl));
 
@@ -57,7 +57,7 @@ faith_status_code_t command_dispatch(server_state_t *s, client_conn_t *cl,
     return FAITH_ERR_UNAUTHORIZED;
   }
 
-  if (!faith_client_id_equal(cl->auth_id, envl->sender_id)) {
+  if (!faith_client_id_equal(cl->ident.auth_id, envl->sender_id)) {
     return FAITH_ERR_NOT_EQUAL;
   }
 

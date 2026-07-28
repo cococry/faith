@@ -31,7 +31,8 @@ typedef enum {
   X(FAITH_COMMAND_ERR_UNAUTHORIZED, 1)                                         \
   X(FAITH_COMMAND_ERR_BAD_COMMAND, 2)                                          \
   X(FAITH_COMMAND_ERR_TIMED_OUT, 3)                                            \
-  X(FAITH_COMMAND_ERR_INTERNAL_ERROR, 4)
+  X(FAITH_COMMAND_ERR_INTERNAL_ERROR, 4)                                       \
+  X(FAITH_COMMAND_ERR_USER_NOT_FOUND, 5)
 
 typedef enum {
 #define X(name, value) name = value,

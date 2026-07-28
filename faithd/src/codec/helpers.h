@@ -73,7 +73,8 @@
     (off) += _fh_len;                                                          \
   } while (0)
 
-#define FAITH_DECODE_RETURN(payload, payload_size, offset, dst, size)          \
+#define _FAITH_DECODE_IMPL(payload, payload_size, offset, dst, size,           \
+                           invalid_failure, bad_frame_failure)                 \
   do {                                                                         \
     const size_t _fh_payload_size = (size_t)(payload_size);                    \
     const size_t _fh_offset = (size_t)(offset);                                \
@@ -88,7 +89,7 @@
                             "  payload size : %zu",                            \
                             #payload, #dst, _fh_offset, _fh_size,              \
                             _fh_payload_size);                                 \
-      return FAITH_ERR_INVALID;                                                \
+      invalid_failure;                                                         \
     }                                                                          \
                                                                                \
     if (_fh_size > 0 && !(dst)) {                                              \
@@ -100,7 +101,7 @@
           "  length       : %zu\n"                                             \
           "  payload size : %zu",                                              \
           #payload, #dst, _fh_offset, _fh_size, _fh_payload_size);             \
-      return FAITH_ERR_INVALID;                                                \
+      invalid_failure;                                                         \
     }                                                                          \
                                                                                \
     if (_fh_offset > _fh_payload_size) {                                       \
@@ -112,7 +113,7 @@
                             "  payload size : %zu",                            \
                             #payload, #dst, _fh_offset, _fh_size,              \
                             _fh_payload_size);                                 \
-      return FAITH_ERR_BAD_FRAME;                                              \
+      bad_frame_failure;                                                       \
     }                                                                          \
                                                                                \
     if (_fh_size > _fh_payload_size - _fh_offset) {                            \
@@ -125,7 +126,7 @@
                             "  payload size : %zu",                            \
                             #payload, #dst, _fh_offset, _fh_size,              \
                             _fh_payload_size - _fh_offset, _fh_payload_size);  \
-      return FAITH_ERR_BAD_FRAME;                                              \
+      bad_frame_failure;                                                       \
     }                                                                          \
                                                                                \
     if (_fh_size > 0)                                                          \
@@ -134,8 +135,17 @@
     (offset) += _fh_size;                                                      \
   } while (0)
 
-#define _FAITH_DECODE_INT_BE_RETURN(payload, payload_size, offset, out, type,  \
-                                    read_fn)                                   \
+#define FAITH_DECODE_RETURN(payload, payload_size, offset, dst, size)          \
+  _FAITH_DECODE_IMPL(payload, payload_size, offset, dst, size,                 \
+                     return FAITH_ERR_INVALID, return FAITH_ERR_BAD_FRAME)
+
+#define FAITH_DECODE_DEFER(payload, payload_size, offset, dst, size)           \
+  _FAITH_DECODE_IMPL(payload, payload_size, offset, dst, size,                 \
+                     _FH_RETURN_DEFER(FAITH_ERR_INVALID),                      \
+                     _FH_RETURN_DEFER(FAITH_ERR_BAD_FRAME))
+
+#define _FAITH_DECODE_INT_BE_IMPL(payload, payload_size, offset, out, type,    \
+                                  read_fn, invalid_failure, bad_frame_failure) \
   do {                                                                         \
     const size_t _fh_payload_size = (size_t)(payload_size);                    \
     const size_t _fh_offset = (size_t)(offset);                                \
@@ -150,7 +160,7 @@
                             "  payload size : %zu",                            \
                             #read_fn, #out, _fh_int_size, _fh_offset,          \
                             _fh_payload_size);                                 \
-      return FAITH_ERR_INVALID;                                                \
+      invalid_failure;                                                         \
     }                                                                          \
                                                                                \
     if (_fh_offset > _fh_payload_size) {                                       \
@@ -162,7 +172,7 @@
                             "  payload size : %zu",                            \
                             #read_fn, #out, _fh_int_size, _fh_offset,          \
                             _fh_payload_size);                                 \
-      return FAITH_ERR_BAD_FRAME;                                              \
+      bad_frame_failure;                                                       \
     }                                                                          \
                                                                                \
     if (_fh_int_size > _fh_payload_size - _fh_offset) {                        \
@@ -175,12 +185,24 @@
                             "  payload size : %zu",                            \
                             #read_fn, #out, _fh_int_size, _fh_offset,          \
                             _fh_payload_size - _fh_offset, _fh_payload_size);  \
-      return FAITH_ERR_BAD_FRAME;                                              \
+      bad_frame_failure;                                                       \
     }                                                                          \
                                                                                \
     (out) = read_fn((payload) + _fh_offset);                                   \
     (offset) += _fh_int_size;                                                  \
   } while (0)
+
+#define _FAITH_DECODE_INT_BE_RETURN(payload, payload_size, offset, out, type,  \
+                                    read_fn)                                   \
+  _FAITH_DECODE_INT_BE_IMPL(payload, payload_size, offset, out, type, read_fn, \
+                            return FAITH_ERR_INVALID,                          \
+                            return FAITH_ERR_BAD_FRAME)
+
+#define _FAITH_DECODE_INT_BE_DEFER(payload, payload_size, offset, out, type,   \
+                                   read_fn)                                    \
+  _FAITH_DECODE_INT_BE_IMPL(payload, payload_size, offset, out, type, read_fn, \
+                            _FH_RETURN_DEFER(FAITH_ERR_INVALID),               \
+                            _FH_RETURN_DEFER(FAITH_ERR_BAD_FRAME))
 
 #define FAITH_DECODE_U16_BE_RETURN(payload, payload_size, offset, out)         \
   _FAITH_DECODE_INT_BE_RETURN(payload, payload_size, offset, out, uint16_t,    \
@@ -193,6 +215,18 @@
 #define FAITH_DECODE_U64_BE_RETURN(payload, payload_size, offset, out)         \
   _FAITH_DECODE_INT_BE_RETURN(payload, payload_size, offset, out, uint64_t,    \
                               faith_read_u64_be)
+
+#define FAITH_DECODE_U16_BE_DEFER(payload, payload_size, offset, out)          \
+  _FAITH_DECODE_INT_BE_DEFER(payload, payload_size, offset, out, uint16_t,     \
+                             faith_read_u16_be)
+
+#define FAITH_DECODE_U32_BE_DEFER(payload, payload_size, offset, out)          \
+  _FAITH_DECODE_INT_BE_DEFER(payload, payload_size, offset, out, uint32_t,     \
+                             faith_read_u32_be)
+
+#define FAITH_DECODE_U64_BE_DEFER(payload, payload_size, offset, out)          \
+  _FAITH_DECODE_INT_BE_DEFER(payload, payload_size, offset, out, uint64_t,     \
+                             faith_read_u64_be)
 
 #define _FAITH_ENCODE_INT_BE_RETURN(buf, buf_cap, offset, value, type,         \
                                     write_fn)                                  \
@@ -291,40 +325,34 @@
     }                                                                          \
   } while (0)
 
-#define FAITH_DECODE_EPILOGUE(envl_size, sign)                                 \
+#define _FAITH_DECODE_EPILOGUE_IMPL(envl_size, condition, on_failure)          \
   do {                                                                         \
     const size_t _fh_expected_size = (size_t)(envl_size);                      \
     const size_t _fh_offset = (size_t)offset;                                  \
     const size_t _fh_payload_size = (size_t)payload_size;                      \
                                                                                \
-    if (_fh_offset sign _fh_expected_size ||                                   \
-        _fh_offset sign _fh_payload_size) {                                    \
+    if (condition) {                                                           \
       _FH_LOG_CODEC_FAILURE("Envelope decode",                                 \
                             "final decode offset is inconsistent",             \
                             "  offset        : %zu\n"                          \
                             "  payload size  : %zu\n"                          \
                             "  expected size : %zu",                           \
                             _fh_offset, _fh_payload_size, _fh_expected_size);  \
-      return FAITH_ERR_BAD_FRAME;                                              \
+      on_failure;                                                              \
     }                                                                          \
   } while (0)
 
-#define FAITH_DECODE_EPILOGUE_DNY(envl_size, sign)                             \
-  do {                                                                         \
-    const size_t _fh_expected_size = (size_t)(envl_size);                      \
-    const size_t _fh_offset = (size_t)offset;                                  \
-    const size_t _fh_payload_size = (size_t)payload_size;                      \
-                                                                               \
-    if (_fh_offset sign _fh_expected_size) {                                   \
-      _FH_LOG_CODEC_FAILURE("Envelope decode",                                 \
-                            "final decode offset is inconsistent",             \
-                            "  offset        : %zu\n"                          \
-                            "  payload size  : %zu\n"                          \
-                            "  expected size : %zu",                           \
-                            _fh_offset, _fh_payload_size, _fh_expected_size);  \
-      return FAITH_ERR_BAD_FRAME;                                              \
-    }                                                                          \
-  } while (0)
+#define FAITH_DECODE_EPILOGUE(envl_size, sign)                                 \
+  _FAITH_DECODE_EPILOGUE_IMPL(                                                 \
+      envl_size,                                                               \
+      (_fh_offset sign _fh_expected_size || _fh_offset sign _fh_payload_size), \
+      return FAITH_ERR_BAD_FRAME)
+
+#define FAITH_DECODE_EPILOGUE_DEFER(envl_size, sign)                           \
+  _FAITH_DECODE_EPILOGUE_IMPL(                                                 \
+      envl_size,                                                               \
+      (_fh_offset sign _fh_expected_size || _fh_offset sign _fh_payload_size), \
+      _FH_RETURN_DEFER(FAITH_ERR_BAD_FRAME))
 
 #define FAITH_ENCODE_PROLOGUE(envl_size)                                       \
   do {                                                                         \
