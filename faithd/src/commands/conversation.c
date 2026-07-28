@@ -45,7 +45,10 @@ faith_status_code_t conv_handle_create_conversation(
 
   faith_event_conversation_created_t conv_created = {.conversation_id =
                                                          conv_id};
-  _FH_CHECK_RETURN(send_conversation_created(s, cl, &conv_created));
+
+  for (size_t i = 0; i < 100; i++) {
+    _FH_CHECK_RETURN(send_conversation_created(s, cl, &conv_created));
+  }
 
   *o_result = FAITH_COMMAND_RESULT_ACCEPTED;
 

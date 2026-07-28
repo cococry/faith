@@ -65,6 +65,13 @@ typedef struct {
   pending_command_t  value;
 } pending_command_entry_t;
 
+typedef struct {
+  bool occupied;
+  faith_envl_stc_event_t event;
+} buffered_event_slot_t;
+
+#define EV_REORDER_WINDOW_SIZE 256
+
 struct faith_client {
   char     host[256];
   uint16_t port;
@@ -124,7 +131,8 @@ struct faith_client {
 
   pending_command_entry_t *pending_command_map;
 
-  uint64_t last_acked_ev_seq;
+  uint64_t              ev_last_dispatched_seq;
+  buffered_event_slot_t ev_reorder_window[EV_REORDER_WINDOW_SIZE];
 };
 
 static faith_status_code_t
@@ -929,7 +937,7 @@ client_handle_disconnect(faith_client_t *client, const faith_envelope_t *envl) {
 }
 
 static faith_status_code_t
-client_send_ack_event(faith_client_t *client, uint64_t seq_num,
+client_send_ack_until(faith_client_t *client, uint64_t seq_num,
                       faith_event_codec_type_t event_type) {
 
   if (!client || seq_num == UINT64_MAX)
@@ -985,7 +993,65 @@ client_dispatch_event(faith_client_t               *client,
     break;
   }
 
+  client->ev_last_dispatched_seq = event->seq_num;
+
   return FAITH_OK;
+}
+
+static faith_status_code_t client_buffer_event(faith_client_t* client, const faith_envl_stc_event_t* event) {
+  if(!client || !event) return FAITH_ERR_INVALID;
+
+  size_t index = event->seq_num % EV_REORDER_WINDOW_SIZE;
+  buffered_event_slot_t* slot = &client->ev_reorder_window[index];
+
+  if(slot->occupied) {
+    /* duplicate buffered event */
+    if(event->seq_num == slot->event.seq_num) return FAITH_OK;
+
+    /* invalid state */
+    return FAITH_ERR_INVALID;
+  }
+
+  slot->occupied = true;
+  slot->event = *event;
+  uint8_t* data_copy = NULL;
+
+  if(event->data_size > 0) {
+    data_copy = malloc(event->data_size);
+    if (!data_copy)
+      return FAITH_ERR_NOMEM;
+
+    memcpy(data_copy, event->data, event->data_size);
+  }
+
+  slot->event = *event;
+  slot->event.data = data_copy;
+  slot->occupied = true;
+
+  return FAITH_OK;
+}
+
+static faith_status_code_t client_drain_reorder_buffer(faith_client_t *client) {
+  for(;;) {
+    if(client->ev_last_dispatched_seq == UINT64_MAX) return FAITH_ERR_OVERFLOW;
+
+    uint64_t next_seq = client->ev_last_dispatched_seq + 1;
+    size_t   index = next_seq % EV_REORDER_WINDOW_SIZE;
+
+    buffered_event_slot_t *slot = &client->ev_reorder_window[index];
+
+    if (!slot->occupied || slot->event.seq_num != next_seq)
+      return FAITH_OK;
+
+    /* advances <ev_last_dispatched_seq> of the client */
+    _FH_CHECK_RETURN(client_dispatch_event(client, &slot->event));
+
+    free(slot->event.data);
+    slot->event.data = NULL;
+    slot->event.data_size = 0;
+
+    slot->occupied = false;
+  }
 }
 
 static faith_status_code_t
@@ -994,17 +1060,31 @@ client_ack_event(faith_client_t *client, const faith_envl_stc_event_t *event) {
     return FAITH_ERR_INVALID;
 
   /* duplicate event */
-  if (client->last_acked_ev_seq != UINT64_MAX) {
-    if (event->seq_num <= client->last_acked_ev_seq)
-      return FAITH_OK;
+  if (client->ev_last_dispatched_seq != UINT64_MAX &&
+      event->seq_num <= client->ev_last_dispatched_seq) {
+    /* resend ACKs for all prior events up until the last successfully
+     * processed/dispatched event */
+    _FH_CHECK(client_send_ack_until(client, client->ev_last_dispatched_seq,
+                                    event->type));
+    return _fh_rc;
   }
 
-  /* TODO: Handle out of order events */
+  uint64_t expected_seq = client->ev_last_dispatched_seq == UINT64_MAX
+                              ? 0
+                              : client->ev_last_dispatched_seq + 1;
 
-  _FH_CHECK_RETURN(client_send_ack_event(client, event->seq_num, event->type));
+  if(event->seq_num == expected_seq) {
+    _FH_CHECK_RETURN(client_dispatch_event(client, event));
+    _FH_CHECK_RETURN(client_drain_reorder_buffer(client));
 
-  client->last_acked_ev_seq = event->seq_num;
+    _FH_CHECK_RETURN(client_send_ack_until(
+        client, client->ev_last_dispatched_seq, event->type));
 
+    return FAITH_OK;
+  }
+
+  /* event->seq_num > expected_seq */
+  _FH_CHECK_RETURN(client_buffer_event(client, event));
   return FAITH_OK;
 }
 
@@ -1023,8 +1103,6 @@ static faith_status_code_t client_handle_event(faith_client_t         *client,
 
   _FH_CHECK_RETURN(
       faith_decode_event_body(envl->body, envl->body_size, &event));
-
-  _FH_CHECK_RETURN(client_dispatch_event(client, &event));
 
   _FH_CHECK_RETURN(client_ack_event(client, &event));
 
@@ -1813,7 +1891,7 @@ faith_client_t *faith_client_create(const faith_client_config_t *cfg) {
   client->sockfd = -1;
   client->event_fd = -1;
 
-  client->last_acked_ev_seq = UINT64_MAX;
+  client->ev_last_dispatched_seq = UINT64_MAX;
 
   snprintf(client->host, sizeof(client->host), "%s", cfg->host);
   client->port = cfg->port;
