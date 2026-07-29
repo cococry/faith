@@ -1,0 +1,49 @@
+name: faith-db-production
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:?POSTGRES_IMAGE must specify a pinned PostgreSQL image}
+    container_name: faith-postgres
+    restart: always
+
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-faith}
+      POSTGRES_USER: ${POSTGRES_USER:-faith}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      PGDATA: /var/lib/postgresql/data/pgdata
+
+    secrets:
+      - postgres_password
+
+    volumes:
+      - ${POSTGRES_DATA_PATH:?POSTGRES_DATA_PATH is required}:/var/lib/postgresql/data
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-faith} -d ${POSTGRES_DB:-faith}",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+    stop_grace_period: 60s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
+
+    networks:
+      - faith_backend
+
+secrets:
+  postgres_password:
+    file: ${POSTGRES_PASSWORD_FILE:?POSTGRES_PASSWORD_FILE is required}
+
+networks:
+  faith_backend:
+    name: faith-backend
