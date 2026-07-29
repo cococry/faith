@@ -18,12 +18,6 @@ faith_status_code_t faith_encode_frame(uint8_t *out_buf, size_t *out_size,
   const faith_body_size_t frame_size =
       FAITH_FRAME_METADATA_SIZE + in->payload_size;
 
-  if (in->payload_size > FAITH_MAX_PAYLOAD_SIZE)
-    goto payload_too_large;
-
-  if (frame_size > FAITH_MAX_FRAME_LEN)
-    goto frame_too_large;
-
   size_t offset = 0;
 
   FAITH_ENCODE_U32_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
@@ -43,21 +37,6 @@ faith_status_code_t faith_encode_frame(uint8_t *out_buf, size_t *out_size,
   FAITH_ENCODE_EPILOGUE(data_size, !=);
 
   return FAITH_OK;
-
-frame_too_large:
-  nob_log(ERROR,
-          "[%s] Failed to encode frame; Frame is too large, "
-          "frame_size=%u, MAX_FRAME_LEN=%i",
-          _MODULE_NAME, (uint32_t)frame_size, (int32_t)FAITH_MAX_FRAME_LEN);
-  return FAITH_ERR_TOO_LARGE;
-payload_too_large:
-  nob_log(ERROR,
-          "[%s] Failed to encode frame; Payload is too large, "
-          "payload_size=%u, MAX_PAYLOAD_SIZE=%i",
-
-          _MODULE_NAME, (uint32_t)in->payload_size,
-          (int32_t)FAITH_MAX_PAYLOAD_SIZE);
-  return FAITH_ERR_TOO_LARGE;
 }
 
 faith_status_code_t faith_decode_frame(const uint8_t *payload,
@@ -87,20 +66,20 @@ faith_status_code_t faith_decode_frame(const uint8_t *payload,
   const size_t frame_payload_size =
       (size_t)frame_size - FAITH_FRAME_METADATA_SIZE;
 
-  if (frame_payload_size > FAITH_MAX_PAYLOAD_SIZE) {
+  if (frame_payload_size > FAITH_MAX_CTS_PAYLOAD_SIZE) {
     nob_log(ERROR,
             "[%s] Failed to parse frame from buffer; "
             "payload_size=%zu MAX_PAYLOAD_SIZE=%zu",
-            _MODULE_NAME, payload_size, (size_t)FAITH_MAX_PAYLOAD_SIZE);
+            _MODULE_NAME, payload_size, (size_t)FAITH_MAX_CTS_PAYLOAD_SIZE);
 
     return FAITH_ERR_TOO_LARGE;
   }
 
-  if (frame_size > FAITH_MAX_FRAME_LEN) {
+  if (frame_size > FAITH_MAX_CTS_FRAME_SIZE) {
     nob_log(ERROR,
             "[%s] Failed to parse frame from buffer; Frame is too large, "
             "frame_size=%i MAX_FRAME_LEN=%i",
-            _MODULE_NAME, (int32_t)frame_size, (int32_t)FAITH_MAX_FRAME_LEN);
+            _MODULE_NAME, (int32_t)frame_size, (int32_t)FAITH_MAX_CTS_FRAME_SIZE);
     return FAITH_ERR_TOO_LARGE;
   }
 
@@ -762,13 +741,14 @@ defer:
 }
 
 faith_status_code_t
-faith_codec_event_batch_data_size(faith_envl_stc_event_t *events,
-                                  uint16_t                n_events,
-                                  faith_body_size_t      *o_size) {
-  if (!events || !o_size)
+faith_codec_event_batch_data_size_fit(faith_envl_stc_event_t *events,
+                                      uint16_t                n_events,
+                                      faith_body_size_t* o_events_data_size,
+                                      size_t *o_n_fitting, size_t cap) {
+  if (!events || !o_n_fitting)
     return FAITH_ERR_INVALID;
 
-  *o_size = 0;
+  *o_n_fitting = 0;
 
   if (n_events > FAITH_EVENT_BATCH_MAX_EVENTS) {
     nob_log(ERROR,
@@ -778,7 +758,8 @@ faith_codec_event_batch_data_size(faith_envl_stc_event_t *events,
     return FAITH_ERR_INVALID;
   }
 
-  size_t total_data_size = 0;
+  size_t events_data_size = 0;
+  size_t n_fitting = 0;
 
   if (n_events != 0) {
     for (uint16_t i = 0; i < n_events; i++) {
@@ -795,7 +776,7 @@ faith_codec_event_batch_data_size(faith_envl_stc_event_t *events,
 
       size_t encoded_elem_size = sizeof(uint16_t) + body_size;
 
-      if (encoded_elem_size > UINT32_MAX - total_data_size) {
+      if (encoded_elem_size > UINT32_MAX - events_data_size) {
         nob_log(ERROR,
                 "[%s] Cannot encode EVENT_BATCH: adding event %" PRIu16
                 " would make the total event data exceed UINT32_MAX.",
@@ -803,14 +784,17 @@ faith_codec_event_batch_data_size(faith_envl_stc_event_t *events,
         return FAITH_ERR_TOO_LARGE;
       }
 
-      total_data_size += encoded_elem_size;
+
+      if (events_data_size + encoded_elem_size > cap) {
+        break;
+      }
+      events_data_size += encoded_elem_size;
+      n_fitting++;
     }
   }
 
-  if (total_data_size > SIZE_MAX - FAITH_ENVL_STC_EVENT_BATCH_BODY_SIZE_FIXED)
-    return FAITH_ERR_TOO_LARGE;
-
-  *o_size = total_data_size;
+  *o_n_fitting = n_fitting;
+  *o_events_data_size = events_data_size;
 
   return FAITH_OK;
 }

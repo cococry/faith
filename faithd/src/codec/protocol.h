@@ -16,14 +16,18 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-#define FAITH_MAX_PAYLOAD_SIZE 256
-#define FAITH_MAX_FRAME_LEN    512
+#define FAITH_MAX_CTS_PAYLOAD_SIZE 256
+#define FAITH_MAX_CTS_FRAME_SIZE   512
 
 #define FAITH_FRAME_LENGTH_SIZE sizeof(uint32_t)
 
 #define FAITH_FRAME_METADATA_SIZE                                              \
   (_FAITH_BODY_SIZE(sizeof(uint16_t) /* protocol version */ +                  \
                     sizeof(uint16_t) /* message type */))
+
+#define FAITH_MAX_STC_PAYLOAD_SIZE (1024 * 1024 * 4)
+#define FAITH_MAX_STC_FRAME_SIZE                                               \
+  (FAITH_FRAME_HEADER_SIZE + FAITH_MAX_STC_PAYLOAD_SIZE)
 
 #define FAITH_FRAME_HEADER_SIZE                                                \
   (_FAITH_BODY_SIZE(FAITH_FRAME_LENGTH_SIZE + FAITH_FRAME_METADATA_SIZE))
@@ -151,9 +155,9 @@ faith_status_code_t faith_decode_event_body(const uint8_t    *payload,
                                             faith_body_size_t payload_size,
                                             faith_envl_stc_event_t *out);
 
-faith_status_code_t
-faith_codec_event_batch_data_size(faith_envl_stc_event_t *events,
-                                  uint16_t n_events, faith_body_size_t *o_size);
+faith_status_code_t faith_codec_event_batch_data_size_fit(
+    faith_envl_stc_event_t *events, uint16_t n_events,
+    faith_body_size_t *o_events_data_size, size_t *o_n_fitting, size_t cap);
 
 faith_status_code_t
 faith_encode_event_batch_body(uint8_t *out_buf, faith_body_size_t *out_size,
