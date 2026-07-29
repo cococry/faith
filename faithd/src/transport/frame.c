@@ -3,6 +3,8 @@
 
 #include "../logging/logging.h"
 
+#define _MODULE_NAME "transport/frame"
+
 transport_result_t frame_try_full_read(transport_conn_t *conn,
                                        faith_frame_t    *frame) {
   while (1) {
@@ -10,8 +12,8 @@ transport_result_t frame_try_full_read(transport_conn_t *conn,
 
     if (g_verbose_logging) {
       nob_log(INFO,
-              "[client=%" PRIu64 " fd=%i] Trying to parse frame buffer...",
-              conn->id, conn->fd);
+              "[%s: client=%" PRIu64 " fd=%i] Trying to parse frame buffer...",
+              _MODULE_NAME, conn->id, conn->fd);
     }
 
     faith_status_code_t rc = frame_try_parse_from_buffer(
@@ -22,9 +24,9 @@ transport_result_t frame_try_full_read(transport_conn_t *conn,
       if (g_verbose_logging) {
         nob_log(
             INFO,
-            "[client=%" PRIu64
+            "[%s: client=%" PRIu64
             " fd=%i] Successfully parsed full frame from buffer (%li bytes)",
-            conn->id, conn->fd, consumed);
+            _MODULE_NAME, conn->id, conn->fd, consumed);
       }
 
       size_t remaining = conn->in.size - consumed;
@@ -42,18 +44,18 @@ transport_result_t frame_try_full_read(transport_conn_t *conn,
       /* Not enough bytes yet, so read more decrypted TLS data. */
       if (g_verbose_logging) {
         nob_log(INFO,
-                "[client=%" PRIu64
+                "[%s: client=%" PRIu64
                 " fd=%i] Frame incomplete, reading more bytes...",
-                conn->id, conn->fd);
+                _MODULE_NAME, conn->id, conn->fd);
       }
       transport_result_t res = conn_read_more_ssl_bytes(conn);
 
       if (res == TRANSPORT_RES_GOT_BYTES) {
         if (g_verbose_logging) {
           nob_log(INFO,
-                  "[client=%" PRIu64
+                  "[%s: client=%" PRIu64
                   " fd=%i] Got new bytes, parsing frame again...",
-                  conn->id, conn->fd);
+                  _MODULE_NAME, conn->id, conn->fd);
         }
         continue;
       }
@@ -61,9 +63,9 @@ transport_result_t frame_try_full_read(transport_conn_t *conn,
       if (res == TRANSPORT_RES_WANT_READ) {
         if (g_verbose_logging) {
           nob_log(INFO,
-                  "[client=%" PRIu64
+                  "[%s: client=%" PRIu64
                   " fd=%i] SSL_read needs to wait for socket to be readable",
-                  conn->id, conn->fd);
+                  _MODULE_NAME, conn->id, conn->fd);
         }
         return res;
       }
@@ -71,30 +73,30 @@ transport_result_t frame_try_full_read(transport_conn_t *conn,
       if (res == TRANSPORT_RES_WANT_WRITE) {
         if (g_verbose_logging) {
           nob_log(INFO,
-                  "[client=%" PRIu64
+                  "[%s: client=%" PRIu64
                   " fd=%i] SSL_read needs to wait for socket to be writable",
-                  conn->id, conn->fd);
+                  _MODULE_NAME, conn->id, conn->fd);
         }
         return res;
       }
 
       if (res == TRANSPORT_RES_CLOSED) {
         nob_log(INFO,
-                "[client=%" PRIu64
+                "[%s: client=%" PRIu64
                 " fd=%i] Connection closed while reading incomplete frame.",
-                conn->id, conn->fd);
+                _MODULE_NAME, conn->id, conn->fd);
         return res;
       }
 
       nob_log(ERROR,
-              "[client=%" PRIu64
+              "[%s: client=%" PRIu64
               " fd=%i] Error while reading incomplete frame. Error=%i",
-              conn->id, conn->fd, res);
+              _MODULE_NAME, conn->id, conn->fd, res);
 
       return res;
     }
 
-    nob_log(ERROR, "[client=%" PRIu64 " fd=%i] Failed to read frame", conn->id,
+    nob_log(ERROR, "[%s: client=%" PRIu64 " fd=%i] Failed to read frame", _MODULE_NAME, conn->id,
             conn->fd);
 
     return TRANSPORT_RES_ERROR;

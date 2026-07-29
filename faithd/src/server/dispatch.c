@@ -12,6 +12,8 @@
 
 #include "../commands/dispatch.h"
 
+#define _MODULE_NAME "server/dispatch"
+
 static faith_status_code_t server_dispatch_envelope(server_state_t *s,
                                                     client_conn_t  *cl,
                                                     faith_frame_t  *frame);
@@ -33,10 +35,10 @@ static faith_status_code_t server_dispatch_envelope(server_state_t *s,
       faith_decode_envelope(frame->payload, frame->payload_size, &envl));
 
   nob_log(INFO,
-          "[client=%" PRIu64
+          "[%s: client=%" PRIu64
           " fd=%i] Server is handling envelope: type=%s body_size=%u",
-          cl->conn.id, cl->conn.fd, faith_envelope_name(envl.type),
-          envl.body_size);
+          _MODULE_NAME, cl->conn.id, cl->conn.fd,
+          faith_envelope_name(envl.type), envl.body_size);
 
   switch (envl.type) {
   case FAITH_ENVELOPE_HELLO:
@@ -66,10 +68,10 @@ static faith_status_code_t server_dispatch_envelope(server_state_t *s,
   }
 
   nob_log(INFO,
-          "[client=%" PRIu64
+          "[%s: client=%" PRIu64
           " fd=%i] Server successfully handled envelope: type=%s body_size=%u",
-          cl->conn.id, cl->conn.fd, faith_envelope_name(envl.type),
-          envl.body_size);
+          _MODULE_NAME, cl->conn.id, cl->conn.fd,
+          faith_envelope_name(envl.type), envl.body_size);
 
 defer:
   if (envl.body != NULL)
@@ -90,9 +92,10 @@ server_handle_ping(server_state_t *s, client_conn_t *cl, faith_frame_t *frame) {
       faith_decode_ping(frame->payload, frame->payload_size, &ping));
 
   nob_log(INFO,
-          "[client=%" PRIu64 " fd=%i] server got PING: nonce=%" PRIu64
+          "[%s: client=%" PRIu64 " fd=%i] server got PING: nonce=%" PRIu64
           ", client_sent_at_ms=%lu",
-          cl->conn.id, cl->conn.fd, ping.nonce, ping.client_sent_at_ms);
+          _MODULE_NAME, cl->conn.id, cl->conn.fd, ping.nonce,
+          ping.client_sent_at_ms);
 
   /* 2. Send PONG over wire protocol */
   uint64_t server_sent_at_ms = faith_now_ms();
@@ -116,9 +119,9 @@ server_handle_ping(server_state_t *s, client_conn_t *cl, faith_frame_t *frame) {
 
   nob_log(
       INFO,
-      "[client=%" PRIu64
+      "[%s: client=%" PRIu64
       " fd=%i] Server sent PONG to client. nonce=%lu, server_sent_at_ms=%lu",
-      cl->conn.id, cl->conn.fd, ping.nonce, server_sent_at_ms);
+      _MODULE_NAME, cl->conn.id, cl->conn.fd, ping.nonce, server_sent_at_ms);
 
   return FAITH_OK;
 }
@@ -129,10 +132,10 @@ faith_status_code_t server_dispatch_frame(server_state_t *s, client_conn_t *cl,
     return FAITH_ERR_INVALID;
 
   nob_log(INFO,
-          "[client=%" PRIu64
+          "[%s: client=%" PRIu64
           " fd=%i] Server got frame: msg_type=%s payload_size=%u",
-          cl->conn.id, cl->conn.fd, faith_frame_msg_name(frame->msg_type),
-          frame->payload_size);
+          _MODULE_NAME, cl->conn.id, cl->conn.fd,
+          faith_frame_msg_name(frame->msg_type), frame->payload_size);
 
   switch (frame->msg_type) {
   case FAITH_MSG_PING:

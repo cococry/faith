@@ -13,6 +13,8 @@
 #include "../../third_party/nob.h"
 #include "../../third_party/stb_ds.h"
 
+#define _MODULE_NAME "server/server"
+
 static const char *client_state_name(client_state_t state);
 static void        accept_clients(server_state_t *s);
 static void        handle_client_event(server_state_t *s, client_conn_t *cl,
@@ -395,7 +397,7 @@ void server_set_client_state(server_state_t *s, struct client_conn_t *cl,
   cl->state = state;
 
   if (g_verbose_logging) {
-    nob_log(INFO, "[client=%" PRIu64 " fd=%i] Client changed state to %s",
-            cl->conn.id, cl->conn.fd, client_state_name(state));
+    nob_log(INFO, "[%s: client=%" PRIu64 " fd=%i] Client changed state to %s",
+            _MODULE_NAME, cl->conn.id, cl->conn.fd, client_state_name(state));
   }
 }

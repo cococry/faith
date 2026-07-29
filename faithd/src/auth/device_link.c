@@ -14,6 +14,8 @@
 #include "../logging/logging.h"
 #include "handshake.h"
 
+#define _MODULE_NAME "auth/device_link"
+
 static faith_status_code_t send_device_auth_response_failed(server_state_t *s,
                                                             client_conn_t *cl) {
   if (!s || !cl || cl->closing)
@@ -47,19 +49,19 @@ device_link_handle_device_response(server_state_t *s, client_conn_t *cl,
 
   if (!req || !req_cl) {
     nob_log(ERROR,
-            "[client=%" PRIu64 " fd=%i] Server got %s but there is no "
+            "[%s: client=%" PRIu64 " fd=%i] Server got %s but there is no "
             "device link request pending. Rejecting envelope.",
-            cl->conn.id, cl->conn.fd, faith_envelope_name(response_envl->type));
+            _MODULE_NAME, cl->conn.id, cl->conn.fd, faith_envelope_name(response_envl->type));
     return FAITH_ERR_INVALID;
   }
 
   if (response_envl->type != FAITH_ENVELOPE_DEVICE_AUTH_APPROVE &&
       response_envl->type != FAITH_ENVELOPE_DEVICE_AUTH_DENY) {
     nob_log(ERROR,
-            "[client=%" PRIu64 " fd=%i] Invalid envelope type. Expected "
+            "[%s: client=%" PRIu64 " fd=%i] Invalid envelope type. Expected "
             "FAITH_ENVELOPE_DEVICE_AUTH_APPROVE or "
             "FAITH_ENVELOPE_DEVICE_AUTH_DENY, got %s",
-            cl->conn.id, cl->conn.fd, faith_envelope_name(response_envl->type));
+            _MODULE_NAME, cl->conn.id, cl->conn.fd, faith_envelope_name(response_envl->type));
 
     return FAITH_ERR_INVALID;
   }
@@ -68,9 +70,9 @@ device_link_handle_device_response(server_state_t *s, client_conn_t *cl,
       response_envl->body_size !=
           FAITH_ENVL_CTS_DEVICE_LINK_RESPONSE_BODY_SIZE) {
     nob_log(ERROR,
-            "[client=%" PRIu64
+            "[%s: client=%" PRIu64
             " fd=%i] Server got invalid %s envelope contents.",
-            cl->conn.id, cl->conn.fd, faith_envelope_name(response_envl->type));
+            _MODULE_NAME, cl->conn.id, cl->conn.fd, faith_envelope_name(response_envl->type));
 
     _FH_CHECK_RETURN(send_device_auth_response_failed(s, cl));
 
@@ -85,9 +87,9 @@ device_link_handle_device_response(server_state_t *s, client_conn_t *cl,
         faith_id128_to_hex(cl->ident.device_id.bytes, device_id_hex));
 
     nob_log(ERROR,
-            "[client=%" PRIu64 " fd=%i] Server got unauthorized %s"
+            "[%s: client=%" PRIu64 " fd=%i] Server got unauthorized %s"
             "from client. Client (auth_id=%s, device_id=%s) is not authorized.",
-            cl->conn.id, cl->conn.fd, faith_envelope_name(response_envl->type),
+            _MODULE_NAME, cl->conn.id, cl->conn.fd, faith_envelope_name(response_envl->type),
             auth_id_hex, device_id_hex);
 
     /* Return UNAUTHORIZED without rejecting/closing the client connection that
@@ -104,10 +106,10 @@ device_link_handle_device_response(server_state_t *s, client_conn_t *cl,
         faith_id128_to_hex(req->device_id_new.bytes, req_device_id_hex));
 
     nob_log(INFO,
-            "[client=%" PRIu64 " fd=%i] Client that requested"
+            "[%s: client=%" PRIu64 " fd=%i] Client that requested"
             "their device (device_id=%s) to be linked to auth_id=%s has "
             "already been closed.",
-            cl->conn.id, cl->conn.fd, req_auth_id_hex, req_device_id_hex);
+            _MODULE_NAME, cl->conn.id, cl->conn.fd, req_auth_id_hex, req_device_id_hex);
 
     _FH_CHECK_RETURN(send_device_auth_response_failed(s, cl));
 
@@ -121,9 +123,9 @@ device_link_handle_device_response(server_state_t *s, client_conn_t *cl,
   if (!faith_device_id_equal(response.device_id_new, req->device_id_new)) {
     nob_log(
         ERROR,
-        "[client=%" PRIu64 " fd=%i] Server got %s but the sent"
+        "[%s: client=%" PRIu64 " fd=%i] Server got %s but the sent"
         "device_id does not match the device_id that requested the approval.",
-        cl->conn.id, cl->conn.fd, faith_envelope_name(response_envl->type));
+        _MODULE_NAME, cl->conn.id, cl->conn.fd, faith_envelope_name(response_envl->type));
 
     _FH_CHECK_RETURN(send_device_auth_response_failed(s, cl));
 
@@ -134,9 +136,9 @@ device_link_handle_device_response(server_state_t *s, client_conn_t *cl,
 
   if (faith_now_ms() > cl->pending_device_link_req->expires_at_ms) {
     nob_log(ERROR,
-            "[client=%" PRIu64 " fd=%i] Server got %s but the "
+            "[%s: client=%" PRIu64 " fd=%i] Server got %s but the "
             "link request has already expired.",
-            cl->conn.id, cl->conn.fd, faith_envelope_name(response_envl->type));
+            _MODULE_NAME, cl->conn.id, cl->conn.fd, faith_envelope_name(response_envl->type));
 
     /* Reject the requesting client conection if the request has expired but
      * keep the responding one open. */
@@ -211,12 +213,12 @@ device_link_handle_device_response(server_state_t *s, client_conn_t *cl,
    * correct behaviour.*/
   if (!sess) {
     nob_log(ERROR,
-            "[client=%" PRIu64
+            "[%s: client=%" PRIu64
             " fd=%i] Server got %s but client connection that "
             "sent the envelope does not have registered session data. "
             "However, the client connection IS authorized, so there is "
             "probably a deeper issue.",
-            cl->conn.id, cl->conn.fd, faith_envelope_name(response_envl->type));
+            _MODULE_NAME, cl->conn.id, cl->conn.fd, faith_envelope_name(response_envl->type));
 
     _FH_CHECK_RETURN(send_device_auth_response_failed(s, cl));
 
@@ -303,12 +305,12 @@ defer: {
   _FH_CHECK_RETURN(faith_id128_to_hex(device_id_new.bytes, device_id_hex));
 
   nob_log(ERROR,
-          "[client=%" PRIu64 " fd=%i] Client connection"
+          "[%s: client=%" PRIu64 " fd=%i] Client connection"
           "(auth_id=%s, device_id=%s) failed authorization for device link "
           "request; Error %s. Device with device_id=%s will not be linked to "
           "auth_id=%s. "
           "Closing connection. ",
-          req_cl->conn.id, req_cl->conn.fd, auth_id_hex, device_id_hex,
+          _MODULE_NAME, req_cl->conn.id, req_cl->conn.fd, auth_id_hex, device_id_hex,
           faith_status_code_name(_fh_result), device_id_hex, auth_id_hex);
 
   /* Don't propagate status code */
@@ -339,9 +341,9 @@ device_link_new_device(server_state_t *s, client_conn_t *cl,
 
     nob_log(
         INFO,
-        "[client=%" PRIu64
+        "[%s: client=%" PRIu64
         " fd=%i] Handling newly joined device (device_id=%s) for auth_id=%s.",
-        cl->conn.id, cl->conn.fd, new_device_id_hex, cl_auth_id_hex);
+        _MODULE_NAME, cl->conn.id, cl->conn.fd, new_device_id_hex, cl_auth_id_hex);
   }
 
   if (!sess_registry_auth_id_registered(&s->rt, &params->sender_auth_id)) {

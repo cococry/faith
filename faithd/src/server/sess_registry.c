@@ -5,6 +5,8 @@
 #define STB_DS_IMPLEMENTATION
 #include "../../third_party/stb_ds.h"
 
+#define _MODULE_NAME "server/sess_registry"
+
 faith_status_code_t
 sess_registry_get_user_from_auth_id(sess_registry_state_t  *rt,
                                     const faith_auth_id_t  *auth_id,
@@ -86,10 +88,10 @@ faith_status_code_t sess_registry_register_session(
   _FH_CHECK_DEFER(faith_id128_to_hex(auth_id->bytes, auth_id_hex));
   _FH_CHECK_DEFER(faith_id128_to_hex(device_id->bytes, device_id_hex));
 
-  nob_log(
-      INFO,
-      "Registered session with auth_id=%s, device_id=%s (online clients: %zu)",
-      auth_id_hex, device_id_hex, hmlen(rt->active_users));
+  nob_log(INFO,
+          "[%s] Registered session with auth_id=%s, device_id=%s (online "
+          "clients: %zu)",
+          _MODULE_NAME, auth_id_hex, device_id_hex, hmlen(rt->active_users));
 
   return FAITH_OK;
 defer:
@@ -164,9 +166,10 @@ sess_registry_unregister_session(sess_registry_state_t   *rt,
   _FH_CHECK_RETURN(faith_id128_to_hex(device_id->bytes, device_id_hex));
 
   nob_log(INFO,
-          "Unregistered session with auth_id=%s, device_id=%s (online clients: "
+          "[%s] Unregistered session with auth_id=%s, device_id=%s (online "
+          "clients: "
           "%zu)",
-          auth_id_hex, device_id_hex, hmlen(rt->active_users));
+          _MODULE_NAME, auth_id_hex, device_id_hex, hmlen(rt->active_users));
 
   return FAITH_OK;
 }

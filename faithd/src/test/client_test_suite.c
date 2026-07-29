@@ -57,7 +57,8 @@ static bool client_id_from_hex(const char *hex, faith_auth_id_t *out) {
 }
 
 int main(int argc, char **argv) {
-  faith_client_init_global(true);
+  bool verbose_logging = true;
+  faith_client_init_global(verbose_logging);
 
   faith_client_config_t cfg = {
       .insecure_skip_verify = 1,
@@ -223,8 +224,6 @@ int main(int argc, char **argv) {
 
           if (pending_device_link_request)
             printf("(y)es/n(o) ? ");
-          else
-            printf("> ");
 
           fflush(stdout);
           faith_client_free_event(&ev);
@@ -236,12 +235,12 @@ int main(int argc, char **argv) {
           continue;
         }
 
-        printf("\rGot event: %s", faith_event_name(ev.type));
+        if (verbose_logging) {
+          nob_log(INFO, "\rGot event: %s", faith_event_name(ev.type));
 
-        if (strlen(ev.message) != 0)
-          printf(" message => %s\n", ev.message);
-        else
-          printf("\n");
+          if (strlen(ev.message) != 0)
+            printf(" message => %s\n", ev.message);
+        }
 
         switch (ev.type) {
         case FAITH_EVENT_DEVICE_LINK_REQUEST:
@@ -261,7 +260,6 @@ int main(int argc, char **argv) {
             }
           }
 
-          printf("> ");
           break;
 
         case FAITH_EVENT_AUTHORIZED:
@@ -271,8 +269,6 @@ int main(int argc, char **argv) {
         default:
           if (pending_device_link_request)
             printf("(y)es/n(o) ? ");
-          else
-            printf("> ");
           break;
         }
 

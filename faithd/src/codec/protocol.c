@@ -7,6 +7,8 @@
 #include "events.h"
 #include "helpers.h"
 
+#define _MODULE_NAME "codec/protocol"
+
 faith_status_code_t faith_encode_frame(uint8_t *out_buf, size_t *out_size,
                                        size_t               buf_cap_in_bytes,
                                        const faith_frame_t *in) {
@@ -44,15 +46,17 @@ faith_status_code_t faith_encode_frame(uint8_t *out_buf, size_t *out_size,
 
 frame_too_large:
   nob_log(ERROR,
-          "Failed to encode frame; Frame is too large, "
+          "[%s] Failed to encode frame; Frame is too large, "
           "frame_size=%u, MAX_FRAME_LEN=%i",
-          (uint32_t)frame_size, (int32_t)FAITH_MAX_FRAME_LEN);
+          _MODULE_NAME, (uint32_t)frame_size, (int32_t)FAITH_MAX_FRAME_LEN);
   return FAITH_ERR_TOO_LARGE;
 payload_too_large:
   nob_log(ERROR,
-          "Failed to encode frame; Payload is too large, "
+          "[%s] Failed to encode frame; Payload is too large, "
           "payload_size=%u, MAX_PAYLOAD_SIZE=%i",
-          (uint32_t)in->payload_size, (int32_t)FAITH_MAX_PAYLOAD_SIZE);
+
+          _MODULE_NAME, (uint32_t)in->payload_size,
+          (int32_t)FAITH_MAX_PAYLOAD_SIZE);
   return FAITH_ERR_TOO_LARGE;
 }
 
@@ -85,18 +89,18 @@ faith_status_code_t faith_decode_frame(const uint8_t *payload,
 
   if (frame_payload_size > FAITH_MAX_PAYLOAD_SIZE) {
     nob_log(ERROR,
-            "Failed to parse frame from buffer; "
+            "[%s] Failed to parse frame from buffer; "
             "payload_size=%zu MAX_PAYLOAD_SIZE=%zu",
-            payload_size, (size_t)FAITH_MAX_PAYLOAD_SIZE);
+            _MODULE_NAME, payload_size, (size_t)FAITH_MAX_PAYLOAD_SIZE);
 
     return FAITH_ERR_TOO_LARGE;
   }
 
   if (frame_size > FAITH_MAX_FRAME_LEN) {
     nob_log(ERROR,
-            "Failed to parse frame from buffer; Frame is too large, "
+            "[%s] Failed to parse frame from buffer; Frame is too large, "
             "frame_size=%i MAX_FRAME_LEN=%i",
-            (int32_t)frame_size, (int32_t)FAITH_MAX_FRAME_LEN);
+            _MODULE_NAME, (int32_t)frame_size, (int32_t)FAITH_MAX_FRAME_LEN);
     return FAITH_ERR_TOO_LARGE;
   }
 
@@ -768,9 +772,9 @@ faith_codec_event_batch_data_size(faith_envl_stc_event_t *events,
 
   if (n_events > FAITH_EVENT_BATCH_MAX_EVENTS) {
     nob_log(ERROR,
-            "Invalid EVENT_BATCH body: event count %" PRIu16
+            "[%s] Invalid EVENT_BATCH body: event count %" PRIu16
             " exceeds maximum %u.",
-            n_events, FAITH_EVENT_BATCH_MAX_EVENTS);
+            _MODULE_NAME, n_events, FAITH_EVENT_BATCH_MAX_EVENTS);
     return FAITH_ERR_INVALID;
   }
 
@@ -783,9 +787,9 @@ faith_codec_event_batch_data_size(faith_envl_stc_event_t *events,
 
       if (body_size > UINT16_MAX) {
         nob_log(ERROR,
-                "Cannot encode EVENT_BATCH: event %" PRIu16
+                "[%s] Cannot encode EVENT_BATCH: event %" PRIu16
                 " body size (%zu bytes) exceeds UINT16_MAX.",
-                i, body_size);
+                _MODULE_NAME, i, body_size);
         return FAITH_ERR_TOO_LARGE;
       }
 
@@ -793,9 +797,9 @@ faith_codec_event_batch_data_size(faith_envl_stc_event_t *events,
 
       if (encoded_elem_size > UINT32_MAX - total_data_size) {
         nob_log(ERROR,
-                "Cannot encode EVENT_BATCH: adding event %" PRIu16
+                "[%s] Cannot encode EVENT_BATCH: adding event %" PRIu16
                 " would make the total event data exceed UINT32_MAX.",
-                i);
+                _MODULE_NAME, i);
         return FAITH_ERR_TOO_LARGE;
       }
 
@@ -845,9 +849,9 @@ faith_encode_event_batch_body(uint8_t *out_buf, faith_body_size_t *out_size,
 
     if ((size_t)returned_body_size != body_size) {
       nob_log(ERROR,
-              "EVENT encoder returned an unexpected body size: "
+              "[%s] EVENT encoder returned an unexpected body size: "
               "expected %zu bytes, got %" PRIu32 " bytes.",
-              body_size, returned_body_size);
+              _MODULE_NAME, body_size, returned_body_size);
       return FAITH_ERR_INVALID;
     }
     offset += body_size;
@@ -875,9 +879,9 @@ faith_decode_event_batch_body(const uint8_t                *payload,
 
   if (out->n_events > FAITH_EVENT_BATCH_MAX_EVENTS) {
     nob_log(ERROR,
-            "Invalid EVENT_BATCH body: event count %" PRIu16
+            "[%s] Invalid EVENT_BATCH body: event count %" PRIu16
             " exceeds maximum %u.",
-            out->n_events, FAITH_EVENT_BATCH_MAX_EVENTS);
+            _MODULE_NAME, out->n_events, FAITH_EVENT_BATCH_MAX_EVENTS);
     return FAITH_ERR_BAD_ENVELOPE;
   }
 
@@ -889,9 +893,9 @@ faith_decode_event_batch_body(const uint8_t                *payload,
 
   if ((size_t)payload_size < decoded_size) {
     nob_log(ERROR,
-            "Invalid EVENT_BATCH body: declared events data size (%" PRIu32
+            "[%s] Invalid EVENT_BATCH body: declared events data size (%" PRIu32
             " bytes) exceeds remaining payload size (%" PRIu32 " bytes).",
-            out->events_data_size,
+            _MODULE_NAME, out->events_data_size,
             payload_size - FAITH_ENVL_STC_EVENT_BATCH_BODY_SIZE_FIXED);
 
     return FAITH_ERR_OVERFLOW;
@@ -900,8 +904,9 @@ faith_decode_event_batch_body(const uint8_t                *payload,
   size_t events_end = offset + (size_t)out->events_data_size;
 
   if (events_end != (size_t)payload_size) {
-    nob_log(ERROR, "Invalid EVENT_BATCH body: payload has %zu trailing bytes.",
-            (size_t)payload_size - events_end);
+    nob_log(ERROR,
+            "[%s] Invalid EVENT_BATCH body: payload has %zu trailing bytes.",
+            _MODULE_NAME, (size_t)payload_size - events_end);
     return FAITH_ERR_BAD_ENVELOPE;
   }
 
@@ -919,19 +924,19 @@ faith_decode_event_batch_body(const uint8_t                *payload,
 
     if (elem_size < FAITH_ENVL_STC_EVENT_BODY_SIZE_FIXED) {
       nob_log(ERROR,
-              "Invalid EVENT_BATCH body: event %" PRIu16
+              "[%s] Invalid EVENT_BATCH body: event %" PRIu16
               " declares an invalid body size of %" PRIu16
               " bytes. The minimum required size for an event is: %" PRIu32
               " bytes.",
-              i, elem_size, FAITH_ENVL_STC_EVENT_BODY_SIZE_FIXED);
+              _MODULE_NAME, i, elem_size, FAITH_ENVL_STC_EVENT_BODY_SIZE_FIXED);
       _FH_RETURN_DEFER(FAITH_ERR_BAD_ENVELOPE);
     }
 
     if (offset > payload_size || payload_size - offset < (size_t)elem_size) {
       nob_log(ERROR,
-              "Invalid EVENT_BATCH body: event %" PRIu16 " declares %" PRIu16
-              " bytes, but only %zu bytes remain.",
-              i, elem_size, events_end - offset);
+              "[%s] Invalid EVENT_BATCH body: event %" PRIu16
+              " declares %" PRIu16 " bytes, but only %zu bytes remain.",
+              _MODULE_NAME, i, elem_size, events_end - offset);
       _FH_RETURN_DEFER(FAITH_ERR_BAD_FRAME);
     }
 

@@ -4,7 +4,7 @@
 
 #include "../logging/logging.h"
 
-#define _MODULE_NAME "[transport/conn] "
+#define _MODULE_NAME "transport/conn"
 
 faith_status_code_t conn_init(transport_conn_t *conn) {
   if (!conn)
@@ -25,7 +25,7 @@ transport_result_t conn_read_more_ssl_bytes(transport_conn_t *conn) {
   int nread = 0;
   int err = tls_read(&conn->tls, tmp, sizeof(tmp), &nread);
   if (err == INT_MAX) {
-    nob_log(ERROR, _MODULE_NAME "Invalid arguments specified for tls_read()");
+    nob_log(ERROR, "[%s] Invalid arguments specified for tls_read()", _MODULE_NAME);
     return TRANSPORT_RES_ERROR;
   }
 
@@ -47,7 +47,7 @@ transport_result_t conn_read_more_ssl_bytes(transport_conn_t *conn) {
   if (err == SSL_ERROR_ZERO_RETURN)
     return TRANSPORT_RES_CLOSED;
 
-  nob_log(ERROR, "tls_read() failed. SSL error: %i", err);
+  nob_log(ERROR, "[%s] tls_read() failed. SSL error: %i", _MODULE_NAME, err);
   ERR_print_errors_fp(stderr);
 
   return TRANSPORT_RES_ERROR;
@@ -62,9 +62,9 @@ faith_status_code_t conn_flush_output(transport_conn_t   *conn,
 
   if (!conn->out.buf) {
     nob_log(WARNING,
-            "[client=%" PRIu64 " fd=%i] Requested to flush output but output "
+            "[%s: client=%" PRIu64 " fd=%i] Requested to flush output but output "
             "queue buffer is not allocated.",
-            conn->id, conn->fd);
+            _MODULE_NAME, conn->id, conn->fd);
     return FAITH_OK;
   }
 
@@ -80,15 +80,15 @@ faith_status_code_t conn_flush_output(transport_conn_t   *conn,
 
     if (err == INT_MAX) {
       nob_log(ERROR,
-              "[client=%" PRIu64 " fd=%i] failed to write %i bytes over the "
+              "[%s: client=%" PRIu64 " fd=%i] failed to write %i bytes over the "
               "wire. Invalid arguments specified.",
-              conn->id, conn->fd, nwrite);
+              _MODULE_NAME, conn->id, conn->fd, nwrite);
       /* Fatal argument error => return immediately */
       return FAITH_ERR_INVALID;
     }
 
-    nob_log(INFO, "[client=%" PRIu64 " fd=%i] wrote %i bytes over the wire.",
-            conn->id, conn->fd, nwrite);
+    nob_log(INFO, "[%s: client=%" PRIu64 " fd=%i] wrote %i bytes over the wire.",
+            _MODULE_NAME, conn->id, conn->fd, nwrite);
 
     if (nwrite > 0) {
       conn->out.off += (size_t)nwrite;
@@ -107,7 +107,7 @@ faith_status_code_t conn_flush_output(transport_conn_t   *conn,
       return FAITH_OK;
     default:
       *o_res = TRANSPORT_RES_ERROR;
-      nob_log(ERROR, "tls_write() failed.");
+      nob_log(ERROR, "[%s] tls_write() failed.", _MODULE_NAME);
       ERR_print_errors_fp(stderr);
       return FAITH_ERR_IO;
     }
@@ -140,13 +140,13 @@ faith_status_code_t conn_queue_enqueue_bytes(transport_queue_t *queue,
   const char *type = queue->type == TRANSPORT_QUEUE_INPUT ? "input" : "output";
 
   if (g_verbose_logging) {
-    nob_log(INFO, _MODULE_NAME "Trying to enqueue %zu %s bytes...", n_bytes,
+    nob_log(INFO, "[%s] Trying to enqueue %zu %s bytes...", _MODULE_NAME, n_bytes,
             type);
   }
 
   if (n_bytes == 0) {
     if (g_verbose_logging) {
-      nob_log(WARNING, _MODULE_NAME "Tried to enqueue zero-length %s", type);
+      nob_log(WARNING, "[%s] Tried to enqueue zero-length %s", _MODULE_NAME, type);
     }
 
     return FAITH_OK;
@@ -193,7 +193,7 @@ faith_status_code_t conn_queue_enqueue_bytes(transport_queue_t *queue,
   queue->size = needed;
 
   if (g_verbose_logging) {
-    nob_log(INFO, _MODULE_NAME "Successfully enqueued %zu %s bytes", n_bytes,
+    nob_log(INFO, "[%s] Successfully enqueued %zu %s bytes", _MODULE_NAME, n_bytes,
             type);
   }
 

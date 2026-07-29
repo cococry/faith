@@ -130,12 +130,14 @@ int tls_accept(tls_state_fd_t *state) {
 
   int err = SSL_get_error(state->ssl, rc);
 
-  if (err == SSL_ERROR_WANT_READ && g_verbose_logging) {
-    nob_log(INFO, _MODULE_NAME "TLS handshake wants read for fd: %i",
-            state->fd);
-  } else if (err == SSL_ERROR_WANT_WRITE && g_verbose_logging) {
-    nob_log(INFO, _MODULE_NAME "TLS handshake wants write for fd: %i",
-            state->fd);
+  if (err == SSL_ERROR_WANT_READ) {
+    if (g_verbose_logging)
+      nob_log(INFO, _MODULE_NAME "TLS handshake wants read for fd: %i",
+              state->fd);
+  } else if (err == SSL_ERROR_WANT_WRITE) {
+    if (g_verbose_logging)
+      nob_log(INFO, _MODULE_NAME "TLS handshake wants write for fd: %i",
+              state->fd);
   } else {
     nob_log(ERROR, _MODULE_NAME "SSL_accept failed: rc=%i ssl_error=%i fd=%i",
             rc, err, state->fd);

@@ -3,6 +3,8 @@
 #include "../../third_party/stb_ds.h"
 #include <stdint.h>
 
+#define _MODULE_NAME "delivery/event_inbox"
+
 void device_event_inbox_init(device_event_inbox_t *o_inbox) {
   if (!o_inbox)
     return;
@@ -27,7 +29,8 @@ device_event_inbox_push_event(device_event_inbox_t         *inbox,
     return FAITH_ERR_OVERFLOW;
 
   if (inbox->last_sent_seq != UINT64_MAX && event->seq_num != inbox->next_seq) {
-    nob_log(ERROR, "Tried to push event with invalid sequence order.\n");
+    nob_log(ERROR, "[%s] Tried to push event with invalid sequence order.\n",
+        _MODULE_NAME);
     return FAITH_ERR_INVALID;
   }
 
