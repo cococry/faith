@@ -6,6 +6,8 @@
 
 #include "../../third_party/stb_ds.h"
 
+#define _MODULE_NAME "server/client_lifecycle"
+
 faith_status_code_t server_client_adopt_fd(server_state_t *s, int client_fd) {
 
   struct client_conn_t *cl = calloc(1, sizeof(*cl));
@@ -60,9 +62,10 @@ faith_status_code_t server_close_client(server_state_t *s,
 
     if (rc != FAITH_OK) {
       nob_log(ERROR,
-              "[client=%" PRIu64
+              "[%s: client=%" PRIu64
               " fd=%d] Failed to cancel pending device-link request: %s",
-              cl->conn.id, cl->conn.fd, faith_status_code_name(rc));
+              _MODULE_NAME, cl->conn.id, cl->conn.fd,
+              faith_status_code_name(rc));
 
       if (result == FAITH_OK)
         result = rc;
@@ -84,9 +87,10 @@ faith_status_code_t server_close_client(server_state_t *s,
         sess_registry_get_devices(&s->rt, &cl->ident.auth_id, &devices);
     if (rc != FAITH_OK || devices == NULL) {
       nob_log(ERROR,
-              "[client=%" PRIu64
+              "[%s: client=%" PRIu64
               " fd=%d] Failed to enumerate account devices: %s",
-              cl->conn.id, cl->conn.fd, faith_status_code_name(rc));
+              _MODULE_NAME, cl->conn.id, cl->conn.fd,
+              faith_status_code_name(rc));
       if (result == FAITH_OK)
         result = rc;
     }
@@ -133,8 +137,8 @@ faith_status_code_t server_close_client(server_state_t *s,
 
   if (cl->conn.fd >= 0) {
     if (close(cl->conn.fd) < 0) {
-      nob_log(ERROR, "[client=%" PRIu64 " fd=%d] close failed: %s", cl->conn.id,
-              cl->conn.fd, strerror(errno));
+      nob_log(ERROR, "[%s: client=%" PRIu64 " fd=%d] close failed: %s",
+              _MODULE_NAME, cl->conn.id, cl->conn.fd, strerror(errno));
 
       if (result == FAITH_OK)
         result = FAITH_ERR_IO;
@@ -157,8 +161,8 @@ faith_status_code_t server_close_client(server_state_t *s,
     }
   }
 
-  nob_log(INFO, "[client=%" PRIu64 " fd=%d] Closed client", log_conn_id,
-          log_fd);
+  nob_log(INFO, "[%s: client=%" PRIu64 " fd=%d] Closed client", _MODULE_NAME,
+          log_conn_id, log_fd);
 
   free(cl);
 

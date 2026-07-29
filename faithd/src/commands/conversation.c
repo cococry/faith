@@ -7,7 +7,7 @@
 static faith_status_code_t send_conversation_created(
     server_state_t *s, client_conn_t *cl,
     const faith_event_conversation_created_t *conv_created,
-    const faith_auth_id_t                    *conservant_id) {
+    const faith_auth_id_t* conservant_id) {
 
   if (!s || !cl || !conv_created)
     return FAITH_ERR_INVALID;
@@ -18,19 +18,17 @@ static faith_status_code_t send_conversation_created(
   _FH_CHECK_RETURN(faith_encode_event_conversation_created(
       data, &data_size, sizeof(data), conv_created));
 
-  _FH_CHECK_RETURN(
-      delivery_queue_event(s, &cl->ident.auth_id, &cl->ident.device_id,
-                           FAITH_EVENT_CONVERSATION_CREATED, data, data_size));
+  _FH_CHECK_RETURN(delivery_queue_event(s, &cl->ident.auth_id, &cl->ident.device_id, FAITH_EVENT_CONVERSATION_CREATED,
+                                        data, data_size));
 
   faith_status_code_t device_loop_rc = FAITH_OK;
-  _FH_FOR_EACH_AUTH_DEVICE_SESSION(
-      s, conservant_id, recipient_sess, device_loop_rc, {
-        _FH_CHECK_RETURN(delivery_queue_event(
-            s, conservant_id, &recipient_sess->ident.device_id,
-            FAITH_EVENT_CONVERSATION_CREATED, data, data_size));
-      });
+  _FH_FOR_EACH_AUTH_DEVICE_SESSION(s, conservant_id, recipient_sess, device_loop_rc, {
+    _FH_CHECK_RETURN(delivery_queue_event(
+        s, conservant_id, &recipient_sess->ident.device_id,
+        FAITH_EVENT_CONVERSATION_CREATED, data, data_size));
+  });
 
-  return FAITH_OK;
+  return device_loop_rc;
 }
 
 faith_status_code_t conv_handle_create_conversation(
@@ -65,15 +63,15 @@ faith_status_code_t conv_handle_create_conversation(
   faith_event_conversation_created_t conv_created = {.conversation_id =
                                                          conv_id};
 
-  _FH_CHECK_DEFER(send_conversation_created(s, cl, &conv_created,
-                                            &create_conv_cmd.conversant_id));
+  _FH_CHECK_DEFER(send_conversation_created(s, cl, &conv_created, &create_conv_cmd.conversant_id));
 
   *o_result = FAITH_COMMAND_RESULT_ACCEPTED;
 
   return FAITH_OK;
 
 defer:
+  (void)_fh_result;
   *o_result = FAITH_COMMAND_RESULT_REJECTED;
   *o_err = potential_err;
-  return _fh_result;
+  return FAITH_OK;
 }

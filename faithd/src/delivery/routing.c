@@ -3,6 +3,8 @@
 
 #include "../../third_party/stb_ds.h"
 
+#define _MODULE_NAME "delivery/routing"
+
 faith_status_code_t
 delivery_route_envelope_to_auth_id(server_state_t *s, client_conn_t *cl_sender,
                                    const faith_auth_id_t  *recipient_auth_id,
@@ -30,8 +32,9 @@ delivery_route_envelope_to_auth_id(server_state_t *s, client_conn_t *cl_sender,
         faith_id128_to_hex(recipient_auth_id->bytes, recipient_auth_id_hex));
 
     nob_log(INFO,
-            "[client=%" PRIu64 " fd=%i] Envelope %s: Recipient "
+            "[%s: client=%" PRIu64 " fd=%i] Envelope %s: Recipient "
             "(auth_id: %s) is offline; Not routing envelope.",
+            _MODULE_NAME,
             cl_sender->conn.id, cl_sender->conn.fd,
             faith_envelope_name(envl->type), recipient_auth_id_hex);
 
@@ -58,9 +61,10 @@ delivery_route_envelope_to_auth_id(server_state_t *s, client_conn_t *cl_sender,
 
         if (_fh_rc != FAITH_OK) {
           nob_log(ERROR,
-                  "[client=%" PRIu64
+                  "[%s: client=%" PRIu64
                   " fd=%i] Envelope %s: Failed to route envelope to "
                   "recipient device (auth_id: %s, device_id: %s).",
+                  _MODULE_NAME,
                   cl_sender->conn.id, cl_sender->conn.fd,
                   faith_envelope_name(envl->type), recipient_auth_id_hex,
                   recipient_device_id_hex);
@@ -68,9 +72,10 @@ delivery_route_envelope_to_auth_id(server_state_t *s, client_conn_t *cl_sender,
         }
 
         nob_log(INFO,
-                "[client=%" PRIu64
+                "[%s: client=%" PRIu64
                 " fd=%i] Envelope %s: Routed envelope to recipient "
                 "device (auth_id: %s, device_id: %s).",
+                _MODULE_NAME,
                 cl_sender->conn.id, cl_sender->conn.fd,
                 faith_envelope_name(envl->type), recipient_auth_id_hex,
                 recipient_device_id_hex);

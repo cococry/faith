@@ -9,6 +9,8 @@
 
 #include "conversation.h"
 
+#define _MODULE_NAME "commands/dispatch"
+
 static faith_status_code_t
 queue_command_result(server_state_t *s, client_conn_t *cl,
                      const faith_command_id_t *cmd_id,
@@ -47,8 +49,6 @@ faith_status_code_t command_dispatch(server_state_t *s, client_conn_t *cl,
   if (envl->type != FAITH_ENVELOPE_COMMAND)
     return FAITH_ERR_INVALID;
 
-  faith_status_code_t _fh_result = FAITH_OK;
-
   faith_command_result_err_t err = FAITH_COMMAND_ERR_NONE;
   faith_command_result_t     result = FAITH_COMMAND_RESULT_NONE;
   faith_envl_cts_command_t   cmd = {0};
@@ -66,29 +66,23 @@ faith_status_code_t command_dispatch(server_state_t *s, client_conn_t *cl,
 
   switch (cmd.type) {
   case FAITH_COMMAND_CREATE_CONVERSATION:
-    _FH_CHECK_DEFER(
+    _FH_CHECK_RETURN(
         conv_handle_create_conversation(s, cl, &cmd, &result, &err));
     break;
   default:
-    nob_log(ERROR, "[client=%" PRIu64 " fd=%i] Server got invalid COMMAND.",
-            cl->conn.id, cl->conn.fd);
+    nob_log(ERROR, "[%s: client=%" PRIu64 " fd=%i] Server got invalid COMMAND.",
+            _MODULE_NAME, cl->conn.id, cl->conn.fd);
 
     err = FAITH_COMMAND_ERR_BAD_COMMAND;
     result = FAITH_COMMAND_RESULT_REJECTED;
-    _FH_RETURN_DEFER(FAITH_ERR_INVALID);
   }
 
   if (result == FAITH_COMMAND_RESULT_NONE) {
     err = FAITH_COMMAND_ERR_BAD_COMMAND;
     result = FAITH_COMMAND_RESULT_REJECTED;
-    _FH_RETURN_DEFER(FAITH_ERR_INVALID);
   }
 
-defer: {
-  _FH_CHECK(queue_command_result(s, cl, &cmd.cmd_id, cmd.type, err, result));
-  if (_fh_rc != FAITH_OK) {
-    _fh_result = _fh_rc;
-  }
-}
-  return _fh_result;
+  _FH_CHECK_RETURN(
+      queue_command_result(s, cl, &cmd.cmd_id, cmd.type, err, result));
+  return FAITH_OK;
 }

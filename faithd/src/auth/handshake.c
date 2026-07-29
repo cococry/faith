@@ -9,6 +9,8 @@
 
 #include "../delivery/events.h"
 
+#define _MODULE_NAME "auth/handshake"
+
 faith_status_code_t auth_handle_hello(server_state_t *s, client_conn_t *cl,
                                       const faith_envelope_t *hello_envl) {
   // HELLO {
@@ -30,8 +32,9 @@ faith_status_code_t auth_handle_hello(server_state_t *s, client_conn_t *cl,
 
   if (cl->state != CLIENT_WAIT_FOR_HELLO) {
     nob_log(ERROR,
-            "[client=%" PRIu64 " fd=%i] Server got invalid HELLO from client.",
-            cl->conn.id, cl->conn.fd);
+            "[%s: client=%" PRIu64
+            " fd=%i] Server got invalid HELLO from client.",
+            _MODULE_NAME, cl->conn.id, cl->conn.fd);
     return FAITH_ERR_BAD_ENVELOPE;
   }
 
@@ -89,18 +92,18 @@ faith_status_code_t auth_handle_challenge_response(
 
   if (challenge_response_envl->type != FAITH_ENVELOPE_CHALLENGE_RESPONSE) {
     nob_log(ERROR,
-            "[client=%" PRIu64 " fd=%i] Invalid envelope type. Expected "
+            "[%s: client=%" PRIu64 " fd=%i] Invalid envelope type. Expected "
             "FAITH_ENVELOPE_CHALLENGE_RESPONSE, got %s",
-            cl->conn.id, cl->conn.fd,
+            _MODULE_NAME, cl->conn.id, cl->conn.fd,
             faith_envelope_name(challenge_response_envl->type));
     return FAITH_ERR_INVALID;
   }
 
   if (cl->state != CLIENT_WAIT_FOR_CHALLENGE_RESPONSE) {
     nob_log(ERROR,
-            "[client=%" PRIu64
+            "[%s: client=%" PRIu64
             " fd=%i] Server got invalid CHALLENGE_RESPONSE from client.",
-            cl->conn.id, cl->conn.fd);
+            _MODULE_NAME, cl->conn.id, cl->conn.fd);
     return FAITH_ERR_BAD_ENVELOPE;
   }
 
@@ -109,18 +112,18 @@ faith_status_code_t auth_handle_challenge_response(
   if (!faith_client_id_equal(challenge_response_envl->sender_id,
                              params->sender_auth_id)) {
     nob_log(ERROR,
-            "[client=%" PRIu64
+            "[%s: client=%" PRIu64
             " fd=%i] Server got CHALLENGE_RESPONSE from invalid client.",
-            cl->conn.id, cl->conn.fd);
+            _MODULE_NAME, cl->conn.id, cl->conn.fd);
     return FAITH_ERR_INVALID;
   }
 
   if (!challenge_response_envl->body ||
       challenge_response_envl->body_size != FAITH_ED25519_SIGNATURE_SIZE) {
     nob_log(ERROR,
-            "[client=%" PRIu64
+            "[%s: client=%" PRIu64
             " fd=%i] Server got invalid CHALLENGE_RESPONSE envelope contents.",
-            cl->conn.id, cl->conn.fd);
+            _MODULE_NAME, cl->conn.id, cl->conn.fd);
     return FAITH_ERR_INVALID;
   }
 
@@ -140,9 +143,10 @@ faith_status_code_t auth_handle_challenge_response(
     _FH_CHECK_RETURN(
         faith_id128_to_hex(params->device_id.bytes, device_id_hex));
     nob_log(ERROR,
-            "[client=%" PRIu64
+            "[%s: client=%" PRIu64
             " fd=%i] Failed to get routing session (auth_id=%s, device_id=%s).",
-            cl->conn.id, cl->conn.fd, sender_auth_id_hex, device_id_hex);
+            _MODULE_NAME, cl->conn.id, cl->conn.fd, sender_auth_id_hex,
+            device_id_hex);
     return sess_rc;
   }
 
@@ -171,10 +175,12 @@ faith_status_code_t auth_handle_challenge_response(
         _FH_CHECK_RETURN(
             faith_id128_to_hex(params->device_id.bytes, device_id_hex));
         nob_log(ERROR,
-                "[client=%" PRIu64 " fd=%i] Rejected requested routing session "
+                "[%s: client=%" PRIu64
+                " fd=%i] Rejected requested routing session "
                 "(auth_id=%s, device_id=%s). "
                 "Invalid public key sent.",
-                cl->conn.id, cl->conn.fd, sender_auth_id_hex, device_id_hex);
+                _MODULE_NAME, cl->conn.id, cl->conn.fd, sender_auth_id_hex,
+                device_id_hex);
         return FAITH_ERR_UNAUTHORIZED;
       }
 
@@ -222,9 +228,9 @@ faith_status_code_t auth_handle_challenge_response(
                                                  sizeof(msg_buf), &sign_msg));
     if (_fh_rc != FAITH_OK) {
       nob_log(ERROR,
-              "[client=%" PRIu64
+              "[%s: client=%" PRIu64
               " fd=%i] Failed to generate signing message buffer",
-              cl->conn.id, cl->conn.fd);
+              _MODULE_NAME, cl->conn.id, cl->conn.fd);
 
       return _fh_rc;
     }
@@ -273,10 +279,11 @@ reject: {
       faith_id128_to_hex(params->sender_auth_id.bytes, sender_auth_id_hex));
   _FH_CHECK_RETURN(faith_id128_to_hex(params->device_id.bytes, device_id_hex));
   nob_log(ERROR,
-          "[client=%" PRIu64
+          "[%s: client=%" PRIu64
           " fd=%i] Client failed authorization for requested routing session "
           "(auth_id=%s, device_id=%s). ",
-          cl->conn.id, cl->conn.fd, sender_auth_id_hex, device_id_hex);
+          _MODULE_NAME, cl->conn.id, cl->conn.fd, sender_auth_id_hex,
+          device_id_hex);
   return FAITH_ERR_UNAUTHORIZED;
 }
 }
@@ -306,9 +313,10 @@ faith_status_code_t auth_authorize_client(
       faith_id128_to_hex(cl->ident.device_id.bytes, cl_device_id_hex));
 
   nob_log(INFO,
-          "[client=%" PRIu64 " fd=%i] Client passed authorization for "
+          "[%s: client=%" PRIu64 " fd=%i] Client passed authorization for "
           "requested routing session. (auth_id=%s, device_id=%s)",
-          cl->conn.id, cl->conn.fd, cl_auth_id_hex, cl_device_id_hex);
+          _MODULE_NAME, cl->conn.id, cl->conn.fd, cl_auth_id_hex,
+          cl_device_id_hex);
 
   return FAITH_OK;
 }
@@ -345,9 +353,9 @@ auth_handshake_complete(server_state_t *s, client_conn_t *cl,
       faith_id128_to_hex(cl->ident.device_id.bytes, device_id_hex));
 
   nob_log(INFO,
-          "[client=%" PRIu64
+          "[%s: client=%" PRIu64
           " fd=%i] Server accepted HELLO (auth id: %s, device id: %s)",
-          cl->conn.id, cl->conn.fd, auth_id_hex, device_id_hex);
+          _MODULE_NAME, cl->conn.id, cl->conn.fd, auth_id_hex, device_id_hex);
 
   return _fh_result;
 }

@@ -2,6 +2,8 @@
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 
+#define _MODULE_NAME "core/crypto"
+
 faith_status_code_t faith_random_bytes(uint8_t *o_buf, int num) {
   if (RAND_bytes(o_buf, num) != 1) {
     nob_log(ERROR, "Failed to generate auth_id with OpenSSL RAND_bytes()");
@@ -48,8 +50,8 @@ faith_gen_ed25519_keypair(void   *handle,
     }
 
     if (priv_len != FAITH_ED25519_PRIVATE_KEY_SIZE) {
-      nob_log(ERROR, "Generated private key has unexpected byte size: %zu",
-              priv_len);
+      nob_log(ERROR, "[%s] Generated private key has unexpected byte size: %zu",
+              _MODULE_NAME, priv_len);
       status = FAITH_ERR_INVALID;
       goto cleanup;
     }
@@ -69,8 +71,8 @@ faith_gen_ed25519_keypair(void   *handle,
     }
 
     if (pub_len != FAITH_ED25519_PUBLIC_KEY_SIZE) {
-      nob_log(ERROR, "Generated public key has unexpected byte size: %zu",
-              pub_len);
+      nob_log(ERROR, "[%s] Generated public key has unexpected byte size: %zu",
+              _MODULE_NAME, pub_len);
       status = FAITH_ERR_INVALID;
       goto cleanup;
     }

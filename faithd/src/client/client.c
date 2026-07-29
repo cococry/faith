@@ -2,6 +2,7 @@
 #include <arpa/inet.h>
 #include <assert.h>
 #include <errno.h>
+#include <linux/limits.h>
 #include <netinet/in.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
@@ -985,6 +986,13 @@ client_dispatch_event(faith_client_t               *client,
 
   faith_status_code_t _fh_result = FAITH_OK;
 
+  if (g_log_enable_tracing) {
+    nob_log(INFO,
+            "[client] Dispatching server event %s (sequence number: %" PRIu64
+            ")...",
+            faith_event_codec_type_name(event->type), event->seq_num);
+  }
+
   switch (event->type) {
   case FAITH_EVENT_CONVERSATION_CREATED:
     _FH_CHECK_RETURN(client_handle_event_conversation_created(client, event));
@@ -994,6 +1002,13 @@ client_dispatch_event(faith_client_t               *client,
   }
 
   client->ev_last_dispatched_seq = event->seq_num;
+
+  if (g_log_enable_tracing) {
+    nob_log(INFO,
+            "[client] Dispatched server event %s (sequence number: %" PRIu64
+            ")",
+            faith_event_codec_type_name(event->type), event->seq_num);
+  }
 
   return _fh_result;
 }
@@ -1031,6 +1046,10 @@ client_buffer_event(faith_client_t               *client,
   slot->event.data = data_copy;
   slot->occupied = true;
 
+  nob_log(INFO,
+          "[client] Buffered out-of-order event (sequence number: %" PRIu64 ")",
+          event->seq_num);
+
   return FAITH_OK;
 }
 
@@ -1046,6 +1065,12 @@ static faith_status_code_t client_drain_reorder_buffer(faith_client_t *client) {
 
     if (!slot->occupied || slot->event.seq_num != next_seq)
       return FAITH_OK;
+
+    nob_log(
+        INFO,
+        "[client] Dispatching buffered out-of-order event in sequence order "
+        "(original sequence number: %" PRIu64 ")",
+        slot->event.seq_num);
 
     /* advances <ev_last_dispatched_seq> of the client */
     _FH_CHECK_RETURN(client_dispatch_event(client, &slot->event));
@@ -1070,6 +1095,11 @@ client_process_event(faith_client_t               *client,
   /* duplicate event */
   if (client->ev_last_dispatched_seq != UINT64_MAX &&
       event->seq_num <= client->ev_last_dispatched_seq) {
+
+    nob_log(WARNING,
+            "[client] Saw duplicate or stale event (sequence number: %" PRIu64
+            ", current sequence: %" PRIu64 ")",
+            event->seq_num, client->ev_last_dispatched_seq);
 
     *o_saw_duplicate = true;
     return FAITH_OK;
@@ -1690,7 +1720,8 @@ static faith_status_code_t client_make_handshake(faith_client_t *client,
 
   _FH_CHECK_RETURN(read_frame_sync(client->ssl, &frame));
 
-  nob_log(INFO, "[client] Got new server response.");
+  if (g_log_enable_tracing)
+    nob_log(INFO, "[client] Got new server response.");
 
   if (frame.msg_type != FAITH_MSG_ENVL) {
     nob_log(ERROR,
@@ -1715,13 +1746,11 @@ static faith_status_code_t client_make_handshake(faith_client_t *client,
 
   faith_free_frame(&frame);
 
-  if (g_log_enable_tracing)
+  /* ========================== */
+  /* Read next frame */
+  /* ========================== */
 
-    /* ========================== */
-    /* Read next frame */
-    /* ========================== */
-
-    _FH_CHECK_RETURN(read_frame_sync(client->ssl, &frame));
+  _FH_CHECK_RETURN(read_frame_sync(client->ssl, &frame));
 
   _FH_CHECK_DEFER(
       faith_decode_envelope(frame.payload, frame.payload_size, &envl));
@@ -1889,6 +1918,46 @@ faith_status_code_t faith_client_init_global(int log_enable_tracing) {
   return FAITH_OK;
 }
 
+static int write_identity(const char                   *path,
+                          const client_side_identity_t *ident) {
+  FILE *f = fopen(path, "wb");
+  if (!f)
+    return 0;
+
+  int ok =
+      fwrite(ident->auth_id.bytes, sizeof ident->auth_id.bytes, 1, f) == 1 &&
+      fwrite(ident->device_id.bytes, sizeof ident->device_id.bytes, 1, f) ==
+          1 &&
+      fwrite(ident->private_key, sizeof ident->private_key, 1, f) == 1 &&
+      fwrite(ident->public_key, sizeof ident->public_key, 1, f) == 1;
+
+  fclose(f);
+  return ok;
+}
+
+static int read_identity(const char *path, client_side_identity_t *ident) {
+  FILE *f = fopen(path, "rb");
+  if (!f)
+    return 0;
+
+  int ok =
+      fread(ident->auth_id.bytes, sizeof ident->auth_id.bytes, 1, f) == 1 &&
+      fread(ident->device_id.bytes, sizeof ident->device_id.bytes, 1, f) == 1 &&
+      fread(ident->private_key, sizeof ident->private_key, 1, f) == 1 &&
+      fread(ident->public_key, sizeof ident->public_key, 1, f) == 1;
+
+  fclose(f);
+
+  if (!ok)
+    return 0;
+
+  ident->keypair = EVP_PKEY_new_raw_private_key(
+      EVP_PKEY_ED25519, NULL, ident->private_key, sizeof ident->private_key);
+
+  return 1;
+}
+
+#define READ_IDENT "ident/23a2b2bf0b4457c86ad6127da2a1ae85.bin"
 static faith_status_code_t
 client_new_identity(client_side_identity_t *o_ident) {
   if (!o_ident)
@@ -1896,6 +1965,10 @@ client_new_identity(client_side_identity_t *o_ident) {
 
   /* Generate 128 bit random device & auth identities */
 
+#ifdef READ_IDENT
+  char buf[33];
+  read_identity(READ_IDENT, o_ident);
+#else
   _FH_CHECK_RETURN(faith_random_bytes(o_ident->auth_id.bytes,
                                       sizeof(o_ident->auth_id.bytes)));
 
@@ -1916,6 +1989,13 @@ client_new_identity(client_side_identity_t *o_ident) {
             "[faith] Generated new client identity (auth_id=%s, device_id=%s).",
             auth_id_hex, device_id_hex);
   }
+
+  char buf[33];
+  _FH_CHECK_RETURN(faith_id128_to_hex(o_ident->auth_id.bytes, buf));
+  char filepath[PATH_MAX];
+  snprintf(filepath, sizeof(filepath), "ident/%s.bin", buf);
+  write_identity(filepath, o_ident);
+#endif
 
   return FAITH_OK;
 }

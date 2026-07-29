@@ -9,6 +9,8 @@
 
 #include "dispatch.h"
 
+#define _MODULE_NAME "server/client_io"
+
 faith_status_code_t server_queue_frame(server_state_t *s, client_conn_t *cl,
                                        const faith_frame_t *frame) {
   if (!cl || cl->closing || !s || !frame ||
@@ -50,9 +52,9 @@ faith_status_code_t server_queue_frame(server_state_t *s, client_conn_t *cl,
     }
   }
 
-  nob_log(INFO, "[client=%" PRIu64 " fd=%d] queued frame: %s (%zu bytes)",
-          cl->conn.id, cl->conn.fd, faith_frame_msg_name(frame->msg_type),
-          wire_size);
+  nob_log(INFO, "[%s: client=%" PRIu64 " fd=%d] queued frame: %s (%zu bytes)",
+          _MODULE_NAME, cl->conn.id, cl->conn.fd,
+          faith_frame_msg_name(frame->msg_type), wire_size);
 
   return FAITH_OK;
 defer:
@@ -84,10 +86,10 @@ faith_status_code_t server_queue_envelope(server_state_t *s, client_conn_t *cl,
   _FH_CHECK_DEFER(server_queue_frame(s, cl, &frame));
 
   nob_log(INFO,
-          "[client=%" PRIu64
+          "[%s: client=%" PRIu64
           " fd=%i] Server enqueued envelope: type=%s body_size=%u",
-          cl->conn.id, cl->conn.fd, faith_envelope_name(envl->type),
-          envl->body_size);
+          _MODULE_NAME, cl->conn.id, cl->conn.fd,
+          faith_envelope_name(envl->type), envl->body_size);
 
 defer:
   free(payload);
@@ -101,9 +103,9 @@ server_queue_envelope_or_mark_dead(server_state_t *s, client_conn_t *cl,
   if (_fh_rc == FAITH_OK)
     return FAITH_OK;
 
-  nob_log(ERROR, "[client=%" PRIu64 " fd=%d] Failed to queue %s: %s",
-          cl->conn.id, cl->conn.fd, faith_envelope_name(envl->type),
-          faith_status_code_name(_fh_rc));
+  nob_log(ERROR, "[%s: client=%" PRIu64 " fd=%d] Failed to queue %s: %s",
+          _MODULE_NAME, cl->conn.id, cl->conn.fd,
+          faith_envelope_name(envl->type), faith_status_code_name(_fh_rc));
 
   cl->closing = true;
   return _fh_rc;
@@ -214,8 +216,9 @@ faith_status_code_t server_drive_client_read(server_state_t *s,
       return -1;
 
     if (g_verbose_logging) {
-      nob_log(INFO, "[client=%" PRIu64 " fd=%i] Success handling client frame.",
-              cl->conn.id, cl->conn.fd);
+      nob_log(INFO,
+              "[%s: client=%" PRIu64 " fd=%i] Success handling client frame.",
+              _MODULE_NAME, cl->conn.id, cl->conn.fd);
     }
 
     reactor_events_t desired_interests =
@@ -254,8 +257,9 @@ faith_status_code_t server_drive_client_read(server_state_t *s,
         "Connection closed while reading incomplete frame.");
     return -1;
   default:
-    nob_log(ERROR, "[client=%" PRIu64 " fd=%i] Failed to read client frame.",
-            cl->conn.id, cl->conn.fd);
+    nob_log(ERROR,
+            "[%s: client=%" PRIu64 " fd=%i] Failed to read client frame.",
+            _MODULE_NAME, cl->conn.id, cl->conn.fd);
 
     server_client_queue_disconnect(s, cl, FAITH_DISCONNECT_BAD_PROTOCOL,
                                    FAITH_CLIENT_RECONNECT_ALLOWED, 0, 0,
@@ -265,8 +269,8 @@ faith_status_code_t server_drive_client_read(server_state_t *s,
 
 fail_ev_mask:
   nob_log(ERROR,
-          "[client=%" PRIu64 " fd=%d] reactor_modify_interests failed: %s",
-          cl->conn.id, cl->conn.fd, strerror(errno));
+          "[%s: client=%" PRIu64 " fd=%d] reactor_modify_interests failed: %s",
+          _MODULE_NAME, cl->conn.id, cl->conn.fd, strerror(errno));
 
   server_client_queue_disconnect(s, cl, FAITH_DISCONNECT_INTERNAL_ERROR,
                                  FAITH_CLIENT_RECONNECT_ALLOWED, 0, 0,
