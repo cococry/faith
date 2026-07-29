@@ -1,0 +1,47 @@
+name: faith-db-dev
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:17-bookworm}
+    container_name: faith-postgres-dev
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-faith}
+      POSTGRES_USER: ${POSTGRES_USER:-faith}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      PGDATA: /var/lib/postgresql/data/pgdata
+
+    secrets:
+      - postgres_password
+
+    ports:
+      - "${POSTGRES_BIND_ADDRESS:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+
+    volumes:
+      - faith_postgres_dev_data:/var/lib/postgresql/data
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-faith} -d ${POSTGRES_DB:-faith}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+    networks:
+      - faith_db
+
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password.txt
+
+volumes:
+  faith_postgres_dev_data:
+
+networks:
+  faith_db:
+    name: faith-db-dev
