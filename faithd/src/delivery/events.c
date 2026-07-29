@@ -8,6 +8,8 @@
 
 #define DIV_UP(x, y) (((x) + (y) - 1) / (y))
 
+#define _MODULE_NAME "delivery/events"
+
 static faith_status_code_t
 queue_event_online_user(server_state_t *s, struct client_conn_t *cl,
                         device_event_inbox_t         *inbox,
@@ -130,23 +132,44 @@ faith_status_code_t delivery_queue_pending_events(server_state_t *s,
 
   size_t n_events = arrlen(sess->inbox.events);
 
-  for (size_t offset = 0; offset < n_events; offset += 256) {
+  size_t n_fitting = 0;
+  for (size_t offset = 0; offset < n_events; offset += n_fitting) {
     size_t remaining = n_events - offset;
 
     faith_envl_stc_event_t *batch = &sess->inbox.events[offset];
 
-    size_t in_batch = remaining < FAITH_EVENT_BATCH_MAX_EVENTS
-                          ? remaining
-                          : FAITH_EVENT_BATCH_MAX_EVENTS;
+    size_t n_in_batch = remaining < FAITH_EVENT_BATCH_MAX_EVENTS
+                            ? remaining
+                            : FAITH_EVENT_BATCH_MAX_EVENTS;
+
+    const size_t batch_overhead =
+        FAITH_ENVL_STC_EVENT_BATCH_BODY_SIZE_FIXED + FAITH_ENVL_HEADER_SIZE;
+
+    if (FAITH_MAX_STC_PAYLOAD_SIZE < batch_overhead) {
+      return FAITH_ERR_TOO_LARGE;
+    }
+
+    const size_t max_events_data_size =
+        FAITH_MAX_STC_PAYLOAD_SIZE - batch_overhead;
 
     faith_body_size_t events_data_size = 0;
-    _FH_CHECK_RETURN(
-        faith_codec_event_batch_data_size(batch, in_batch, &events_data_size));
+    n_fitting = 0;
+
+    _FH_CHECK_RETURN(faith_codec_event_batch_data_size_fit(
+        batch, n_in_batch, &events_data_size, &n_fitting,
+        max_events_data_size));
+
+    if (n_fitting == 0 || n_fitting > n_in_batch) {
+      nob_log(ERROR,
+              "[%s] Event data is too large or codec returned invalid count.",
+              _MODULE_NAME);
+      return FAITH_ERR_TOO_LARGE;
+    }
 
     faith_envl_stc_event_batch_t batch_envl = {0};
     batch_envl.events_data_size = events_data_size;
     batch_envl.events = batch;
-    batch_envl.n_events = (uint16_t)in_batch;
+    batch_envl.n_events = (uint16_t)n_fitting;
 
     _FH_CHECK_RETURN(queue_event_batch_envl(s, cl, &batch_envl));
   }

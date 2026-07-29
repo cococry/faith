@@ -299,11 +299,11 @@ static faith_status_code_t read_frame_sync(SSL *ssl, faith_frame_t *out) {
   if (frame_size < FAITH_FRAME_METADATA_SIZE)
     return FAITH_ERR_BAD_FRAME;
 
-  if (frame_size > FAITH_MAX_FRAME_LEN) {
+  if (frame_size > FAITH_MAX_STC_FRAME_SIZE) {
     nob_log(ERROR,
             "Failed to read frame; Frame is too large, "
             "frame_size=%i MAX_FRAME_LEN=%i",
-            (int32_t)frame_size, (int32_t)FAITH_MAX_FRAME_LEN);
+            (int32_t)frame_size, (int32_t)FAITH_MAX_CTS_FRAME_SIZE);
     return FAITH_ERR_TOO_LARGE;
   }
 
@@ -317,11 +317,11 @@ static faith_status_code_t read_frame_sync(SSL *ssl, faith_frame_t *out) {
   if (out->proto_ver != FAITH_PROTO_VERSION)
     return FAITH_ERR_UNSUPPORTED_VER;
 
-  if (out->payload_size > FAITH_MAX_PAYLOAD_SIZE) {
+  if (out->payload_size > FAITH_MAX_STC_PAYLOAD_SIZE) {
     nob_log(ERROR,
             "Failed to read frame; Frame is too large, "
             "frame_size=%u MAX_FRAME_LEN=%i",
-            out->payload_size, (int32_t)FAITH_MAX_FRAME_LEN);
+            out->payload_size, (int32_t)FAITH_MAX_CTS_FRAME_SIZE);
 
     return FAITH_ERR_TOO_LARGE;
   }
@@ -1957,7 +1957,7 @@ static int read_identity(const char *path, client_side_identity_t *ident) {
   return 1;
 }
 
-#define READ_IDENT "ident/23a2b2bf0b4457c86ad6127da2a1ae85.bin"
+#define READ_IDENT "ident/e5dbc4ceaab6baee77881c9eb5307a68.bin"
 static faith_status_code_t
 client_new_identity(client_side_identity_t *o_ident) {
   if (!o_ident)
@@ -1966,7 +1966,6 @@ client_new_identity(client_side_identity_t *o_ident) {
   /* Generate 128 bit random device & auth identities */
 
 #ifdef READ_IDENT
-  char buf[33];
   read_identity(READ_IDENT, o_ident);
 #else
   _FH_CHECK_RETURN(faith_random_bytes(o_ident->auth_id.bytes,
