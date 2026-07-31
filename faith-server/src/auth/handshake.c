@@ -135,8 +135,8 @@ faith_status_code_t auth_handle_challenge_response(
 
   /* Failure finding session, different from FAITH_ERR_NOT_FOUND */
   if (sess_rc == FAITH_ERR_INVALID) {
-    char sender_auth_id_hex[33];
-    char device_id_hex[33];
+    char sender_auth_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
+    char device_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
     _FH_CHECK_RETURN(
         faith_id128_to_hex(params->sender_auth_id.bytes, sender_auth_id_hex));
     _FH_CHECK_RETURN(
@@ -167,8 +167,8 @@ faith_status_code_t auth_handle_challenge_response(
       if (memcmp(params->public_key, sess->ident.public_key,
                  FAITH_ED25519_PUBLIC_KEY_SIZE) != 0) {
 
-        char sender_auth_id_hex[33];
-        char device_id_hex[33];
+        char sender_auth_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
+        char device_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
         _FH_CHECK_RETURN(faith_id128_to_hex(params->sender_auth_id.bytes,
                                             sender_auth_id_hex));
         _FH_CHECK_RETURN(
@@ -272,8 +272,8 @@ reject: {
   /* Client failed authorization */
   /* =============================== */
 
-  char sender_auth_id_hex[33];
-  char device_id_hex[33];
+  char sender_auth_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
+  char device_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
   _FH_CHECK_RETURN(
       faith_id128_to_hex(params->sender_auth_id.bytes, sender_auth_id_hex));
   _FH_CHECK_RETURN(faith_id128_to_hex(params->device_id.bytes, device_id_hex));
@@ -305,8 +305,8 @@ faith_status_code_t auth_authorize_client(
         &s->rt, &cl->ident.auth_id, &cl->ident.device_id, cl, public_key));
   }
 
-  char cl_auth_id_hex[33];
-  char cl_device_id_hex[33];
+  char cl_auth_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
+  char cl_device_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
   _FH_CHECK_RETURN(faith_id128_to_hex(cl->ident.auth_id.bytes, cl_auth_id_hex));
   _FH_CHECK_RETURN(
       faith_id128_to_hex(cl->ident.device_id.bytes, cl_device_id_hex));
@@ -342,8 +342,8 @@ auth_handshake_complete(server_state_t *s, client_conn_t *cl,
 
   server_set_client_state(s, cl, CLIENT_OPEN);
 
-  char auth_id_hex[33];
-  char device_id_hex[33];
+  char auth_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
+  char device_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
 
   faith_status_code_t _fh_result = FAITH_OK;
 

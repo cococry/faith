@@ -5,119 +5,15 @@
       "-Wall",
       "-Wextra",
       "-I../faith-proto/include",
-      "-c",
-      "-o",
-      "./build/obj/reactor_reactor.o",
-      "src/reactor/reactor.c"
-    ],
-    "directory": "/home/luca/Dev/faith/faith-server",
-    "file": "/home/luca/Dev/faith/faith-server/src/reactor/reactor.c",
-    "output": "/home/luca/Dev/faith/faith-server/build/obj/reactor_reactor.o"
-  },
-  {
-    "arguments": [
-      "/usr/bin/cc",
-      "-Wall",
-      "-Wextra",
-      "-I../faith-proto/include",
-      "-c",
-      "-o",
-      "./build/obj/logging_logging.o",
-      "src/logging/logging.c"
-    ],
-    "directory": "/home/luca/Dev/faith/faith-server",
-    "file": "/home/luca/Dev/faith/faith-server/src/logging/logging.c",
-    "output": "/home/luca/Dev/faith/faith-server/build/obj/logging_logging.o"
-  },
-  {
-    "arguments": [
-      "/usr/bin/cc",
-      "-Wall",
-      "-Wextra",
-      "-I../faith-proto/include",
-      "-c",
-      "-o",
-      "./build/obj/delivery_routing.o",
-      "src/delivery/routing.c"
-    ],
-    "directory": "/home/luca/Dev/faith/faith-server",
-    "file": "/home/luca/Dev/faith/faith-server/src/delivery/routing.c",
-    "output": "/home/luca/Dev/faith/faith-server/build/obj/delivery_routing.o"
-  },
-  {
-    "arguments": [
-      "/usr/bin/cc",
-      "-Wall",
-      "-Wextra",
-      "-I../faith-proto/include",
-      "-c",
-      "-o",
-      "./build/obj/delivery_events.o",
-      "src/delivery/events.c"
-    ],
-    "directory": "/home/luca/Dev/faith/faith-server",
-    "file": "/home/luca/Dev/faith/faith-server/src/delivery/events.c",
-    "output": "/home/luca/Dev/faith/faith-server/build/obj/delivery_events.o"
-  },
-  {
-    "arguments": [
-      "/usr/bin/cc",
-      "-Wall",
-      "-Wextra",
-      "-I../faith-proto/include",
-      "-c",
-      "-o",
-      "./build/obj/transport_conn.o",
-      "src/transport/conn.c"
-    ],
-    "directory": "/home/luca/Dev/faith/faith-server",
-    "file": "/home/luca/Dev/faith/faith-server/src/transport/conn.c",
-    "output": "/home/luca/Dev/faith/faith-server/build/obj/transport_conn.o"
-  },
-  {
-    "arguments": [
-      "/usr/bin/cc",
-      "-Wall",
-      "-Wextra",
-      "-I../faith-proto/include",
-      "-c",
-      "-o",
-      "./build/obj/server_dispatch.o",
-      "src/server/dispatch.c"
-    ],
-    "directory": "/home/luca/Dev/faith/faith-server",
-    "file": "/home/luca/Dev/faith/faith-server/src/server/dispatch.c",
-    "output": "/home/luca/Dev/faith/faith-server/build/obj/server_dispatch.o"
-  },
-  {
-    "arguments": [
-      "/usr/bin/cc",
-      "-Wall",
-      "-Wextra",
-      "-I../faith-proto/include",
-      "-c",
-      "-o",
-      "./build/obj/auth_handshake.o",
-      "src/auth/handshake.c"
-    ],
-    "directory": "/home/luca/Dev/faith/faith-server",
-    "file": "/home/luca/Dev/faith/faith-server/src/auth/handshake.c",
-    "output": "/home/luca/Dev/faith/faith-server/build/obj/auth_handshake.o"
-  },
-  {
-    "arguments": [
-      "/usr/bin/cc",
-      "-Wall",
-      "-Wextra",
-      "-I../faith-proto/include",
+      "-I../third_party/",
       "-c",
       "-o",
       "./build/obj/server_client_lifecycle.o",
       "src/server/client_lifecycle.c"
     ],
-    "directory": "/home/luca/Dev/faith/faith-server",
-    "file": "/home/luca/Dev/faith/faith-server/src/server/client_lifecycle.c",
-    "output": "/home/luca/Dev/faith/faith-server/build/obj/server_client_lifecycle.o"
+    "directory": "/home/luca/dev/faith/faith-server",
+    "file": "/home/luca/dev/faith/faith-server/src/server/client_lifecycle.c",
+    "output": "/home/luca/dev/faith/faith-server/build/obj/server_client_lifecycle.o"
   },
   {
     "arguments": [
@@ -125,14 +21,15 @@
       "-Wall",
       "-Wextra",
       "-I../faith-proto/include",
+      "-I../third_party/",
       "-c",
       "-o",
-      "./build/obj/server_sess_registry.o",
-      "src/server/sess_registry.c"
+      "./build/obj/transport_conn.o",
+      "src/transport/conn.c"
     ],
-    "directory": "/home/luca/Dev/faith/faith-server",
-    "file": "/home/luca/Dev/faith/faith-server/src/server/sess_registry.c",
-    "output": "/home/luca/Dev/faith/faith-server/build/obj/server_sess_registry.o"
+    "directory": "/home/luca/dev/faith/faith-server",
+    "file": "/home/luca/dev/faith/faith-server/src/transport/conn.c",
+    "output": "/home/luca/dev/faith/faith-server/build/obj/transport_conn.o"
   },
   {
     "arguments": [
@@ -140,14 +37,47 @@
       "-Wall",
       "-Wextra",
       "-I../faith-proto/include",
+      "-I../third_party/",
+      "-c",
+      "-o",
+      "./build/obj/reactor_reactor.o",
+      "src/reactor/reactor.c"
+    ],
+    "directory": "/home/luca/dev/faith/faith-server",
+    "file": "/home/luca/dev/faith/faith-server/src/reactor/reactor.c",
+    "output": "/home/luca/dev/faith/faith-server/build/obj/reactor_reactor.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/cc",
+      "-Wall",
+      "-Wextra",
+      "-I../faith-proto/include",
+      "-I../third_party/",
+      "-c",
+      "-o",
+      "./build/obj/delivery_events.o",
+      "src/delivery/events.c"
+    ],
+    "directory": "/home/luca/dev/faith/faith-server",
+    "file": "/home/luca/dev/faith/faith-server/src/delivery/events.c",
+    "output": "/home/luca/dev/faith/faith-server/build/obj/delivery_events.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/cc",
+      "-Wall",
+      "-Wextra",
+      "-I../faith-proto/include",
+      "-I../third_party/",
       "-c",
       "-o",
       "./build/obj/server_client_io.o",
       "src/server/client_io.c"
     ],
-    "directory": "/home/luca/Dev/faith/faith-server",
-    "file": "/home/luca/Dev/faith/faith-server/src/server/client_io.c",
-    "output": "/home/luca/Dev/faith/faith-server/build/obj/server_client_io.o"
+    "directory": "/home/luca/dev/faith/faith-server",
+    "file": "/home/luca/dev/faith/faith-server/src/server/client_io.c",
+    "output": "/home/luca/dev/faith/faith-server/build/obj/server_client_io.o"
   },
   {
     "arguments": [
@@ -155,14 +85,15 @@
       "-Wall",
       "-Wextra",
       "-I../faith-proto/include",
+      "-I../third_party/",
       "-c",
       "-o",
-      "./build/obj/transport_frame.o",
-      "src/transport/frame.c"
+      "./build/obj/auth_handshake.o",
+      "src/auth/handshake.c"
     ],
-    "directory": "/home/luca/Dev/faith/faith-server",
-    "file": "/home/luca/Dev/faith/faith-server/src/transport/frame.c",
-    "output": "/home/luca/Dev/faith/faith-server/build/obj/transport_frame.o"
+    "directory": "/home/luca/dev/faith/faith-server",
+    "file": "/home/luca/dev/faith/faith-server/src/auth/handshake.c",
+    "output": "/home/luca/dev/faith/faith-server/build/obj/auth_handshake.o"
   },
   {
     "arguments": [
@@ -170,14 +101,31 @@
       "-Wall",
       "-Wextra",
       "-I../faith-proto/include",
+      "-I../third_party/",
+      "-c",
+      "-o",
+      "./build/obj/server_sess_registry.o",
+      "src/server/sess_registry.c"
+    ],
+    "directory": "/home/luca/dev/faith/faith-server",
+    "file": "/home/luca/dev/faith/faith-server/src/server/sess_registry.c",
+    "output": "/home/luca/dev/faith/faith-server/build/obj/server_sess_registry.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/cc",
+      "-Wall",
+      "-Wextra",
+      "-I../faith-proto/include",
+      "-I../third_party/",
       "-c",
       "-o",
       "./build/obj/delivery_event_inbox.o",
       "src/delivery/event_inbox.c"
     ],
-    "directory": "/home/luca/Dev/faith/faith-server",
-    "file": "/home/luca/Dev/faith/faith-server/src/delivery/event_inbox.c",
-    "output": "/home/luca/Dev/faith/faith-server/build/obj/delivery_event_inbox.o"
+    "directory": "/home/luca/dev/faith/faith-server",
+    "file": "/home/luca/dev/faith/faith-server/src/delivery/event_inbox.c",
+    "output": "/home/luca/dev/faith/faith-server/build/obj/delivery_event_inbox.o"
   },
   {
     "arguments": [
@@ -185,14 +133,15 @@
       "-Wall",
       "-Wextra",
       "-I../faith-proto/include",
+      "-I../third_party/",
       "-c",
       "-o",
-      "./build/obj/transport_tls.o",
-      "src/transport/tls.c"
+      "./build/obj/server_dispatch.o",
+      "src/server/dispatch.c"
     ],
-    "directory": "/home/luca/Dev/faith/faith-server",
-    "file": "/home/luca/Dev/faith/faith-server/src/transport/tls.c",
-    "output": "/home/luca/Dev/faith/faith-server/build/obj/transport_tls.o"
+    "directory": "/home/luca/dev/faith/faith-server",
+    "file": "/home/luca/dev/faith/faith-server/src/server/dispatch.c",
+    "output": "/home/luca/dev/faith/faith-server/build/obj/server_dispatch.o"
   },
   {
     "arguments": [
@@ -200,14 +149,47 @@
       "-Wall",
       "-Wextra",
       "-I../faith-proto/include",
+      "-I../third_party/",
+      "-c",
+      "-o",
+      "./build/obj/delivery_routing.o",
+      "src/delivery/routing.c"
+    ],
+    "directory": "/home/luca/dev/faith/faith-server",
+    "file": "/home/luca/dev/faith/faith-server/src/delivery/routing.c",
+    "output": "/home/luca/dev/faith/faith-server/build/obj/delivery_routing.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/cc",
+      "-Wall",
+      "-Wextra",
+      "-I../faith-proto/include",
+      "-I../third_party/",
+      "-c",
+      "-o",
+      "./build/obj/transport_frame.o",
+      "src/transport/frame.c"
+    ],
+    "directory": "/home/luca/dev/faith/faith-server",
+    "file": "/home/luca/dev/faith/faith-server/src/transport/frame.c",
+    "output": "/home/luca/dev/faith/faith-server/build/obj/transport_frame.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/cc",
+      "-Wall",
+      "-Wextra",
+      "-I../faith-proto/include",
+      "-I../third_party/",
       "-c",
       "-o",
       "./build/obj/server_server.o",
       "src/server/server.c"
     ],
-    "directory": "/home/luca/Dev/faith/faith-server",
-    "file": "/home/luca/Dev/faith/faith-server/src/server/server.c",
-    "output": "/home/luca/Dev/faith/faith-server/build/obj/server_server.o"
+    "directory": "/home/luca/dev/faith/faith-server",
+    "file": "/home/luca/dev/faith/faith-server/src/server/server.c",
+    "output": "/home/luca/dev/faith/faith-server/build/obj/server_server.o"
   },
   {
     "arguments": [
@@ -215,14 +197,15 @@
       "-Wall",
       "-Wextra",
       "-I../faith-proto/include",
+      "-I../third_party/",
       "-c",
       "-o",
       "./build/obj/auth_device_link.o",
       "src/auth/device_link.c"
     ],
-    "directory": "/home/luca/Dev/faith/faith-server",
-    "file": "/home/luca/Dev/faith/faith-server/src/auth/device_link.c",
-    "output": "/home/luca/Dev/faith/faith-server/build/obj/auth_device_link.o"
+    "directory": "/home/luca/dev/faith/faith-server",
+    "file": "/home/luca/dev/faith/faith-server/src/auth/device_link.c",
+    "output": "/home/luca/dev/faith/faith-server/build/obj/auth_device_link.o"
   },
   {
     "arguments": [
@@ -230,14 +213,15 @@
       "-Wall",
       "-Wextra",
       "-I../faith-proto/include",
+      "-I../third_party/",
       "-c",
       "-o",
-      "./build/obj/commands_conversation.o",
-      "src/commands/conversation.c"
+      "./build/obj/logging_logging.o",
+      "src/logging/logging.c"
     ],
-    "directory": "/home/luca/Dev/faith/faith-server",
-    "file": "/home/luca/Dev/faith/faith-server/src/commands/conversation.c",
-    "output": "/home/luca/Dev/faith/faith-server/build/obj/commands_conversation.o"
+    "directory": "/home/luca/dev/faith/faith-server",
+    "file": "/home/luca/dev/faith/faith-server/src/logging/logging.c",
+    "output": "/home/luca/dev/faith/faith-server/build/obj/logging_logging.o"
   },
   {
     "arguments": [
@@ -245,14 +229,15 @@
       "-Wall",
       "-Wextra",
       "-I../faith-proto/include",
+      "-I../third_party/",
       "-c",
       "-o",
       "./build/obj/commands_dispatch.o",
       "src/commands/dispatch.c"
     ],
-    "directory": "/home/luca/Dev/faith/faith-server",
-    "file": "/home/luca/Dev/faith/faith-server/src/commands/dispatch.c",
-    "output": "/home/luca/Dev/faith/faith-server/build/obj/commands_dispatch.o"
+    "directory": "/home/luca/dev/faith/faith-server",
+    "file": "/home/luca/dev/faith/faith-server/src/commands/dispatch.c",
+    "output": "/home/luca/dev/faith/faith-server/build/obj/commands_dispatch.o"
   },
   {
     "arguments": [
@@ -260,13 +245,46 @@
       "-Wall",
       "-Wextra",
       "-I../faith-proto/include",
+      "-I../third_party/",
+      "-c",
+      "-o",
+      "./build/obj/transport_tls.o",
+      "src/transport/tls.c"
+    ],
+    "directory": "/home/luca/dev/faith/faith-server",
+    "file": "/home/luca/dev/faith/faith-server/src/transport/tls.c",
+    "output": "/home/luca/dev/faith/faith-server/build/obj/transport_tls.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/cc",
+      "-Wall",
+      "-Wextra",
+      "-I../faith-proto/include",
+      "-I../third_party/",
+      "-c",
+      "-o",
+      "./build/obj/commands_conversation.o",
+      "src/commands/conversation.c"
+    ],
+    "directory": "/home/luca/dev/faith/faith-server",
+    "file": "/home/luca/dev/faith/faith-server/src/commands/conversation.c",
+    "output": "/home/luca/dev/faith/faith-server/build/obj/commands_conversation.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/cc",
+      "-Wall",
+      "-Wextra",
+      "-I../faith-proto/include",
+      "-I../third_party/",
       "-c",
       "-o",
       "./build/obj/faithd.o",
       "src/faithd.c"
     ],
-    "directory": "/home/luca/Dev/faith/faith-server",
-    "file": "/home/luca/Dev/faith/faith-server/src/faithd.c",
-    "output": "/home/luca/Dev/faith/faith-server/build/obj/faithd.o"
+    "directory": "/home/luca/dev/faith/faith-server",
+    "file": "/home/luca/dev/faith/faith-server/src/faithd.c",
+    "output": "/home/luca/dev/faith/faith-server/build/obj/faithd.o"
   }
 ]

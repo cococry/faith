@@ -81,8 +81,8 @@ faith_status_code_t sess_registry_register_session(
   /* write pointer back to avoid stale pointers */
   hmput(rt->active_users, *auth_id, devmap);
 
-  char auth_id_hex[33];
-  char device_id_hex[33];
+  char auth_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
+  char device_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
 
   faith_status_code_t _fh_result = FAITH_OK;
   _FH_CHECK_DEFER(faith_id128_to_hex(auth_id->bytes, auth_id_hex));
@@ -159,8 +159,8 @@ sess_registry_unregister_session(sess_registry_state_t   *rt,
     hmput(rt->active_users, *auth_id, devmap);
   }
 
-  char auth_id_hex[33];
-  char device_id_hex[33];
+  char auth_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
+  char device_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
 
   _FH_CHECK_RETURN(faith_id128_to_hex(auth_id->bytes, auth_id_hex));
   _FH_CHECK_RETURN(faith_id128_to_hex(device_id->bytes, device_id_hex));
