@@ -2979,6 +2979,7 @@ impl VulkanRenderer {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn create_texture(
         &mut self,
         desc: TextureDesc,
@@ -3242,6 +3243,7 @@ impl VulkanRenderer {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn write_texture_recorded(
         &mut self,
         texture: TextureHandle,
@@ -3412,6 +3414,7 @@ impl VulkanRenderer {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn write_texture(
         &mut self,
         texture: TextureHandle,
@@ -3439,6 +3442,7 @@ impl VulkanRenderer {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn destroy_texture(&mut self, handle: TextureHandle) -> anyhow::Result<()> {
         let mut texture = self
             .textures

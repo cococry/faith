@@ -4,6 +4,7 @@ use std::path::Path;
 ///
 /// Pixels are stored as 8-bit RGBA values in row-major order, with four bytes
 /// per pixel: red, green, blue, and alpha.
+#[allow(dead_code)]
 pub struct ImageData {
     pub width: u32,
     pub height: u32,
@@ -16,6 +17,7 @@ impl ImageData {
     ///
     /// The returned image data always contains four 8-bit channels per pixel:
     /// red, green, blue, and alpha.
+    #[allow(dead_code)]
     pub fn load_rgba8(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let path = path.as_ref();
 

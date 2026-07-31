@@ -404,6 +404,7 @@ impl OpenGLRenderer {
         }
     }
 
+    #[allow(dead_code)]
     pub fn create_texture(
         &mut self,
         desc: TextureDesc,

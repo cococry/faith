@@ -224,6 +224,7 @@ pub trait GraphicsDevice {
 
     /// Creates a 2D texture and optionally uploads
     /// initial pixel data.
+    #[allow(dead_code)]
     fn create_texture(
         &mut self,
         desc: TextureDesc,
