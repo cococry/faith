@@ -3,7 +3,7 @@ mod graphics;
 mod platform;
 mod ui;
 
-use crate::{graphics::GraphicsDevice, ui::{TextRenderer, text::TextLayoutOptions}};
+use crate::{graphics::GraphicsDevice, ui::TextRenderer};
 
 use clap::Parser;
 use cli::Cli;
@@ -46,7 +46,6 @@ fn main() -> anyhow::Result<()> {
     text.load_font("assets/NotoSansArabic-Regular.ttf", 24)?;
     text.load_font("assets/NotoSansHebrew-Regular.ttf", 24)?;
 
-
     let mut running = true;
 
     while running {
@@ -81,7 +80,8 @@ fn main() -> anyhow::Result<()> {
             ui.begin(width, height);
 
             text.render(
-                50.0, 50.0,
+                50.0,
+                50.0,
                 "Faith Instant Messaging",
                 bold_font,
                 &mut renderer,
@@ -89,23 +89,28 @@ fn main() -> anyhow::Result<()> {
             )?;
 
             let dim1 = text.measure("❌️", base_font)?;
-            text.render(width as f32 - dim1.width - 50.0, 50.0, "❌️", base_font, &mut renderer, &mut ui)?;
+            text.render(
+                width as f32 - dim1.width - 50.0,
+                50.0,
+                "❌️",
+                base_font,
+                &mut renderer,
+                &mut ui,
+            )?;
 
-            let dim = text.measure("Send message", base_font)?; 
+            let dim = text.measure("Send message", base_font)?;
             println!("{}x{}", dim.width, dim.height);
-   text.render(
-                (width as f32 - dim.width) / 2.0, height as f32 - dim.height - 50.0,
+            text.render(
+                (width as f32 - dim.width) / 2.0,
+                height as f32 - dim.height - 50.0,
                 "Send message",
                 base_font,
                 &mut renderer,
                 &mut ui,
             )?;
 
-
-
             ui.end(&mut renderer)?;
             renderer.end_frame()?;
-
         }
     }
     Ok(())

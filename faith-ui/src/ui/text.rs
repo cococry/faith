@@ -113,6 +113,7 @@ struct TextLayoutKey {
 /// information after layout computation.
 /// Used to render layouted text (render_wrapped)
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TextLayout {
     lines: Vec<TextLine>,
     paragraph_runs: Arc<[ShapedTextRun]>,
@@ -183,6 +184,7 @@ struct ClusterGroup {
 /// `x_advance` stores the scaled pixel advance of this
 /// slice.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct RunSlice {
     run_index: usize,
     glyph_range: std::ops::Range<usize>,
@@ -196,6 +198,7 @@ struct RunSlice {
 /// right-to-left shaped run and is used for horizontal
 /// placement/alignment.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct TextLine {
     slices: Vec<RunSlice>,
     width: f32,
@@ -790,6 +793,7 @@ impl TextRenderer {
         Ok(font)
     }
 
+    #[allow(dead_code)]
     fn render_run_slice<G: GraphicsDevice>(
         &mut self,
         run_x: f32,
@@ -1389,7 +1393,6 @@ impl TextRenderer {
         Ok(layout)
     }
 
-
     pub fn measure_with_options(
         &mut self,
         text: &str,
@@ -1404,7 +1407,13 @@ impl TextRenderer {
         text: &str,
         font_handle: FontHandle,
     ) -> anyhow::Result<Arc<TextLayout>> {
-        self.measure_with_options(text, font_handle, TextLayoutOptions{ max_width: std::f32::MAX})
+        self.measure_with_options(
+            text,
+            font_handle,
+            TextLayoutOptions {
+                max_width: f32::MAX,
+            },
+        )
     }
 
     fn is_leading_forbidden_token(&self, token: &str) -> bool {
@@ -1434,6 +1443,7 @@ impl TextRenderer {
     /// Lays out the text into wrapped lines using
     /// `max_width` and renders the resulting layout
     /// at the given position.
+    #[allow(dead_code)]
     pub fn render_wrapped<G: GraphicsDevice>(
         &mut self,
         xy: [f32; 2],

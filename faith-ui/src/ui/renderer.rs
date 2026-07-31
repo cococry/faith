@@ -50,6 +50,7 @@ pub enum ImageStorage {
 #[derive(Debug, Clone, Copy)]
 pub struct Image {
     pub storage: ImageStorage,
+    #[allow(dead_code)]
     pub size: [u32; 2],
 }
 
@@ -428,6 +429,7 @@ impl UIRenderer {
     ///
     /// Consecutive quads using the same dedicated
     /// texture are batched into one draw range.
+    #[allow(dead_code)]
     pub fn raw_quad_dedicated(
         &mut self,
         texture_handle: TextureHandle,
@@ -484,8 +486,9 @@ impl UIRenderer {
     ///
     /// The image is rendered using its original
     /// loaded size and full white tint.
+    #[allow(dead_code)]
     pub fn image(&mut self, x: f32, y: f32, w: f32, h: f32, image: Image) -> anyhow::Result<()> {
-        self.image_tined(x, y, w, h, image, Color::rgba(1.0, 1.0, 1.0, 1.0))
+        self.image_tinted(x, y, w, h, image, Color::rgba(1.0, 1.0, 1.0, 1.0))
     }
 
     /// Submits a tinted image to be rendered
@@ -493,7 +496,8 @@ impl UIRenderer {
     ///
     /// The image is rendered using its original
     /// loaded size.
-    pub fn image_tined(
+    #[allow(dead_code)]
+    pub fn image_tinted(
         &mut self,
         x: f32,
         y: f32,
@@ -634,6 +638,7 @@ impl UIRenderer {
     /// uploaded into the shared atlas texture
     /// array. Larger images are stored in a
     /// dedicated texture.
+    #[allow(dead_code)]
     pub fn load_image<G: GraphicsDevice>(
         &mut self,
         gpu: &mut G,

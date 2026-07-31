@@ -13,6 +13,7 @@ struct GlBuffer {
 /// Type of OpenGL texture resource.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GlTextureKind {
+    #[allow(dead_code)]
     Texture2D,
     Texture2DArray,
 }

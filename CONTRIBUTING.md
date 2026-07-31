@@ -11,7 +11,7 @@ git checkout -b my-change
 Before committing, run the local check script:
 
 ```console
-./check.sh
+./scripts/check.sh
 ```
 
 This runs the same kind of checks used by CI, including formatting, Clippy and tests. Please fix any errors before opening a pull request.

@@ -29,6 +29,7 @@ pub struct VulkanPipeline {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VulkanTextureKind {
+    #[allow(dead_code)]
     Texture2D,
     Texture2DArray,
 }
