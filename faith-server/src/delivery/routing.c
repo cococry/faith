@@ -26,7 +26,7 @@ delivery_route_envelope_to_auth_id(server_state_t *s, client_conn_t *cl_sender,
       &s->rt, recipient_auth_id, &recipient_user));
   if (!recipient_user) {
 
-    char recipient_auth_id_hex[33];
+    char recipient_auth_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
 
     _FH_CHECK_RETURN(
         faith_id128_to_hex(recipient_auth_id->bytes, recipient_auth_id_hex));
@@ -41,7 +41,7 @@ delivery_route_envelope_to_auth_id(server_state_t *s, client_conn_t *cl_sender,
     return FAITH_OK;
   }
 
-  char recipient_auth_id_hex[33];
+  char recipient_auth_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
 
   _FH_CHECK_RETURN(
       faith_id128_to_hex(recipient_auth_id->bytes, recipient_auth_id_hex));
@@ -55,7 +55,7 @@ delivery_route_envelope_to_auth_id(server_state_t *s, client_conn_t *cl_sender,
         _FH_CHECK(
             server_queue_envelope_or_mark_dead(s, recipient_cl, &routing_envl));
 
-        char recipient_device_id_hex[33];
+        char recipient_device_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
         _FH_CHECK_RETURN(faith_id128_to_hex(recipient_cl->ident.device_id.bytes,
                                             recipient_device_id_hex));
 

@@ -80,8 +80,8 @@ device_link_handle_device_response(server_state_t *s, client_conn_t *cl,
   }
 
   if (!cl->authorized) {
-    char auth_id_hex[33];
-    char device_id_hex[33];
+    char auth_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
+    char device_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
     _FH_CHECK_RETURN(faith_id128_to_hex(cl->ident.auth_id.bytes, auth_id_hex));
     _FH_CHECK_RETURN(
         faith_id128_to_hex(cl->ident.device_id.bytes, device_id_hex));
@@ -99,8 +99,8 @@ device_link_handle_device_response(server_state_t *s, client_conn_t *cl,
   }
 
   if (!req_cl || req_cl->closing) {
-    char req_auth_id_hex[33];
-    char req_device_id_hex[33];
+    char req_auth_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
+    char req_device_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
     _FH_CHECK_RETURN(faith_id128_to_hex(req->auth_id.bytes, req_auth_id_hex));
     _FH_CHECK_RETURN(
         faith_id128_to_hex(req->device_id_new.bytes, req_device_id_hex));
@@ -299,8 +299,8 @@ defer: {
       s, req_cl, FAITH_DISCONNECT_AUTH_FAILED, FAITH_CLIENT_RECONNECT_FORBIDDEN,
       0, 0, buf));
 
-  char auth_id_hex[33];
-  char device_id_hex[33];
+  char auth_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
+  char device_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
   _FH_CHECK_RETURN(faith_id128_to_hex(client_id.bytes, auth_id_hex));
   _FH_CHECK_RETURN(faith_id128_to_hex(device_id_new.bytes, device_id_hex));
 
@@ -332,8 +332,8 @@ device_link_new_device(server_state_t *s, client_conn_t *cl,
     return FAITH_ERR_BAD_ENVELOPE;
 
   if (g_verbose_logging) {
-    char cl_auth_id_hex[33];
-    char new_device_id_hex[33];
+    char cl_auth_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
+    char new_device_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
     _FH_CHECK_RETURN(
         faith_id128_to_hex(params->sender_auth_id.bytes, cl_auth_id_hex));
     _FH_CHECK_RETURN(
@@ -366,10 +366,10 @@ device_link_new_device(server_state_t *s, client_conn_t *cl,
             &params->device_id, &req));
 
         if (_fh_rc != FAITH_OK || !req) {
-          char sender_auth_id_hex[33];
+          char sender_auth_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
           _FH_CHECK_RETURN(faith_id128_to_hex(params->sender_auth_id.bytes,
                                               sender_auth_id_hex));
-          char device_id_hex[33];
+          char device_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
           _FH_CHECK_RETURN(
               faith_id128_to_hex(params->device_id.bytes, device_id_hex));
           nob_log(ERROR,
@@ -448,8 +448,8 @@ faith_status_code_t device_link_queue_request(
     return FAITH_ERR_INVALID;
 
   if (!recipient_cl->authorized) {
-    char auth_id_hex[33];
-    char device_id_hex[33];
+    char auth_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
+    char device_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
     _FH_CHECK_RETURN(
         faith_id128_to_hex(recipient_cl->ident.auth_id.bytes, auth_id_hex));
     _FH_CHECK_RETURN(
@@ -464,8 +464,8 @@ faith_status_code_t device_link_queue_request(
   }
 
   if (recipient_cl->pending_device_link_req != NULL) {
-    char auth_id_hex[33];
-    char device_id_hex[33];
+    char auth_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
+    char device_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
     _FH_CHECK_RETURN(
         faith_id128_to_hex(recipient_cl->ident.auth_id.bytes, auth_id_hex));
     _FH_CHECK_RETURN(
