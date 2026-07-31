@@ -9,7 +9,7 @@
 **faith is an instant messenger optimized for security, 
 native performance & user customization.**
 
-The ***faith*** [<ins>client</ins>](https://github.com/cococry/faith/tree/main/src) is designed around native, GPU accelerated rendering
+The ***faith*** [<ins>UI client</ins>](https://github.com/cococry/faith/tree/main/faith-ui) is designed around native, GPU accelerated rendering
 of arbitrarily large text message scrolls.
 
 It implements a custom text layout and rendering engine, supporting
