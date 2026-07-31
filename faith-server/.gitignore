@@ -2,3 +2,5 @@ chain.pem
 pkey.pem 
 nob 
 build
+compile_commands.json
+.cache/
