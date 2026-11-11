@@ -2,6 +2,7 @@
 
 #include "../server/client_io.h"
 #include "device_link.h"
+#include "../server/client_lifecycle.h"
 #include <faith-proto/codec/auth.h>
 #include <faith-proto/codec/codec.h>
 #include <faith-proto/codec/signatures.h>
@@ -126,74 +127,20 @@ faith_status_code_t auth_handle_challenge_response(
     return FAITH_ERR_INVALID;
   }
 
-  uint8_t *verification_public_key = NULL;
-
-  /* Looking for the mapped session of the auth ID, device ID pair */
+  uint8_t *verification_public_key = params->public_key;
   client_device_session_data_t *sess = NULL;
-  faith_status_code_t           sess_rc = sess_registry_get_session(
+  faith_status_code_t sess_rc = sess_registry_get_session(
       &s->rt, &params->sender_auth_id, &params->device_id, &sess);
 
-  /* Failure finding session, different from FAITH_ERR_NOT_FOUND */
-  if (sess_rc == FAITH_ERR_INVALID) {
-    char sender_auth_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
-    char device_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
-    _FH_CHECK_RETURN(
-        faith_id128_to_hex(params->sender_auth_id.bytes, sender_auth_id_hex));
-    _FH_CHECK_RETURN(
-        faith_id128_to_hex(params->device_id.bytes, device_id_hex));
-    nob_log(ERROR,
-            "[%s: client=%" PRIu64
-            " fd=%i] Failed to get routing session (auth_id=%s, device_id=%s).",
-            _MODULE_NAME, cl->conn.id, cl->conn.fd, sender_auth_id_hex,
-            device_id_hex);
+  if (sess_rc != FAITH_OK && sess_rc != FAITH_ERR_NOT_FOUND)
     return sess_rc;
-  }
 
-  bool handle_newly_joined_device = false;
+  if (sess) {
+    if (memcmp(params->public_key, sess->ident.public_key,
+               FAITH_ED25519_PUBLIC_KEY_SIZE) != 0)
+      return FAITH_ERR_UNAUTHORIZED;
 
-  if (sess_rc == FAITH_ERR_NOT_FOUND) {
-    /* Session not registered yet, use sent public key for verification */
-    verification_public_key = params->public_key;
-  } else if (sess_rc == FAITH_OK) {
-    /* Session already registered */
-    if (!sess) {
-      /* This means the auth ID is already registered but this is a new
-       * device that wants to join. */
-      handle_newly_joined_device = true;
-      verification_public_key = params->public_key;
-    } else {
-      /* Check if the sent public key and the public key of the registered
-       * identity match */
-      if (memcmp(params->public_key, sess->ident.public_key,
-                 FAITH_ED25519_PUBLIC_KEY_SIZE) != 0) {
-
-        char sender_auth_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
-        char device_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
-        _FH_CHECK_RETURN(faith_id128_to_hex(params->sender_auth_id.bytes,
-                                            sender_auth_id_hex));
-        _FH_CHECK_RETURN(
-            faith_id128_to_hex(params->device_id.bytes, device_id_hex));
-        nob_log(ERROR,
-                "[%s: client=%" PRIu64
-                " fd=%i] Rejected requested routing session "
-                "(auth_id=%s, device_id=%s). "
-                "Invalid public key sent.",
-                _MODULE_NAME, cl->conn.id, cl->conn.fd, sender_auth_id_hex,
-                device_id_hex);
-        return FAITH_ERR_UNAUTHORIZED;
-      }
-
-      /* Passed, fine. Use public key of the already verified session identity
-       * for verification. We do not trust the sent public key. */
-      verification_public_key = sess->ident.public_key;
-    }
-  } else {
-    /* Propagate unexpected routing errors. */
-    return sess_rc;
-  }
-
-  if (!verification_public_key) {
-    return FAITH_ERR_INVALID;
+    verification_public_key = sess->ident.public_key;
   }
 
   uint8_t client_signature[FAITH_ED25519_SIGNATURE_SIZE] = {0};
@@ -254,14 +201,28 @@ faith_status_code_t auth_handle_challenge_response(
   /* Client passed authorization */
   /* =============================== */
 
-  if (handle_newly_joined_device) {
-    _FH_CHECK_RETURN(device_link_new_device(s, cl, params));
+  if (!sess || faith_now_ms() - sess->verified_at_ms >= 30000) {
+    db_identity_job_t job = {
+        .client_id = cl->conn.id,
+        .auth_id = params->sender_auth_id,
+        .device.device_id = params->device_id,
+    };
+    memcpy(job.device.public_key, params->public_key,
+           FAITH_ED25519_PUBLIC_KEY_SIZE);
+
+    /* Submit the database job to resolve the client's identity (creating it if
+     * the auth-id is not already a persistent identity in the DB, resolving the
+     * already present entry if it exists, or failing if additional checks
+     * failed) */
+    _FH_CHECK_RETURN(db_identity_submit(&s->identity_worker, &job));
+
+    server_set_client_state(s, cl, CLIENT_WAIT_FOR_IDENTITY);
     return FAITH_OK;
   }
 
-  _FH_CHECK_RETURN(
-      auth_authorize_client(s, cl, &params->sender_auth_id, &params->device_id,
-                            verification_public_key, sess == NULL));
+  _FH_CHECK_RETURN(auth_authorize_client(
+      s, cl, &params->sender_auth_id, &params->device_id,
+      verification_public_key, false));
 
   _FH_CHECK_RETURN(delivery_queue_pending_events(s, cl));
 
@@ -294,16 +255,28 @@ faith_status_code_t auth_authorize_client(
   if (!s || !cl || cl->closing || !auth_id || !device_id || !public_key)
     return FAITH_ERR_INVALID;
 
-  cl->authorized = 1;
-
-  /* Complete the handshake */
-  _FH_CHECK_RETURN(auth_handshake_complete(s, cl, auth_id, device_id));
+  cl->ident.auth_id = *auth_id;
+  cl->ident.device_id = *device_id;
 
   if (register_session) {
-    /* Register client session */
     _FH_CHECK_RETURN(sess_registry_register_session(
-        &s->rt, &cl->ident.auth_id, &cl->ident.device_id, cl, public_key));
+        &s->rt, auth_id, device_id, cl, public_key));
+  } else {
+    client_device_session_data_t *sess = NULL;
+    _FH_CHECK_RETURN(sess_registry_get_session(
+        &s->rt, auth_id, device_id, &sess));
+
+    if (!sess)
+      return FAITH_ERR_UNAUTHORIZED;
+
+    if (sess->conn && sess->conn != cl)
+      return FAITH_ERR_UNAUTHORIZED;
+
+    sess->conn = cl;
   }
+
+  cl->authorized = 1;
+  _FH_CHECK_RETURN(auth_handshake_complete(s, cl, auth_id, device_id));
 
   char cl_auth_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
   char cl_device_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
@@ -370,4 +343,53 @@ faith_status_code_t auth_queue_auth_pending(server_state_t *s,
       s, recipient_cl, &device_auth_pending_envl));
 
   return FAITH_OK;
+}
+
+void auth_identity_complete(server_state_t *s) {
+  uint64_t count;
+  while (read(s->identity_worker.event_fd, &count, sizeof(count)) < 0 &&
+         errno == EINTR) {
+  }
+
+
+  db_identity_job_t job;
+
+  while (db_identity_take(&s->identity_worker, &job)) {
+    client_conn_t *cl = s->clients;
+
+    while (cl && cl->conn.id != job.client_id)
+      cl = cl->next;
+
+    if (!cl || cl->closing || cl->close_after_flush ||
+        cl->state != CLIENT_WAIT_FOR_IDENTITY)
+      continue;
+
+    faith_status_code_t rc = job.status;
+
+    if (rc == FAITH_ERR_NOT_FOUND && !job.link) {
+      server_set_client_state(s, cl, CLIENT_WAIT_FOR_CHALLENGE_RESPONSE);
+      rc = device_link_new_device(s, cl, &cl->temp_handshake_params);
+    } else if (rc == FAITH_OK) {
+      client_device_session_data_t *sess = NULL;
+      sess_registry_get_session(&s->rt, &job.auth_id,
+                                &job.device.device_id, &sess);
+      if (sess)
+        sess->verified_at_ms = faith_now_ms();
+
+      rc = auth_authorize_client(s, cl, &job.auth_id, &job.device.device_id,
+                                 job.device.public_key, sess == NULL);
+
+      if (rc == FAITH_OK)
+        rc = delivery_queue_pending_events(s, cl);
+    }
+
+    if (rc != FAITH_OK) {
+      server_client_queue_disconnect(
+          s, cl, FAITH_DISCONNECT_AUTH_FAILED,
+          FAITH_CLIENT_RECONNECT_FORBIDDEN, 0, 0,
+          "Identity verification failed.");
+    }
+
+
+  }
 }

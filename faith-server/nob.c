@@ -113,6 +113,9 @@ static const char *faithd_sources[] = {
     "src/transport/tls.c",
     "src/commands/conversation.c",
     "src/commands/dispatch.c",
+    "src/db/conn.c",
+    "src/db/device_repo.c",
+    "src/db/identity.c",
     "src/faithd.c",
 };
 
@@ -134,6 +137,9 @@ static const char *faithd_objects[] = {
     BUILD_FOLDER "obj/transport_tls.o",
     BUILD_FOLDER "obj/commands_conversation.o",
     BUILD_FOLDER "obj/commands_dispatch.o",
+    BUILD_FOLDER "obj/db_conn.o",
+    BUILD_FOLDER "obj/db_device_repo.o",
+    BUILD_FOLDER "obj/db_identity.o",
     BUILD_FOLDER "obj/faithd.o",
 };
 
@@ -143,7 +149,7 @@ static bool compile_source_async(Procs *procs, const char *source,
 
   nob_cc(&cmd);
   nob_cc_flags(&cmd);
-  nob_cmd_append(&cmd, "-I" FAITH_PROTO_INCLUDE, "-I../third_party/", "-c", source, "-o", object);
+  nob_cmd_append(&cmd, "-I/usr/include/postgresql", "-I" FAITH_PROTO_INCLUDE, "-I../third_party/", "-c", source, "-o", object);
 
   if (!nob_cmd_run(&cmd, .async = procs, .max_procs = 0)) {
     nob_cmd_free(cmd);
@@ -193,7 +199,7 @@ bool build(void) {
   for (size_t i = 0; i < NOB_ARRAY_LEN(faithd_objects); ++i)
     nob_cmd_append(&cmd, faithd_objects[i]);
 
-  nob_cmd_append(&cmd, FAITH_PROTO_LIBRARY, "-lssl", "-lcrypto");
+  nob_cmd_append(&cmd, FAITH_PROTO_LIBRARY, "-lssl", "-lcrypto", "-lpq", "-pthread");
 
   if (!nob_cmd_run(&cmd))
     goto cleanup;

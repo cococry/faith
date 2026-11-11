@@ -66,6 +66,7 @@ faith_status_code_t sess_registry_register_session(
   }
 
   sess->conn = cl;
+  sess->verified_at_ms = faith_now_ms();
 
   /* init event inbox for this device */
   device_event_inbox_init(&sess->inbox);

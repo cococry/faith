@@ -24,3 +24,5 @@ faith_status_code_t auth_handshake_complete(server_state_t          *s,
 
 faith_status_code_t auth_queue_auth_pending(server_state_t *s,
                                             client_conn_t  *recipient_cl);
+
+void auth_identity_complete(server_state_t *s);

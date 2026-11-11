@@ -8,7 +8,9 @@ faith_status_code_t db_connect(const char *connection_str, faith_db_t *o_db) {
 
   memset(o_db, 0, sizeof(*o_db));
 
-  o_db->conn = PQconnectdb(connection_str);
+  const char *keywords[] = {"dbname", "connect_timeout", NULL};
+  const char *values[] = {connection_str, "3", NULL};
+  o_db->conn = PQconnectdbParams(keywords, values, 1);
   if (!o_db->conn) {
     return FAITH_ERR_NOMEM;
   }

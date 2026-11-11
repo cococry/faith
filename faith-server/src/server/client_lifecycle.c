@@ -113,7 +113,7 @@ faith_status_code_t server_close_client(server_state_t *s,
     _FH_CHECK_RETURN(sess_registry_get_session(&s->rt, &cl->ident.auth_id,
                                                &cl->ident.device_id, &sess));
 
-    if (sess) {
+    if (sess && sess->conn == cl) {
       sess->conn = NULL;
     }
   }
