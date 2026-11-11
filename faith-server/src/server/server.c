@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 
 #include "server.h"
+#include "../auth/handshake.h"
 #include "../logging/logging.h"
 #include "client_io.h"
 #include "client_lifecycle.h"
@@ -97,7 +98,8 @@ static void handle_client_event(server_state_t *s, client_conn_t *cl,
     }
   } else if (cl->state == CLIENT_OPEN || cl->state == CLIENT_WAIT_FOR_HELLO ||
              cl->state == CLIENT_WAIT_FOR_CHALLENGE_RESPONSE ||
-             cl->state == CLIENT_WAIT_FOR_DEVICE_LINK_RESPONSE) {
+             cl->state == CLIENT_WAIT_FOR_DEVICE_LINK_RESPONSE ||
+             cl->state == CLIENT_WAIT_FOR_IDENTITY) {
     if ((events & REACTOR_READABLE) &&
         server_drive_client_read(s, cl) != FAITH_OK) {
       dead = true;
@@ -222,6 +224,8 @@ faith_status_code_t server_init(server_state_t *s, const server_config_t *cfg) {
     return FAITH_ERR_INVALID;
 
   s->cfg = *cfg;
+  s->listen_source.fd = -1;
+  s->reactor.fd = -1;
 
   nob_set_log_handler(faith_log_handler);
 
@@ -243,6 +247,16 @@ faith_status_code_t server_init(server_state_t *s, const server_config_t *cfg) {
   _FH_CHECK_DEFER(tls_init(&tls_cfg, &s->tls));
 
   _FH_CHECK_DEFER(reactor_init(&s->reactor));
+  const char *connection_str = getenv("FAITH_DATABASE_URL");
+  _FH_CHECK_DEFER(db_identity_worker_init(
+      &s->identity_worker, connection_str ? connection_str : "connect_timeout=3"));
+  s->identity_source = (reactor_source_t){
+      .fd = s->identity_worker.event_fd,
+      .type = REACTOR_SOURCE_IDENTITY,
+      .interests = REACTOR_READABLE,
+  };
+  _FH_CHECK_DEFER(reactor_add(&s->reactor, &s->identity_source));
+
   int listen_fd = init_listener(s->cfg.listen_port);
   if (listen_fd < 0) {
     server_destroy(s);
@@ -313,6 +327,10 @@ faith_status_code_t server_loop(server_state_t *s) {
       }
 
       switch (src->type) {
+      case REACTOR_SOURCE_IDENTITY:
+        auth_identity_complete(s);
+        break;
+
       case REACTOR_SOURCE_LISTENER:
         if (!shutting_down) {
           accept_clients(s);
@@ -345,6 +363,13 @@ faith_status_code_t server_destroy(server_state_t *s) {
   while (s->clients) {
     struct client_conn_t *cl = s->clients;
     server_close_client(s, &cl);
+  }
+
+  db_identity_worker_destroy(&s->identity_worker);
+
+  if (s->listen_source.fd >= 0) {
+    close(s->listen_source.fd);
+    s->listen_source.fd = -1;
   }
 
   _FH_CHECK_SCOPED(sess_registry_destroy(&s->rt));

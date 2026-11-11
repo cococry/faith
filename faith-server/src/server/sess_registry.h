@@ -10,6 +10,7 @@ typedef struct {
   struct client_conn_t       *conn;
   application_user_identity_t ident;
   device_event_inbox_t        inbox;
+  uint64_t verified_at_ms;
 } client_device_session_data_t;
 
 typedef struct {

@@ -24,9 +24,7 @@ faith_status_code_t db_device_repo_insert(faith_db_t             *db,
                    "INSERT INTO devices (auth_id, device_id, public_key) "
                    "VALUES ($1, $2, $3) "
                    "ON CONFLICT (auth_id, device_id) "
-                   "DO UPDATE SET "
-                   "    public_key = EXCLUDED.public_key, "
-                   "    revoked_at = NULL",
+                   "DO NOTHING RETURNING device_id",
                    3, NULL, values, lengths, formats, 0);
 
   if (!res)
@@ -34,7 +32,7 @@ faith_status_code_t db_device_repo_insert(faith_db_t             *db,
 
   faith_status_code_t _fh_result = FAITH_OK;
 
-  if (PQresultStatus(res) != PGRES_COMMAND_OK) {
+  if (PQresultStatus(res) != PGRES_TUPLES_OK) {
     char auth_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1] = {0};
     _FH_CHECK(faith_id128_to_hex(auth_id->bytes, auth_id_hex));
     if (_fh_rc == FAITH_OK) {
@@ -47,6 +45,9 @@ faith_status_code_t db_device_repo_insert(faith_db_t             *db,
 
     _FH_RETURN_DEFER(FAITH_ERR_IO);
   }
+
+  if (PQntuples(res) != 1)
+    _fh_result = FAITH_ERR_UNAUTHORIZED;
 
 defer:
   PQclear(res);
@@ -145,7 +146,7 @@ db_device_repo_get_device_list(faith_db_t *db, const faith_auth_id_t *auth_id,
                                "SELECT device_id, public_key "
                                "FROM devices "
                                "WHERE auth_id = $1 "
-                               "  AND revoked_at IS NULL "
+                               "  AND revoke_at IS NULL "
                                "ORDER BY registered_at, device_id",
                                1, NULL, values, lengths, formats, 1);
 

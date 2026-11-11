@@ -259,9 +259,22 @@ device_link_handle_device_response(server_state_t *s, client_conn_t *cl,
     break;
   }
   case FAITH_ENVELOPE_DEVICE_AUTH_APPROVE:
-    _FH_CHECK_DEFER(auth_authorize_client(s, req_cl, &req->auth_id,
-                                          &req->device_id_new,
-                                          req->public_key_new_device, 1));
+    {
+      db_identity_job_t job = {
+          .client_id = req_cl->conn.id,
+          .auth_id = req->auth_id,
+          .device.device_id = req->device_id_new,
+          .link = true,
+          .approver_id = cl->ident.device_id,
+      };
+      memcpy(job.device.public_key, req->public_key_new_device,
+             FAITH_ED25519_PUBLIC_KEY_SIZE);
+      memcpy(job.approver_key, sess->ident.public_key,
+             FAITH_ED25519_PUBLIC_KEY_SIZE);
+      _FH_CHECK_DEFER(db_identity_submit(&s->identity_worker, &job));
+      server_set_client_state(s, req_cl, CLIENT_WAIT_FOR_IDENTITY);
+    }
+
     break;
   default:
     return FAITH_ERR_UNREACHABLE;
@@ -275,7 +288,10 @@ device_link_handle_device_response(server_state_t *s, client_conn_t *cl,
   faith_status_code_t device_loop_rc = FAITH_OK;
   _FH_FOR_EACH_AUTH_DEVICE_CONNECTION(s, &cl->ident.auth_id, recipient,
                                       device_loop_rc,
-                                      { device_link_remove_request(cl); });
+                                      {
+        if (recipient->pending_device_link_conn == req_cl)
+          device_link_remove_request(recipient);
+      });
 
   return device_loop_rc == FAITH_OK ? rc : device_loop_rc;
 
