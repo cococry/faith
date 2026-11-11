@@ -175,7 +175,7 @@ impl FontManager {
             let row_start = row * pitch;
             let row_data = &src[row_start..row_start + width * 4];
 
-            for px in row_data.chunks_exact(4) {
+            for px in row_data.as_chunks::<4>().0 {
                 let b = px[0] as u32;
                 let g = px[1] as u32;
                 let r = px[2] as u32;
