@@ -116,6 +116,8 @@ static const char *faithd_sources[] = {
     "src/db/conn.c",
     "src/db/device_repo.c",
     "src/db/identity.c",
+    "src/db/helpers.c",
+    "src/db/events_repo.c",
     "src/faithd.c",
 };
 
@@ -140,6 +142,8 @@ static const char *faithd_objects[] = {
     BUILD_FOLDER "obj/db_conn.o",
     BUILD_FOLDER "obj/db_device_repo.o",
     BUILD_FOLDER "obj/db_identity.o",
+    BUILD_FOLDER "obj/db_helpers.o",
+    BUILD_FOLDER "obj/db_events_repo.o",
     BUILD_FOLDER "obj/faithd.o",
 };
 

@@ -271,7 +271,7 @@ device_link_handle_device_response(server_state_t *s, client_conn_t *cl,
              FAITH_ED25519_PUBLIC_KEY_SIZE);
       memcpy(job.approver_key, sess->ident.public_key,
              FAITH_ED25519_PUBLIC_KEY_SIZE);
-      _FH_CHECK_DEFER(db_identity_submit(&s->identity_worker, &job));
+      _FH_CHECK_DEFER(auth_identity_submit(s, &job));
       server_set_client_state(s, req_cl, CLIENT_WAIT_FOR_IDENTITY);
     }
 

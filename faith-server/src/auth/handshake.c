@@ -11,6 +11,51 @@
 
 #define _MODULE_NAME "auth/handshake"
 
+static faith_status_code_t _identity_run(faith_db_t *db, void *data);
+static void                _identity_complete(void *owner, void *data,
+                                              faith_status_code_t status);
+
+static faith_status_code_t _identity_run(faith_db_t *db, void *data) {
+  return db_identity_resolve(db, data);
+}
+
+static void _identity_complete(void *owner, void *data,
+                               faith_status_code_t status) {
+  server_state_t    *s = owner;
+  db_identity_job_t *job = data;
+  job->status = status;
+  client_conn_t *cl = s->clients;
+
+  while (cl && cl->conn.id != job->client_id)
+    cl = cl->next;
+
+  if (!cl || cl->closing || cl->close_after_flush ||
+      cl->state != CLIENT_WAIT_FOR_IDENTITY)
+    return;
+
+  faith_status_code_t rc = job->status;
+
+  if (rc == FAITH_ERR_NOT_FOUND && !job->link) {
+    server_set_client_state(s, cl, CLIENT_WAIT_FOR_CHALLENGE_RESPONSE);
+    rc = device_link_new_device(s, cl, &cl->temp_handshake_params);
+  } else if (rc == FAITH_OK) {
+    client_device_session_data_t *sess = NULL;
+    sess_registry_get_session(&s->rt, &job->auth_id, &job->device.device_id,
+                              &sess);
+    if (sess)
+      sess->verified_at_ms = faith_now_ms();
+
+    rc = auth_authorize_client(s, cl, &job->auth_id, &job->device.device_id,
+                               job->device.public_key, sess == NULL);
+  }
+
+  if (rc != FAITH_OK) {
+    server_client_queue_disconnect(s, cl, FAITH_DISCONNECT_AUTH_FAILED,
+                                   FAITH_CLIENT_RECONNECT_FORBIDDEN, 0, 0,
+                                   "Identity verification failed.");
+  }
+}
+
 faith_status_code_t auth_handle_hello(server_state_t *s, client_conn_t *cl,
                                       const faith_envelope_t *hello_envl) {
   // HELLO {
@@ -214,7 +259,7 @@ faith_status_code_t auth_handle_challenge_response(
      * the auth-id is not already a persistent identity in the DB, resolving the
      * already present entry if it exists, or failing if additional checks
      * failed) */
-    _FH_CHECK_RETURN(db_identity_submit(&s->identity_worker, &job));
+    _FH_CHECK_RETURN(auth_identity_submit(s, &job));
 
     server_set_client_state(s, cl, CLIENT_WAIT_FOR_IDENTITY);
     return FAITH_OK;
@@ -223,8 +268,6 @@ faith_status_code_t auth_handle_challenge_response(
   _FH_CHECK_RETURN(auth_authorize_client(
       s, cl, &params->sender_auth_id, &params->device_id,
       verification_public_key, false));
-
-  _FH_CHECK_RETURN(delivery_queue_pending_events(s, cl));
 
   return FAITH_OK;
 reject: {
@@ -294,7 +337,7 @@ faith_status_code_t auth_authorize_client(
 }
 
 faith_status_code_t
-auth_handshake_complete(server_state_t *s, client_conn_t *cl,
+auth_handshake_ready(server_state_t *s, client_conn_t *cl,
                         const faith_auth_id_t   *sender_id,
                         const faith_device_id_t *device_id) {
   if (!s || !cl || cl->closing || !device_id)
@@ -345,51 +388,28 @@ faith_status_code_t auth_queue_auth_pending(server_state_t *s,
   return FAITH_OK;
 }
 
-void auth_identity_complete(server_state_t *s) {
-  uint64_t count;
-  while (read(s->identity_worker.event_fd, &count, sizeof(count)) < 0 &&
-         errno == EINTR) {
-  }
+faith_status_code_t auth_identity_submit(server_state_t *s,
+                                          const db_identity_job_t *request) {
+  db_identity_job_t *job = malloc(sizeof(*job));
 
+  if (!job)
+    return FAITH_ERR_NOMEM;
 
-  db_identity_job_t job;
+  *job = *request;
+  db_async_job_t task = {.run = _identity_run, .complete = _identity_complete,
+                         .destroy = free, .data = job};
+  faith_status_code_t rc = db_async_submit(&s->db_pool, &task);
 
-  while (db_identity_take(&s->identity_worker, &job)) {
-    client_conn_t *cl = s->clients;
+  if (rc != FAITH_OK)
+    free(job);
 
-    while (cl && cl->conn.id != job.client_id)
-      cl = cl->next;
+  return rc;
+}
 
-    if (!cl || cl->closing || cl->close_after_flush ||
-        cl->state != CLIENT_WAIT_FOR_IDENTITY)
-      continue;
-
-    faith_status_code_t rc = job.status;
-
-    if (rc == FAITH_ERR_NOT_FOUND && !job.link) {
-      server_set_client_state(s, cl, CLIENT_WAIT_FOR_CHALLENGE_RESPONSE);
-      rc = device_link_new_device(s, cl, &cl->temp_handshake_params);
-    } else if (rc == FAITH_OK) {
-      client_device_session_data_t *sess = NULL;
-      sess_registry_get_session(&s->rt, &job.auth_id,
-                                &job.device.device_id, &sess);
-      if (sess)
-        sess->verified_at_ms = faith_now_ms();
-
-      rc = auth_authorize_client(s, cl, &job.auth_id, &job.device.device_id,
-                                 job.device.public_key, sess == NULL);
-
-      if (rc == FAITH_OK)
-        rc = delivery_queue_pending_events(s, cl);
-    }
-
-    if (rc != FAITH_OK) {
-      server_client_queue_disconnect(
-          s, cl, FAITH_DISCONNECT_AUTH_FAILED,
-          FAITH_CLIENT_RECONNECT_FORBIDDEN, 0, 0,
-          "Identity verification failed.");
-    }
-
-
-  }
+faith_status_code_t auth_handshake_complete(server_state_t *s, client_conn_t *cl,
+                                            const faith_auth_id_t *auth_id,
+                                            const faith_device_id_t *device_id) {
+  (void)auth_id;
+  (void)device_id;
+  return delivery_load_events(s, cl);
 }

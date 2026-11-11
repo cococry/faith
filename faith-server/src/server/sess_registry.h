@@ -11,6 +11,7 @@ typedef struct {
   application_user_identity_t ident;
   device_event_inbox_t        inbox;
   uint64_t verified_at_ms;
+  bool events_loaded;
 } client_device_session_data_t;
 
 typedef struct {

@@ -10,8 +10,8 @@
 
 #define _MODULE_NAME "commands/dispatch"
 
-static faith_status_code_t
-queue_command_result(server_state_t *s, client_conn_t *cl,
+faith_status_code_t
+command_queue_result(server_state_t *s, client_conn_t *cl,
                      const faith_command_id_t *cmd_id,
                      faith_command_type_t type, faith_command_result_err_t err,
                      faith_command_result_t result) {
@@ -65,9 +65,12 @@ faith_status_code_t command_dispatch(server_state_t *s, client_conn_t *cl,
 
   switch (cmd.type) {
   case FAITH_COMMAND_CREATE_CONVERSATION:
-    _FH_CHECK_RETURN(
-        conv_handle_create_conversation(s, cl, &cmd, &result, &err));
-    break;
+    {
+      faith_status_code_t rc = conv_handle_create_conversation(s, cl, &cmd);
+      free(cmd.payload);
+      return rc;
+    }
+
   default:
     nob_log(ERROR, "[%s: client=%" PRIu64 " fd=%i] Server got invalid COMMAND.",
             _MODULE_NAME, cl->conn.id, cl->conn.fd);
@@ -82,6 +85,6 @@ faith_status_code_t command_dispatch(server_state_t *s, client_conn_t *cl,
   }
 
   _FH_CHECK_RETURN(
-      queue_command_result(s, cl, &cmd.cmd_id, cmd.type, err, result));
+      command_queue_result(s, cl, &cmd.cmd_id, cmd.type, err, result));
   return FAITH_OK;
 }

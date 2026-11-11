@@ -4,6 +4,7 @@
 #include <faith-proto/codec/envelopes.h>
 #include <faith-proto/core/core.h>
 #include "../server/server.h"
+#include "../db/events_repo.h"
 
 faith_status_code_t delivery_queue_event(server_state_t          *s,
                                          const faith_auth_id_t   *auth_id,
@@ -18,3 +19,8 @@ faith_status_code_t delivery_queue_pending_events(server_state_t *s,
 faith_status_code_t delivery_handle_event_acked(server_state_t   *s,
                                                 client_conn_t    *cl,
                                                 faith_envelope_t *envl);
+
+faith_status_code_t delivery_load_events(server_state_t *s, client_conn_t *cl);
+
+void delivery_event_complete(server_state_t *s, db_events_job_t *job,
+                              faith_status_code_t status);

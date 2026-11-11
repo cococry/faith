@@ -28,7 +28,7 @@ device_event_inbox_push_event(device_event_inbox_t         *inbox,
   if (inbox->next_seq == UINT64_MAX)
     return FAITH_ERR_OVERFLOW;
 
-  if (inbox->last_sent_seq != UINT64_MAX && event->seq_num != inbox->next_seq) {
+  if (event->seq_num != inbox->next_seq) {
     nob_log(ERROR, "[%s] Tried to push event with invalid sequence order.\n",
         _MODULE_NAME);
     return FAITH_ERR_INVALID;
@@ -108,6 +108,9 @@ faith_status_code_t device_event_inbox_remove_until(device_event_inbox_t *inbox,
 faith_status_code_t device_event_inbox_destroy(device_event_inbox_t *inbox) {
   if (!inbox)
     return FAITH_ERR_INVALID;
+
+  for (size_t i = 0; i < arrlenu(inbox->events); i++)
+    free(inbox->events[i].data);
 
   arrfree(inbox->events);
 

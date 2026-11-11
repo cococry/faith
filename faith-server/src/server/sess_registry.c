@@ -147,6 +147,7 @@ sess_registry_unregister_session(sess_registry_state_t   *rt,
 
   /* <dev->value> is a dynamically allocated client_device_session_data_t
    */
+  device_event_inbox_destroy(&dev->value->inbox);
   free(dev->value);
   dev->value = NULL;
 
@@ -186,6 +187,7 @@ faith_status_code_t sess_registry_destroy(sess_registry_state_t *rt) {
     ptrdiff_t                device_count = hmlen(devices);
 
     for (ptrdiff_t j = 0; j < device_count; ++j) {
+      device_event_inbox_destroy(&devices[j].value->inbox);
       free(devices[j].value);
       devices[j].value = NULL;
     }
