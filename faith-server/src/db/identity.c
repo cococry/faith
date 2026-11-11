@@ -21,6 +21,8 @@ faith_status_code_t db_identity_resolve(faith_db_t        *db,
     return FAITH_ERR_IO;
   }
 
+  /* when this function gets called, the client using the provided auth_id has
+   * already been authorized. */
   const char         *values[] = {(const char *)job->auth_id.bytes};
   const int           lengths[] = {FAITH_AUTH_ID_SIZE};
   const int           formats[] = {1};
@@ -28,7 +30,8 @@ faith_status_code_t db_identity_resolve(faith_db_t        *db,
   bool                created = false;
   faith_status_code_t rc = FAITH_ERR_IO;
 
-  /* only the transaction that claims the id gets to choose its first key */
+  /* only the transaction that claims the id gets to choose its first key, not a
+   * linking device */
   if (!job->link) {
     res = PQexecParams(db->conn,
                        "INSERT INTO users (auth_id) VALUES ($1) "
