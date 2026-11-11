@@ -10,11 +10,16 @@
 
 #define _MODULE_NAME "delivery/events"
 
+static faith_status_code_t _queue_event_online_user(
+    server_state_t *s, client_conn_t *cl, const faith_envl_stc_event_t *event);
+static faith_status_code_t _queue_event_batch_envl(
+    server_state_t *s, client_conn_t *cl,
+    const faith_envl_stc_event_batch_t *batch_envl);
+
 static faith_status_code_t
-queue_event_online_user(server_state_t *s, struct client_conn_t *cl,
-                        device_event_inbox_t         *inbox,
+_queue_event_online_user(server_state_t *s, struct client_conn_t *cl,
                         const faith_envl_stc_event_t *event) {
-  if (!s || !cl || !inbox || !event)
+  if (!s || !cl || !event)
     return FAITH_ERR_INVALID;
 
   faith_status_code_t _fh_result = FAITH_OK;
@@ -22,6 +27,10 @@ queue_event_online_user(server_state_t *s, struct client_conn_t *cl,
   size_t   cap = FAITH_ENVL_STC_EVENT_BODY_SIZE_FIXED + event->data_size;
   uint8_t *body = malloc(cap);
   faith_body_size_t body_size = 0;
+
+  if (!body)
+    return FAITH_ERR_NOMEM;
+
   _FH_CHECK_DEFER(faith_encode_event_body(body, &body_size, cap, event));
 
   faith_envelope_t envl = {0};
@@ -32,7 +41,6 @@ queue_event_online_user(server_state_t *s, struct client_conn_t *cl,
 
   _FH_CHECK_DEFER(server_queue_envelope_or_mark_dead(s, cl, &envl));
 
-  _FH_CHECK_DEFER(device_event_inbox_advance_seq(inbox));
 
 defer:
   free(body);
@@ -40,17 +48,7 @@ defer:
 }
 
 static faith_status_code_t
-queue_event_offline_user(device_event_inbox_t         *inbox,
-                         const faith_envl_stc_event_t *event) {
-  if (!inbox || !event)
-    return FAITH_ERR_INVALID;
-
-  _FH_CHECK_RETURN(device_event_inbox_push_event(inbox, event));
-  return FAITH_OK;
-}
-
-static faith_status_code_t
-queue_event_batch_envl(server_state_t *s, struct client_conn_t *cl,
+_queue_event_batch_envl(server_state_t *s, struct client_conn_t *cl,
                        const faith_envl_stc_event_batch_t *batch_envl) {
   if (!batch_envl)
     return FAITH_ERR_INVALID;
@@ -86,7 +84,7 @@ faith_status_code_t delivery_queue_event(server_state_t          *s,
                                          const faith_event_codec_type_t type,
                                          uint8_t                       *data,
                                          faith_body_size_t data_size) {
-  if (!auth_id || !device_id || (!data && data_size != 0) ||
+  if (!s || !auth_id || !device_id || (!data && data_size != 0) ||
       (data && data_size == 0))
     return FAITH_ERR_INVALID;
 
@@ -108,13 +106,13 @@ faith_status_code_t delivery_queue_event(server_state_t          *s,
   event.data_size = data_size;
   event.seq_num = sess->inbox.next_seq;
 
+  /* keep our own copy before trying the socket, even if that send fails */
+  _FH_CHECK_RETURN(device_event_inbox_push_event(&sess->inbox, &event));
+
   if (online) {
-    _FH_CHECK_RETURN(
-        queue_event_online_user(s, sess->conn, &sess->inbox, &event));
-    return FAITH_OK;
+    _FH_CHECK_RETURN(_queue_event_online_user(s, sess->conn, &event));
   }
 
-  _FH_CHECK_RETURN(queue_event_offline_user(&sess->inbox, &event));
   return FAITH_OK;
 }
 
@@ -171,7 +169,7 @@ faith_status_code_t delivery_queue_pending_events(server_state_t *s,
     batch_envl.events = batch;
     batch_envl.n_events = (uint16_t)n_fitting;
 
-    _FH_CHECK_RETURN(queue_event_batch_envl(s, cl, &batch_envl));
+    _FH_CHECK_RETURN(_queue_event_batch_envl(s, cl, &batch_envl));
   }
 
   return FAITH_OK;
