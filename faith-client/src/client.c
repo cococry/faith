@@ -1410,6 +1410,26 @@ static faith_status_code_t client_handle_envelope(faith_client_t *client,
   case FAITH_ENVELOPE_EVENT:
     _FH_CHECK_RETURN(client_handle_event(client, &envl));
     break;
+  case FAITH_ENVELOPE_EVENT_RESUME: {
+    faith_envl_cts_event_ack_t base = {0};
+    faith_status_code_t rc = faith_decode_event_ack_body(envl.body, envl.body_size, &base);
+    free(envl.body);
+    _FH_CHECK_RETURN(rc);
+
+    if (base.seq_num > INT64_MAX)
+      return FAITH_ERR_BAD_ENVELOPE;
+
+    for (size_t i = 0; i < EV_REORDER_WINDOW_SIZE; i++) {
+      if (client->ev_reorder_window[i].occupied)
+        free(client->ev_reorder_window[i].event.data);
+
+      memset(&client->ev_reorder_window[i], 0, sizeof(client->ev_reorder_window[i]));
+    }
+
+    client->ev_last_dispatched_seq = base.seq_num ? base.seq_num - 1 : UINT64_MAX;
+    break;
+  }
+
   case FAITH_ENVELOPE_EVENT_BATCH:
     _FH_CHECK_RETURN(client_handle_event_batch(client, &envl));
     break;

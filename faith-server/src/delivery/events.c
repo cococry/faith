@@ -3,6 +3,9 @@
 #include <faith-proto/codec/codec.h>
 #include "../server/client_io.h"
 #include "event_inbox.h"
+#include "../db/events_repo.h"
+#include "../auth/handshake.h"
+#include "../server/client_lifecycle.h"
 
 #include <third_party/stb_ds.h>
 
@@ -15,6 +18,11 @@ static faith_status_code_t _queue_event_online_user(
 static faith_status_code_t _queue_event_batch_envl(
     server_state_t *s, client_conn_t *cl,
     const faith_envl_stc_event_batch_t *batch_envl);
+
+static faith_status_code_t _open_stream(server_state_t *s, client_conn_t *cl,
+                                         client_device_session_data_t *sess);
+static void _event_complete(void *owner, void *data, faith_status_code_t status);
+static faith_status_code_t _submit_event(server_state_t *s, db_events_job_t *job);
 
 static faith_status_code_t
 _queue_event_online_user(server_state_t *s, struct client_conn_t *cl,
@@ -40,7 +48,6 @@ _queue_event_online_user(server_state_t *s, struct client_conn_t *cl,
   envl.body_size = body_size;
 
   _FH_CHECK_DEFER(server_queue_envelope_or_mark_dead(s, cl, &envl));
-
 
 defer:
   free(body);
@@ -78,6 +85,98 @@ defer:
   return _fh_result;
 }
 
+static faith_status_code_t _open_stream(server_state_t *s, client_conn_t *cl,
+                                         client_device_session_data_t *sess) {
+    if (auth_handshake_ready(s, cl, &cl->ident.auth_id, &cl->ident.device_id) != FAITH_OK) {
+      return FAITH_ERR_IO;
+    }
+
+    uint8_t resume[8];
+    faith_body_size_t size = 0;
+    faith_envl_cts_event_ack_t base = {
+        .seq_num = sess->inbox.last_acked_seq == UINT64_MAX
+                       ? 0 : sess->inbox.last_acked_seq + 1};
+    faith_encode_event_ack_body(resume, &size, sizeof(resume), &base);
+    faith_envelope_t envl = {.type = FAITH_ENVELOPE_EVENT_RESUME,
+                             .recipient_id = cl->ident.auth_id,
+                             .body = resume, .body_size = size};
+
+    if (server_queue_envelope_or_mark_dead(s, cl, &envl) != FAITH_OK ||
+        delivery_queue_pending_events(s, cl) != FAITH_OK)
+      return FAITH_ERR_IO;
+
+  return FAITH_OK;
+}
+
+static void _event_complete(void *owner, void *data, faith_status_code_t status) {
+  server_state_t *s = owner;
+  db_events_job_t *job = data;
+  client_device_session_data_t *sess = NULL;
+  sess_registry_get_session(&s->rt, &job->auth_id, &job->device_id, &sess);
+
+  if (!sess)
+    return;
+
+  client_conn_t *cl = sess->conn;
+
+  if (status != FAITH_OK) {
+    sess->events_loaded = false;
+
+    if (cl)
+      server_client_queue_disconnect(s, cl, FAITH_DISCONNECT_INTERNAL_ERROR,
+          FAITH_CLIENT_RECONNECT_ALLOWED, 0, 0, "Event database operation failed.");
+
+    nob_log(ERROR, "[delivery/events] Database event operation failed: %s",
+            faith_status_code_name(status));
+    return;
+  }
+
+  if (job->operation == DB_EVENTS_LOAD) {
+    if (!cl || cl->conn.id != job->client_id || cl->closing || cl->close_after_flush)
+      return;
+
+    device_event_inbox_destroy(&sess->inbox);
+    sess->inbox = job->inbox;
+    job->inbox.events = NULL;
+
+    sess->events_loaded = true;
+    if (_open_stream(s, cl, sess) != FAITH_OK)
+      cl->closing = 1;
+
+  } else if (job->operation == DB_EVENTS_INSERT) {
+    if (!sess->events_loaded)
+      return;
+
+    if (device_event_inbox_push_event(&sess->inbox, &job->event) != FAITH_OK) {
+      sess->events_loaded = false;
+
+      if (cl)
+        server_client_queue_disconnect(s, cl, FAITH_DISCONNECT_INTERNAL_ERROR,
+            FAITH_CLIENT_RECONNECT_ALLOWED, 0, 0, "Event stream needs recovery.");
+
+      return;
+    }
+
+    if (cl && cl->state == CLIENT_OPEN && !cl->closing && !cl->close_after_flush)
+      _queue_event_online_user(s, cl, &job->event);
+
+  } else {
+    device_event_inbox_remove_until(&sess->inbox, job->event.seq_num);
+  }
+}
+
+static faith_status_code_t _submit_event(server_state_t *s, db_events_job_t *job) {
+  db_async_job_t task = {.run = db_events_repo_execute,
+                         .complete = _event_complete,
+                         .destroy = db_events_repo_destroy, .data = job};
+  faith_status_code_t rc = db_async_submit(&s->db_pool, &task);
+
+  if (rc != FAITH_OK)
+    db_events_repo_destroy(job);
+
+  return rc;
+}
+
 faith_status_code_t delivery_queue_event(server_state_t          *s,
                                          const faith_auth_id_t   *auth_id,
                                          const faith_device_id_t *device_id,
@@ -100,19 +199,53 @@ faith_status_code_t delivery_queue_event(server_state_t          *s,
   if (online && !sess->conn->authorized)
     return FAITH_ERR_UNAUTHORIZED;
 
-  faith_envl_stc_event_t event = {0};
-  event.type = type;
-  event.data = data;
-  event.data_size = data_size;
-  event.seq_num = sess->inbox.next_seq;
+  db_events_job_t *job = calloc(1, sizeof(*job));
 
-  /* keep our own copy before trying the socket, even if that send fails */
-  _FH_CHECK_RETURN(device_event_inbox_push_event(&sess->inbox, &event));
+  if (!job)
+    return FAITH_ERR_NOMEM;
 
-  if (online) {
-    _FH_CHECK_RETURN(_queue_event_online_user(s, sess->conn, &event));
+  job->operation = DB_EVENTS_INSERT;
+  job->auth_id = *auth_id;
+  job->device_id = *device_id;
+  job->event.type = type;
+  job->event.data_size = data_size;
+
+  if (data_size) {
+    job->event.data = malloc(data_size);
+
+    if (!job->event.data) {
+      free(job);
+      return FAITH_ERR_NOMEM;
+    }
+
+    memcpy(job->event.data, data, data_size);
   }
 
+  return _submit_event(s, job);
+}
+
+faith_status_code_t delivery_load_events(server_state_t *s, client_conn_t *cl) {
+  client_device_session_data_t *sess = NULL;
+  _FH_CHECK_RETURN(sess_registry_get_session(&s->rt, &cl->ident.auth_id,
+                                             &cl->ident.device_id, &sess));
+
+  if (!sess)
+    return FAITH_ERR_NOT_FOUND;
+
+  if (sess->events_loaded)
+    return _open_stream(s, cl, sess);
+
+  db_events_job_t *job = calloc(1, sizeof(*job));
+
+  if (!job)
+    return FAITH_ERR_NOMEM;
+
+  job->operation = DB_EVENTS_LOAD;
+  job->auth_id = cl->ident.auth_id;
+  job->device_id = cl->ident.device_id;
+  job->client_id = cl->conn.id;
+  _FH_CHECK_RETURN(_submit_event(s, job));
+  server_set_client_state(s, cl, CLIENT_WAIT_FOR_EVENTS);
   return FAITH_OK;
 }
 
@@ -184,7 +317,7 @@ faith_status_code_t delivery_handle_event_acked(server_state_t   *s,
   if (envl->type != FAITH_ENVELOPE_EVENT_ACK)
     return FAITH_ERR_BAD_ENVELOPE;
 
-  if (!cl->authorized)
+  if (!cl->authorized || cl->state != CLIENT_OPEN)
     return FAITH_ERR_UNAUTHORIZED;
 
   client_device_session_data_t *sess = NULL;
@@ -198,7 +331,27 @@ faith_status_code_t delivery_handle_event_acked(server_state_t   *s,
   _FH_CHECK_RETURN(
       faith_decode_event_ack_body(envl->body, envl->body_size, &ack));
 
-  _FH_CHECK_RETURN(device_event_inbox_remove_until(&sess->inbox, ack.seq_num));
+  if (sess->inbox.last_sent_seq == UINT64_MAX ||
+      ack.seq_num > sess->inbox.last_sent_seq)
+    return FAITH_ERR_BAD_ENVELOPE;
 
-  return FAITH_OK;
+  if (sess->inbox.last_acked_seq != UINT64_MAX &&
+      ack.seq_num <= sess->inbox.last_acked_seq)
+    return FAITH_OK;
+
+  db_events_job_t *job = calloc(1, sizeof(*job));
+
+  if (!job)
+    return FAITH_ERR_NOMEM;
+
+  job->operation = DB_EVENTS_ACK;
+  job->auth_id = cl->ident.auth_id;
+  job->device_id = cl->ident.device_id;
+  job->event.seq_num = ack.seq_num;
+  return _submit_event(s, job);
+}
+
+void delivery_event_complete(server_state_t *s, db_events_job_t *job,
+                              faith_status_code_t status) {
+  _event_complete(s, job, status);
 }

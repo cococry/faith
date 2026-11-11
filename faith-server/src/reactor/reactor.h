@@ -17,7 +17,7 @@ typedef enum {
 typedef enum {
   REACTOR_SOURCE_CLIENT,
   REACTOR_SOURCE_LISTENER,
-  REACTOR_SOURCE_IDENTITY,
+  REACTOR_SOURCE_DATABASE,
 } reactor_source_type_t;
 
 typedef struct {

@@ -1,9 +1,7 @@
 #pragma once
 
 #include "device_repo.h"
-#include <pthread.h>
 
-#define DB_IDENTITY_CAPACITY 128
 
 typedef struct {
   uint64_t            client_id;
@@ -15,24 +13,4 @@ typedef struct {
   faith_status_code_t status;
 } db_identity_job_t;
 
-typedef struct {
-  pthread_t         thread;
-  pthread_mutex_t   mutex;
-  pthread_cond_t    ready;
-  bool              stopping;
-  bool              started;
-  int               event_fd;
-  char             *connection_str;
-  db_identity_job_t jobs[DB_IDENTITY_CAPACITY];
-  size_t            submitted;
-  size_t            processed;
-  size_t            consumed;
-} db_identity_worker_t;
-
 faith_status_code_t db_identity_resolve(faith_db_t *db, db_identity_job_t *job);
-faith_status_code_t db_identity_worker_init(db_identity_worker_t *worker,
-                                            const char *connection_str);
-faith_status_code_t db_identity_submit(db_identity_worker_t    *worker,
-                                       const db_identity_job_t *job);
-bool db_identity_take(db_identity_worker_t *worker, db_identity_job_t *job);
-void db_identity_worker_destroy(db_identity_worker_t *worker);

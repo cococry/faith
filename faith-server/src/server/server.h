@@ -5,6 +5,7 @@
 #include "../transport/conn.h"
 #include "sess_registry.h"
 #include "../db/identity.h"
+#include "../db/helpers.h"
 
 #include <faith-proto/codec/auth.h>
 #include <faith-proto/codec/auth.h>
@@ -18,7 +19,8 @@
   X(CLIENT_WAIT_FOR_HELLO, 3)                                                  \
   X(CLIENT_WAIT_FOR_CHALLENGE_RESPONSE, 4)                                     \
   X(CLIENT_WAIT_FOR_DEVICE_LINK_RESPONSE, 5) \
-  X(CLIENT_WAIT_FOR_IDENTITY, 6)
+  X(CLIENT_WAIT_FOR_IDENTITY, 6) \
+  X(CLIENT_WAIT_FOR_EVENTS, 7)
 
 typedef enum {
 #define X(name, value) name = value,
@@ -66,8 +68,8 @@ typedef struct {
   sess_registry_state_t rt;
 
   server_config_t cfg;
-  db_identity_worker_t identity_worker;
-  reactor_source_t identity_source;
+  db_async_pool_t db_pool;
+  reactor_source_t db_source;
 } server_state_t;
 
 faith_status_code_t server_init(server_state_t *s, const server_config_t *cfg);

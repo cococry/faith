@@ -99,7 +99,8 @@ static void handle_client_event(server_state_t *s, client_conn_t *cl,
   } else if (cl->state == CLIENT_OPEN || cl->state == CLIENT_WAIT_FOR_HELLO ||
              cl->state == CLIENT_WAIT_FOR_CHALLENGE_RESPONSE ||
              cl->state == CLIENT_WAIT_FOR_DEVICE_LINK_RESPONSE ||
-             cl->state == CLIENT_WAIT_FOR_IDENTITY) {
+             cl->state == CLIENT_WAIT_FOR_IDENTITY ||
+             cl->state == CLIENT_WAIT_FOR_EVENTS) {
     if ((events & REACTOR_READABLE) &&
         server_drive_client_read(s, cl) != FAITH_OK) {
       dead = true;
@@ -248,14 +249,14 @@ faith_status_code_t server_init(server_state_t *s, const server_config_t *cfg) {
 
   _FH_CHECK_DEFER(reactor_init(&s->reactor));
   const char *connection_str = getenv("FAITH_DATABASE_URL");
-  _FH_CHECK_DEFER(db_identity_worker_init(
-      &s->identity_worker, connection_str ? connection_str : "connect_timeout=3"));
-  s->identity_source = (reactor_source_t){
-      .fd = s->identity_worker.event_fd,
-      .type = REACTOR_SOURCE_IDENTITY,
+  _FH_CHECK_DEFER(db_async_init(
+      &s->db_pool, connection_str ? connection_str : "connect_timeout=3"));
+  s->db_source = (reactor_source_t){
+      .fd = s->db_pool.event_fd,
+      .type = REACTOR_SOURCE_DATABASE,
       .interests = REACTOR_READABLE,
   };
-  _FH_CHECK_DEFER(reactor_add(&s->reactor, &s->identity_source));
+  _FH_CHECK_DEFER(reactor_add(&s->reactor, &s->db_source));
 
   int listen_fd = init_listener(s->cfg.listen_port);
   if (listen_fd < 0) {
@@ -327,8 +328,8 @@ faith_status_code_t server_loop(server_state_t *s) {
       }
 
       switch (src->type) {
-      case REACTOR_SOURCE_IDENTITY:
-        auth_identity_complete(s);
+      case REACTOR_SOURCE_DATABASE:
+        db_async_dispatch(&s->db_pool, s);
         break;
 
       case REACTOR_SOURCE_LISTENER:
@@ -365,7 +366,7 @@ faith_status_code_t server_destroy(server_state_t *s) {
     server_close_client(s, &cl);
   }
 
-  db_identity_worker_destroy(&s->identity_worker);
+  db_async_destroy(&s->db_pool);
 
   if (s->listen_source.fd >= 0) {
     close(s->listen_source.fd);
