@@ -21,8 +21,9 @@ static const char *client_state_name(client_state_t state);
 static void        accept_clients(server_state_t *s);
 static void        handle_client_event(server_state_t *s, client_conn_t *cl,
                                        reactor_events_t events, bool shutting_down);
-static void        handle_shutdown_signal(int sig);
-static int         install_signal_handlers(void);
+
+static void                handle_shutdown_signal(int sig);
+static int                 install_signal_handlers(void);
 static faith_status_code_t init_listener(int port);
 static void                begin_shutdown(server_state_t *s);
 
@@ -33,6 +34,7 @@ static const char *client_state_name(client_state_t state) {
 #define X(name, value)                                                         \
   case name:                                                                   \
     return #name;
+
     CLIENT_STATES(X)
 #undef X
   default:
@@ -129,6 +131,8 @@ static void handle_shutdown_signal(int sig) {
 }
 
 static int install_signal_handlers(void) {
+  if (signal(SIGPIPE, SIG_IGN) == SIG_ERR)
+    return 1;
   struct sigaction sa;
   memset(&sa, 0, sizeof(sa));
 
@@ -137,11 +141,13 @@ static int install_signal_handlers(void) {
 
   if (sigaction(SIGINT, &sa, NULL) < 0) {
     nob_log(ERROR, "sigaction(SIGINT) failed: %s", strerror(errno));
+
     return 1;
   }
 
   if (sigaction(SIGTERM, &sa, NULL) < 0) {
     nob_log(ERROR, "sigaction(SIGTERM) failed: %s", strerror(errno));
+
     return 1;
   }
 
@@ -154,20 +160,25 @@ static faith_status_code_t init_listener(int port) {
   int listenfd = -1;
 
   listenfd = socket(AF_INET, SOCK_STREAM, 0);
+
   if (listenfd == -1) {
     nob_log(ERROR, "Socket creation failed");
+
     return -1;
   }
 
   // get flags from file descriptor
   int flags;
+
   if ((flags = fcntl(listenfd, F_GETFL, 0)) < 0) {
     nob_log(ERROR, "Failed to set socket to O_NONBLOCK");
+
     return -1;
   }
   // add nonblocking flag
   if (fcntl(listenfd, F_SETFL, flags | O_NONBLOCK) < 0) {
     nob_log(ERROR, "Failed to set socket to O_NONBLOCK");
+
     return -1;
   }
 
@@ -180,15 +191,18 @@ static faith_status_code_t init_listener(int port) {
   servaddr.sin_port = htons(port);
 
   int yes = 1;
+
   if (setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)) < 0) {
     nob_log(ERROR, "setsockopt(SO_REUSEADDR) failed: %s", strerror(errno));
     close(listenfd);
+
     return -1;
   }
 
   if ((bind(listenfd, (struct sockaddr *)&servaddr, sizeof(servaddr))) != 0) {
     nob_log(ERROR, "Socket bind failed on port %i: %s", port, strerror(errno));
     close(listenfd);
+
     return -1;
   }
 
@@ -197,6 +211,7 @@ static faith_status_code_t init_listener(int port) {
   if ((listen(listenfd, SOMAXCONN)) != 0) {
     nob_log(ERROR, "listen() failed: %s", strerror(errno));
     close(listenfd);
+
     return -1;
   }
 
@@ -207,12 +222,14 @@ static faith_status_code_t init_listener(int port) {
 
 static void begin_shutdown(server_state_t *s) {
   struct client_conn_t *cl = s->clients;
+
   while (cl != NULL) {
     struct client_conn_t *next = cl->next;
 
     _FH_CHECK(server_client_queue_disconnect(
         s, cl, FAITH_DISCONNECT_SERVER_SHUTDOWN,
         FAITH_CLIENT_RECONNECT_FORBIDDEN, 0, 0, "The server has shut down"));
+
     cl = next;
   }
 }
@@ -236,11 +253,18 @@ faith_status_code_t server_init(server_state_t *s, const server_config_t *cfg) {
 
   faith_status_code_t _fh_result = FAITH_OK;
 
+  const char *certificate_file = getenv("FAITH_TLS_CERT_FILE");
+  const char *private_key_file = getenv("FAITH_TLS_KEY_FILE");
+  const char *log_level = getenv("FAITH_LOG_LEVEL");
+
+  if (log_level && strcmp(log_level, "warning") == 0)
+    nob_minimal_log_level = WARNING;
+
   const tls_config_t tls_cfg = (tls_config_t){
       .options = SSL_OP_IGNORE_UNEXPECTED_EOF | SSL_OP_NO_RENEGOTIATION |
-                 SSL_OP_SERVER_PREFERENCE,
-      .chain_file = "chain.pem",
-      .pkey_file = "pkey.pem",
+                 SSL_OP_CIPHER_SERVER_PREFERENCE,
+      .chain_file = certificate_file ? certificate_file : "chain.pem",
+      .pkey_file = private_key_file ? private_key_file : "pkey.pem",
       .timeout = 3600,
       .cache_size = 1024,
       .verification_mode = SSL_VERIFY_NONE,
@@ -252,6 +276,7 @@ faith_status_code_t server_init(server_state_t *s, const server_config_t *cfg) {
   const char *connection_str = getenv("FAITH_DATABASE_URL");
   _FH_CHECK_DEFER(db_async_init(
       &s->db_pool, connection_str ? connection_str : "connect_timeout=3"));
+
   s->db_source = (reactor_source_t){
       .fd = s->db_pool.event_fd,
       .type = REACTOR_SOURCE_DATABASE,
@@ -260,8 +285,10 @@ faith_status_code_t server_init(server_state_t *s, const server_config_t *cfg) {
   _FH_CHECK_DEFER(reactor_add(&s->reactor, &s->db_source));
 
   int listen_fd = init_listener(s->cfg.listen_port);
+
   if (listen_fd < 0) {
     server_destroy(s);
+
     return 1;
   }
 
@@ -273,8 +300,10 @@ faith_status_code_t server_init(server_state_t *s, const server_config_t *cfg) {
   _FH_CHECK_DEFER(reactor_add(&s->reactor, &s->listen_source));
 
   return 0;
+
 defer:
   server_destroy(s);
+
   return _fh_result;
 }
 
@@ -322,8 +351,18 @@ faith_status_code_t server_loop(server_state_t *s) {
       s->event_cleanup_at_ms = now + 60000;
     }
 
-    int timeout_ms = shutting_down ? 100 :
-        (int)(s->event_cleanup_at_ms > now ? s->event_cleanup_at_ms - now : 0);
+    if (!shutting_down && s->clients && now >= s->event_sync_at_ms) {
+      delivery_sync_events(s);
+      s->event_sync_at_ms = now + 1000;
+    }
+
+    int timeout_ms = shutting_down ? 100
+                                   : (int)(s->event_cleanup_at_ms > now
+                                               ? s->event_cleanup_at_ms - now
+                                               : 0);
+
+    if (!shutting_down && s->clients && timeout_ms > 1000)
+      timeout_ms = 1000;
 
     size_t n_events = 0;
     _FH_CHECK(reactor_wait(&s->reactor, timeout_ms, events, &n_events));
@@ -345,15 +384,20 @@ faith_status_code_t server_loop(server_state_t *s) {
         if (!shutting_down) {
           accept_clients(s);
         }
+
         break;
+
       case REACTOR_SOURCE_CLIENT:
         if (!src->user_data) {
           nob_log(ERROR, "client reactor source has no user_data");
           continue;
         }
+
         handle_client_event(s, (struct client_conn_t *)src->user_data,
                             events[i].events, shutting_down);
+
         break;
+
       default:
         nob_log(ERROR, "Unknown reactor source type: %u", src->type);
         break;
@@ -403,6 +447,7 @@ void server_link_client(server_state_t *s, client_conn_t *cl) {
   if (s->clients) {
     s->clients->prev = cl;
   }
+
   s->clients = cl;
 }
 
@@ -419,6 +464,7 @@ void server_unlink_client(server_state_t *s, client_conn_t *cl) {
   if (cl->next) {
     cl->next->prev = cl->prev;
   }
+
   cl->next = NULL;
   cl->prev = NULL;
 }
@@ -427,8 +473,10 @@ void server_set_client_state(server_state_t *s, struct client_conn_t *cl,
                              client_state_t state) {
   /* TODO: remove <s> from parameter list*/
   (void)s;
+
   if (!cl)
     return;
+
   cl->state = state;
 
   if (g_verbose_logging) {

@@ -11,14 +11,14 @@
   command_loc(__FILE__, __LINE__, (arg), (commands), (name), (signature),      \
               (description))
 
-#define BUILD_FOLDER "./build/"
-#define OBJECT_FOLDER BUILD_FOLDER "obj/"
+#define BUILD_FOLDER   "./build/"
+#define OBJECT_FOLDER  BUILD_FOLDER "obj/"
 #define OUTPUT_LIBRARY BUILD_FOLDER "libfaith_client.a"
 
-#define FAITH_PROTO_ROOT "../faith-proto/"
+#define FAITH_PROTO_ROOT    "../faith-proto/"
 #define FAITH_PROTO_INCLUDE FAITH_PROTO_ROOT "include"
 #define FAITH_PROTO_LIBRARY FAITH_PROTO_ROOT "build/libfaith_proto.a"
-#define FAITH_PROTO_HEADER FAITH_PROTO_INCLUDE "/faith-proto/codec/codec.h"
+#define FAITH_PROTO_HEADER  FAITH_PROTO_INCLUDE "/faith-proto/codec/codec.h"
 
 typedef struct {
   const char *name;
@@ -118,15 +118,17 @@ static bool compile_source_async(Procs *procs, const char *source,
   nob_cmd_append(&cmd, "-fPIC");
 #endif
 
-  nob_cmd_append(&cmd, "-Iinclude", "-I../third_party/", "-I"FAITH_PROTO_INCLUDE, "-c", source,
-                 "-o", object);
+  nob_cmd_append(&cmd, "-Iinclude", "-I../third_party/",
+                 "-I" FAITH_PROTO_INCLUDE, "-c", source, "-o", object);
 
   if (!nob_cmd_run(&cmd, .async = procs, .max_procs = 0)) {
     nob_cmd_free(cmd);
+
     return false;
   }
 
   nob_cmd_free(cmd);
+
   return true;
 }
 
@@ -154,6 +156,7 @@ static bool archive_static_library(void) {
 
 cleanup:
   nob_cmd_free(cmd);
+
   return result;
 }
 
@@ -161,10 +164,9 @@ bool build(void) {
   Procs procs = {0};
   bool  result = false;
 
-  _Static_assert(
-      NOB_ARRAY_LEN(faith_client_sources) ==
-          NOB_ARRAY_LEN(faith_client_objects),
-      "faith-client source/object count mismatch");
+  _Static_assert(NOB_ARRAY_LEN(faith_client_sources) ==
+                     NOB_ARRAY_LEN(faith_client_objects),
+                 "faith-client source/object count mismatch");
 
   if (!nob_file_exists(FAITH_PROTO_LIBRARY)) {
     nob_log(ERROR, "Required library is missing: %s", FAITH_PROTO_LIBRARY);
@@ -174,12 +176,14 @@ bool build(void) {
   if (!nob_file_exists(FAITH_PROTO_HEADER)) {
     nob_log(ERROR, "Required protocol header is missing: %s",
             FAITH_PROTO_HEADER);
+
     goto cleanup;
   }
 
   if (!nob_file_exists("include/faith-client/client.h")) {
     nob_log(ERROR, "Required client header is missing: %s",
             "include/faith-client/client.h");
+
     goto cleanup;
   }
 
@@ -212,7 +216,6 @@ cleanup:
   return result;
 }
 
-
 int main(int argc, char **argv) {
 #ifdef _WIN32
   SetConsoleOutputCP(CP_UTF8);
@@ -238,11 +241,14 @@ int main(int argc, char **argv) {
               "Build the native Faith client library")) {
     bool result = build();
     nob_da_free(commands);
+
     return result ? 0 : 1;
   }
+
   if (command(command_name, &commands, "help", "", "Print this help message")) {
     print_available_commands(commands);
     nob_da_free(commands);
+
     return 0;
   }
 

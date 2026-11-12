@@ -1,7 +1,7 @@
 #include "event_inbox.h"
 
-#include <third_party/stb_ds.h>
 #include <stdint.h>
+#include <third_party/stb_ds.h>
 
 #define _MODULE_NAME "delivery/event_inbox"
 
@@ -9,6 +9,7 @@ void device_event_inbox_init(device_event_inbox_t *o_inbox) {
   if (!o_inbox)
     return;
 
+  o_inbox->bytes = 0;
   o_inbox->events = NULL;
   o_inbox->last_acked_seq = UINT64_MAX;
   o_inbox->last_sent_seq = UINT64_MAX;
@@ -21,6 +22,14 @@ device_event_inbox_push_event(device_event_inbox_t         *inbox,
   if (!inbox || !event)
     return FAITH_ERR_INVALID;
 
+  if ((event->data_size && !event->data) ||
+      event->data_size > FAITH_EVENT_DATA_MAX_SIZE)
+    return FAITH_ERR_INVALID;
+
+  if (arrlenu(inbox->events) >= 4096 ||
+      event->data_size + 16u > 1048576u - inbox->bytes)
+    return FAITH_ERR_OVERFLOW;
+
   /* Dont allow UINT64_MAX */
   if (event->seq_num == UINT64_MAX)
     return FAITH_ERR_OVERFLOW;
@@ -30,7 +39,8 @@ device_event_inbox_push_event(device_event_inbox_t         *inbox,
 
   if (event->seq_num != inbox->next_seq) {
     nob_log(ERROR, "[%s] Tried to push event with invalid sequence order.\n",
-        _MODULE_NAME);
+            _MODULE_NAME);
+
     return FAITH_ERR_INVALID;
   }
 
@@ -39,6 +49,7 @@ device_event_inbox_push_event(device_event_inbox_t         *inbox,
 
   if (event->data_size > 0) {
     data_copy = malloc(event->data_size);
+
     if (!data_copy)
       return FAITH_ERR_NOMEM;
 
@@ -48,6 +59,7 @@ device_event_inbox_push_event(device_event_inbox_t         *inbox,
   entry.data = data_copy;
 
   arrput(inbox->events, entry);
+  inbox->bytes += event->data_size + 16u;
 
   inbox->last_sent_seq = inbox->next_seq;
   inbox->next_seq++;
@@ -89,10 +101,12 @@ faith_status_code_t device_event_inbox_remove_until(device_event_inbox_t *inbox,
   size_t event_count = arrlen(inbox->events);
 
   size_t i = 0;
+
   for (; i < event_count; i++) {
     if (inbox->events[i].seq_num > until_seq)
       break;
 
+    inbox->bytes -= inbox->events[i].data_size + 16u;
     free(inbox->events[i].data);
     inbox->events[i].data = NULL;
   }
@@ -113,6 +127,7 @@ faith_status_code_t device_event_inbox_destroy(device_event_inbox_t *inbox) {
     free(inbox->events[i].data);
 
   arrfree(inbox->events);
+  inbox->bytes = 0;
 
   return FAITH_OK;
 }

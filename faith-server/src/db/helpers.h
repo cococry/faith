@@ -35,5 +35,6 @@ faith_status_code_t db_async_init(db_async_pool_t *pool,
  */
 faith_status_code_t db_async_submit(db_async_pool_t      *pool,
                                     const db_async_job_t *job);
-void                db_async_dispatch(db_async_pool_t *pool, void *owner);
-void                db_async_destroy(db_async_pool_t *pool);
+
+void db_async_dispatch(db_async_pool_t *pool, void *owner);
+void db_async_destroy(db_async_pool_t *pool);

@@ -10,11 +10,11 @@
 
 #define _MODULE_NAME "commands/dispatch"
 
-faith_status_code_t
-command_queue_result(server_state_t *s, client_conn_t *cl,
-                     const faith_command_id_t *cmd_id,
-                     faith_command_type_t type, faith_command_result_err_t err,
-                     faith_command_result_t result) {
+faith_status_code_t command_queue_result(server_state_t *s, client_conn_t *cl,
+                                         const faith_command_id_t  *cmd_id,
+                                         faith_command_type_t       type,
+                                         faith_command_result_err_t err,
+                                         faith_command_result_t     result) {
   if (!s || !cl || !cmd_id)
     return FAITH_ERR_INVALID;
 
@@ -64,21 +64,23 @@ faith_status_code_t command_dispatch(server_state_t *s, client_conn_t *cl,
       faith_decode_command_body(envl->body, envl->body_size, &cmd));
 
   client_device_session_data_t *sess = NULL;
-  faith_status_code_t lookup = sess_registry_get_session(&s->rt,
-      &cl->ident.auth_id, &cl->ident.device_id, &sess);
+  faith_status_code_t           lookup = sess_registry_get_session(
+      &s->rt, &cl->ident.auth_id, &cl->ident.device_id, &sess);
 
   if (lookup != FAITH_OK || !sess) {
     free(cmd.payload);
+
     return FAITH_ERR_UNAUTHORIZED;
   }
 
   for (size_t i = 0; i < sess->recent_command_count; i++) {
     if (memcmp(sess->recent_command_ids[i], cmd.cmd_id.bytes, 16) == 0) {
       free(cmd.payload);
-      return command_queue_result(s, cl, &cmd.cmd_id, cmd.type,
-          FAITH_COMMAND_ERR_BAD_COMMAND, FAITH_COMMAND_RESULT_REJECTED);
-    }
 
+      return command_queue_result(s, cl, &cmd.cmd_id, cmd.type,
+                                  FAITH_COMMAND_ERR_BAD_COMMAND,
+                                  FAITH_COMMAND_RESULT_REJECTED);
+    }
   }
 
   uint64_t now = faith_now_ms();
@@ -95,11 +97,14 @@ faith_status_code_t command_dispatch(server_state_t *s, client_conn_t *cl,
 
   if (sess->command_count >= 60 || s->command_count >= 6000) {
     free(cmd.payload);
+
     return command_queue_result(s, cl, &cmd.cmd_id, cmd.type,
-        FAITH_COMMAND_ERR_TIMED_OUT, FAITH_COMMAND_RESULT_REJECTED);
+                                FAITH_COMMAND_ERR_TIMED_OUT,
+                                FAITH_COMMAND_RESULT_REJECTED);
   }
 
-  memcpy(sess->recent_command_ids[sess->recent_command_next], cmd.cmd_id.bytes, 16);
+  memcpy(sess->recent_command_ids[sess->recent_command_next], cmd.cmd_id.bytes,
+         16);
   sess->recent_command_next = (sess->recent_command_next + 1) % 64;
 
   if (sess->recent_command_count < 64)
@@ -109,12 +114,12 @@ faith_status_code_t command_dispatch(server_state_t *s, client_conn_t *cl,
   s->command_count++;
 
   switch (cmd.type) {
-  case FAITH_COMMAND_CREATE_CONVERSATION:
-    {
-      faith_status_code_t rc = conv_handle_create_conversation(s, cl, &cmd);
-      free(cmd.payload);
-      return rc;
-    }
+  case FAITH_COMMAND_GROUP_DELIVER: {
+    faith_status_code_t rc = conv_handle_group_delivery(s, cl, &cmd);
+    free(cmd.payload);
+
+    return rc;
+  }
 
   default:
     nob_log(ERROR, "[%s: client=%" PRIu64 " fd=%i] Server got invalid COMMAND.",
@@ -129,7 +134,9 @@ faith_status_code_t command_dispatch(server_state_t *s, client_conn_t *cl,
     result = FAITH_COMMAND_RESULT_REJECTED;
   }
 
-  faith_status_code_t rc = command_queue_result(s, cl, &cmd.cmd_id, cmd.type, err, result);
+  faith_status_code_t rc =
+      command_queue_result(s, cl, &cmd.cmd_id, cmd.type, err, result);
   free(cmd.payload);
+
   return rc;
 }

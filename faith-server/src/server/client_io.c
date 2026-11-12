@@ -7,8 +7,8 @@
 
 #include <faith-proto/codec/envelopes.h>
 
-#include "dispatch.h"
 #include "../delivery/events.h"
+#include "dispatch.h"
 
 #define _MODULE_NAME "server/client_io"
 
@@ -20,6 +20,7 @@ faith_status_code_t server_queue_frame(server_state_t *s, client_conn_t *cl,
 
   const size_t wire_size = FAITH_FRAME_HEADER_SIZE + frame->payload_size;
   uint8_t     *wire_data = malloc(wire_size);
+
   if (!wire_data) {
     return FAITH_ERR_NOMEM;
   }
@@ -44,11 +45,13 @@ faith_status_code_t server_queue_frame(server_state_t *s, client_conn_t *cl,
     _FH_CHECK(reactor_modify_interests(&s->reactor, &cl->reactor_source,
                                        cl->reactor_source.interests |
                                            REACTOR_WRITABLE));
+
     if (_fh_rc != FAITH_OK) {
       server_client_queue_disconnect(
           s, cl, FAITH_DISCONNECT_INTERNAL_ERROR,
           FAITH_CLIENT_RECONNECT_ALLOWED, 0, 0,
           "Failed to enable REACTOR_WRITABLE for the client.");
+
       return _fh_rc;
     }
   }
@@ -58,8 +61,10 @@ faith_status_code_t server_queue_frame(server_state_t *s, client_conn_t *cl,
           faith_frame_msg_name(frame->msg_type), wire_size);
 
   return FAITH_OK;
+
 defer:
   free(wire_data);
+
   return _fh_result;
 }
 
@@ -70,6 +75,7 @@ faith_status_code_t server_queue_envelope(server_state_t *s, client_conn_t *cl,
 
   size_t   cap = FAITH_ENVL_HEADER_SIZE + envl->body_size;
   uint8_t *payload = malloc(cap);
+
   if (!payload)
     return FAITH_ERR_NOMEM;
 
@@ -94,6 +100,7 @@ faith_status_code_t server_queue_envelope(server_state_t *s, client_conn_t *cl,
 
 defer:
   free(payload);
+
   return _fh_result;
 }
 
@@ -101,6 +108,7 @@ faith_status_code_t
 server_queue_envelope_or_mark_dead(server_state_t *s, client_conn_t *cl,
                                    const faith_envelope_t *envl) {
   _FH_CHECK(server_queue_envelope(s, cl, envl));
+
   if (_fh_rc == FAITH_OK)
     return FAITH_OK;
 
@@ -109,6 +117,7 @@ server_queue_envelope_or_mark_dead(server_state_t *s, client_conn_t *cl,
           faith_envelope_name(envl->type), faith_status_code_name(_fh_rc));
 
   cl->closing = true;
+
   return _fh_rc;
 }
 
@@ -126,21 +135,28 @@ faith_status_code_t server_flush_client_output(server_state_t       *s,
   case TRANSPORT_RES_WANT_READ:
     desired_interests = REACTOR_READABLE;
     break;
+
   case TRANSPORT_RES_WANT_WRITE:
     desired_interests = REACTOR_READABLE | REACTOR_WRITABLE;
     break;
+
   case TRANSPORT_RES_COMPLETE:
     desired_interests = REACTOR_READABLE;
     break;
+
   case TRANSPORT_RES_CLOSED:
     nob_log(ERROR, "Cannot flush client output, got TRANSPORT_RES_CLOSED; "
                    "Client connection is already closed.");
+
     return FAITH_ERR_CLOSED;
+
   case TRANSPORT_RES_ERROR:
     return FAITH_ERR_IO;
+
   default:
     nob_log(ERROR, "Got invalid transport result from conn_flush_output (%u).",
             (uint32_t)res);
+
     return FAITH_ERR_INVALID;
   }
 
@@ -179,15 +195,19 @@ faith_status_code_t server_drive_tls_handshake(server_state_t *s,
     server_set_client_state(s, cl, CLIENT_WAIT_FOR_HELLO);
     desired_interests = REACTOR_READABLE;
     break;
+
   case SSL_ERROR_WANT_READ:
     desired_interests = REACTOR_READABLE;
     break;
+
   case SSL_ERROR_WANT_WRITE:
     desired_interests = REACTOR_WRITABLE;
     break;
+
   default:
     nob_log(ERROR, "TLS handshake failed: ssl_error=%d", err);
     ERR_print_errors_fp(stderr);
+
     return FAITH_ERR_IO;
   }
 
@@ -204,6 +224,7 @@ faith_status_code_t server_drive_client_read(server_state_t *s,
                                              client_conn_t  *cl) {
   if (!s || !cl || cl->closing)
     return -1;
+
   faith_frame_t frame;
 
   transport_result_t res = frame_try_full_read(&cl->conn, &frame);
@@ -218,6 +239,7 @@ faith_status_code_t server_drive_client_read(server_state_t *s,
       server_client_queue_disconnect(
           s, cl, FAITH_DISCONNECT_BAD_PROTOCOL, FAITH_CLIENT_RECONNECT_ALLOWED,
           0, 0, "Server failed to properly handle client frame.");
+
       return -1;
     }
 
@@ -244,6 +266,7 @@ faith_status_code_t server_drive_client_read(server_state_t *s,
 
     return 0;
   }
+
   case TRANSPORT_RES_WANT_READ: {
     reactor_events_t desired_interests =
         cl->reactor_source.interests | REACTOR_READABLE;
@@ -256,6 +279,7 @@ faith_status_code_t server_drive_client_read(server_state_t *s,
                                  desired_interests) != FAITH_OK) {
       goto fail_ev_mask;
     }
+
     return 0;
   }
 
@@ -264,7 +288,9 @@ faith_status_code_t server_drive_client_read(server_state_t *s,
         s, cl, FAITH_DISCONNECT_TEMPORARY_FAILURE,
         FAITH_CLIENT_RECONNECT_ALLOWED, 0, 0,
         "Connection closed while reading incomplete frame.");
+
     return -1;
+
   default:
     nob_log(ERROR,
             "[%s: client=%" PRIu64 " fd=%i] Failed to read client frame.",
@@ -273,6 +299,7 @@ faith_status_code_t server_drive_client_read(server_state_t *s,
     server_client_queue_disconnect(s, cl, FAITH_DISCONNECT_BAD_PROTOCOL,
                                    FAITH_CLIENT_RECONNECT_ALLOWED, 0, 0,
                                    "Server failed to read client frame.");
+
     return -1;
   }
 

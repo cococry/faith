@@ -5,6 +5,7 @@ const char *faith_envelope_name(faith_envelope_type_t env) {
 #define X(name, value)                                                         \
   case name:                                                                   \
     return #name;
+
     FAITH_ENVELOPE_TYPES(X)
 #undef X
   default:

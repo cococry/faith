@@ -18,10 +18,12 @@
 #define FAITH_ENVL_CTS_EVENT_ACK_BODY_SIZE                                     \
   _FAITH_BODY_SIZE(sizeof(uint64_t) /* sequence number */)
 
-#define FAITH_EVENTS_CODEC(X) X(FAITH_EVENT_CONVERSATION_CREATED, 0)
+#define FAITH_EVENTS_CODEC(X)                                                  \
+  X(FAITH_EVENT_CONVERSATION_CREATED, 0)                                       \
+  X(FAITH_EVENT_GROUP_PACKET, 1)
 
 #define FAITH_EVENT_BATCH_MAX_EVENTS 256u
-#define FAITH_EVENT_DATA_MAX_SIZE (UINT16_MAX - 16u)
+#define FAITH_EVENT_DATA_MAX_SIZE    (UINT16_MAX - 16u)
 
 typedef enum {
 #define X(name, value) name = value,

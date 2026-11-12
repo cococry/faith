@@ -13,6 +13,7 @@ static bool _command(faith_db_t *db, const char *sql) {
   PGresult *res = PQexec(db->conn, sql);
   bool      ok = res && PQresultStatus(res) == PGRES_COMMAND_OK;
   PQclear(res);
+
   return ok;
 }
 
@@ -25,6 +26,7 @@ static PGresult *_query(faith_db_t *db, const char *sql, int count,
   if (!res || (PQresultStatus(res) != PGRES_COMMAND_OK &&
                PQresultStatus(res) != PGRES_TUPLES_OK)) {
     PQclear(res);
+
     return NULL;
   }
 
@@ -37,32 +39,86 @@ faith_status_code_t db_events_repo_execute(faith_db_t *db, void *data) {
   if (!db || !db->conn || !job || job->event.data_size > INT_MAX)
     return FAITH_ERR_INVALID;
 
+  if (job->operation == DB_EVENTS_SYNC) {
+    char seq[32];
+    snprintf(seq, sizeof(seq), "%" PRIu64, job->event.seq_num);
+    const char *values[] = {(const char *)job->auth_id.bytes,
+                            (const char *)job->device_id.bytes, seq};
+    int         lengths[] = {16, 16, 0}, formats[] = {1, 1, 0};
+    PGresult   *rows =
+        _query(db,
+               "SELECT seq_num,event_type,event_data FROM device_events "
+               "WHERE auth_id=$1 AND device_id=$2 AND seq_num >= $3::bigint "
+               "ORDER BY seq_num LIMIT 256",
+               3, values, lengths, formats);
+
+    if (!rows)
+      return FAITH_ERR_IO;
+
+    for (int i = 0; i < PQntuples(rows); i++) {
+      faith_envl_stc_event_t event = {
+          .seq_num = strtoull(PQgetvalue(rows, i, 0), NULL, 10),
+          .type = strtoul(PQgetvalue(rows, i, 1), NULL, 10)};
+
+      size_t         size;
+      unsigned char *bytes =
+          PQunescapeBytea((unsigned char *)PQgetvalue(rows, i, 2), &size);
+
+      if (!bytes || size > FAITH_EVENT_DATA_MAX_SIZE) {
+        PQfreemem(bytes);
+        PQclear(rows);
+        return FAITH_ERR_IO;
+      }
+      event.data = malloc(size ? size : 1);
+      event.data_size = size;
+
+      if (!event.data) {
+        PQfreemem(bytes);
+        PQclear(rows);
+        return FAITH_ERR_NOMEM;
+      }
+      memcpy(event.data, bytes, size);
+      PQfreemem(bytes);
+      arrput(job->inbox.events, event);
+      job->inbox.bytes += event.data_size + 16u;
+    }
+
+    PQclear(rows);
+    return FAITH_OK;
+  }
+
   if (job->operation == DB_EVENTS_EXPIRE) {
-    PGresult *expired = PQexec(db->conn, "SELECT * FROM expire_device_events()");
+    PGresult *expired =
+        PQexec(db->conn, "SELECT * FROM expire_device_events()");
 
     if (!expired || PQresultStatus(expired) != PGRES_TUPLES_OK) {
       PQclear(expired);
+
       return FAITH_ERR_IO;
     }
 
     for (int i = 0; i < PQntuples(expired); i++) {
       db_expired_inbox_t entry = {0};
-      size_t size;
-      unsigned char *bytes = PQunescapeBytea((unsigned char *)PQgetvalue(expired, i, 0), &size);
+      size_t             size;
+      unsigned char     *bytes =
+          PQunescapeBytea((unsigned char *)PQgetvalue(expired, i, 0), &size);
 
       if (!bytes || size != sizeof(entry.auth_id)) {
         PQfreemem(bytes);
         PQclear(expired);
+
         return FAITH_ERR_IO;
       }
 
       memcpy(&entry.auth_id, bytes, size);
       PQfreemem(bytes);
-      bytes = PQunescapeBytea((unsigned char *)PQgetvalue(expired, i, 1), &size);
+      bytes =
+          PQunescapeBytea((unsigned char *)PQgetvalue(expired, i, 1), &size);
 
       if (!bytes || size != sizeof(entry.device_id)) {
         PQfreemem(bytes);
         PQclear(expired);
+
         return FAITH_ERR_IO;
       }
 
@@ -73,13 +129,15 @@ faith_status_code_t db_events_repo_execute(faith_db_t *db, void *data) {
     }
 
     PQclear(expired);
+
     return FAITH_OK;
   }
 
   if (!job->in_transaction && !_command(db, "BEGIN"))
     return FAITH_ERR_IO;
 
-  if (!_command(db, "UPDATE event_storage_usage SET pending_bytes = pending_bytes WHERE singleton")) {
+  if (!_command(db, "UPDATE event_storage_usage SET pending_bytes = "
+                    "pending_bytes WHERE singleton")) {
     if (!job->in_transaction)
       _command(db, "ROLLBACK");
 
@@ -94,12 +152,13 @@ faith_status_code_t db_events_repo_execute(faith_db_t *db, void *data) {
   const char *values[] = {(const char *)job->auth_id.bytes,
                           (const char *)job->device_id.bytes, sequence, type,
                           job->event.data ? (const char *)job->event.data : ""};
-  int         lengths[] = {16, 16, 0, 0, (int)job->event.data_size};
-  int         formats[] = {1, 1, 0, 0, 1};
-  PGresult   *res = _query(
+
+  int       lengths[] = {16, 16, 0, 0, (int)job->event.data_size};
+  int       formats[] = {1, 1, 0, 0, 1};
+  PGresult *res = _query(
       db,
       "INSERT INTO device_event_inboxes (auth_id, device_id) VALUES ($1, $2) "
-        "ON CONFLICT DO NOTHING",
+      "ON CONFLICT DO NOTHING",
       2, values, lengths, formats);
 
   if (!res)
@@ -118,6 +177,7 @@ faith_status_code_t db_events_repo_execute(faith_db_t *db, void *data) {
   uint64_t acked = PQgetisnull(res, 0, 1)
                        ? UINT64_MAX
                        : strtoull(PQgetvalue(res, 0, 1), NULL, 10);
+
   PQclear(res);
   res = NULL;
 
@@ -204,6 +264,7 @@ faith_status_code_t db_events_repo_execute(faith_db_t *db, void *data) {
       memcpy(event.data, bytes, size);
       PQfreemem(bytes);
       arrput(job->inbox.events, event);
+      job->inbox.bytes += event.data_size + 16u;
     }
   } else {
     rc = FAITH_ERR_INVALID;

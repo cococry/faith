@@ -102,7 +102,7 @@ typedef enum {
 #undef X
 } faith_status_code_t;
 
-#define FAITH_PROTO_VERSION faith_version_pack(0, 0, 1)
+#define FAITH_PROTO_VERSION faith_version_pack(0, 0, 2)
 
 uint16_t faith_version_pack(uint8_t major, uint8_t minor, uint8_t patch);
 uint8_t  faith_version_major(uint16_t v);

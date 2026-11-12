@@ -49,20 +49,19 @@ static faith_status_code_t server_dispatch_envelope(server_state_t *s,
     _FH_CHECK_DEFER(auth_handle_challenge_response(s, cl, &envl));
     break;
 
-  case FAITH_ENVELOPE_MSG_SEND:
-    _FH_CHECK_DEFER(delivery_route_application_msg_envelope(s, cl, &envl));
-    break;
-
   case FAITH_ENVELOPE_DEVICE_AUTH_APPROVE:
   case FAITH_ENVELOPE_DEVICE_AUTH_DENY:
     _FH_CHECK_DEFER(device_link_handle_device_response(s, cl, &envl));
     break;
+
   case FAITH_ENVELOPE_COMMAND:
     _FH_CHECK_DEFER(command_dispatch(s, cl, &envl));
     break;
+
   case FAITH_ENVELOPE_EVENT_ACK:
     _FH_CHECK_DEFER(delivery_handle_event_acked(s, cl, &envl));
     break;
+
   default:
     _FH_RETURN_DEFER(FAITH_ERR_BAD_ENVELOPE);
   }
@@ -141,9 +140,11 @@ faith_status_code_t server_dispatch_frame(server_state_t *s, client_conn_t *cl,
   case FAITH_MSG_PING:
     _FH_CHECK_RETURN(server_handle_ping(s, cl, frame));
     break;
+
   case FAITH_MSG_ENVL:
     _FH_CHECK_RETURN(server_dispatch_envelope(s, cl, frame));
     break;
+
   default:
     return FAITH_ERR_BAD_FRAME;
   }

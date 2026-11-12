@@ -1,0 +1,35 @@
+services:
+  db:
+    image: ${POSTGRES_IMAGE:?Set a pinned PostgreSQL image}
+    restart: always
+  api:
+    ports: !reset []
+    image: ${FAITH_API_IMAGE:?Set an explicit release image}
+    restart: always
+  migrate:
+    image: ${FAITH_API_IMAGE:?Set the same release image}
+    # API ingress is provided by the stable TCP gateway, not dynamic host ports.
+  gateway:
+    image: ${HAPROXY_IMAGE:-haproxy:3.0-alpine}
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    ulimits: {nofile: {soft: 16384, hard: 16384}}
+    pids_limit: 32
+    mem_limit: 256m
+    cpus: 1
+    restart: always
+    volumes: ["./deploy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro"]
+    ports: ["${FAITH_BIND_ADDRESS:-0.0.0.0}:${FAITH_PUBLIC_PORT:-4433}:4433"]
+    networks: [edge]
+    depends_on:
+      api: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, haproxy, -c, -f, /usr/local/etc/haproxy/haproxy.cfg]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}

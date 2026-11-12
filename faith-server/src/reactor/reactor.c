@@ -47,9 +47,11 @@ faith_status_code_t reactor_init(reactor_context_t *o_reactor_ctx) {
   o_reactor_ctx->fd = -1;
 
   int epoll_fd = epoll_create1(EPOLL_CLOEXEC);
+
   if (epoll_fd == -1) {
     nob_log(ERROR, _MODULE_NAME "epoll_create1(EPOLL_CLOEXEC) failed: %s",
             strerror(errno));
+
     return FAITH_ERR_EPOLL;
   }
 
@@ -72,6 +74,7 @@ faith_status_code_t reactor_add(reactor_context_t *ctx, reactor_source_t *src) {
             _MODULE_NAME
             "reactor_add() failed with epoll fd=%i, source fd=%i: %s",
             ctx->fd, src->fd, strerror(errno));
+
     return FAITH_ERR_EPOLL;
   }
 
@@ -97,6 +100,7 @@ faith_status_code_t reactor_modify_interests(reactor_context_t *ctx,
         _MODULE_NAME
         "reactor_modify_interests() failed with epoll fd=%i, source fd=%i: %s",
         ctx->fd, src->fd, strerror(errno));
+
     return FAITH_ERR_EPOLL;
   }
 
@@ -110,15 +114,18 @@ faith_status_code_t reactor_remove(reactor_context_t *ctx,
 
   if (!ctx || !src || ctx->fd < 0 || src->fd < 0)
     return FAITH_ERR_INVALID;
+
   if (epoll_ctl(ctx->fd, EPOLL_CTL_DEL, src->fd, NULL) < 0 && errno != ENOENT) {
     nob_log(ERROR,
             _MODULE_NAME
             "reactor_remove() failed with epoll fd=%i, source fd=%i: %s",
             ctx->fd, src->fd, strerror(errno));
+
     return FAITH_ERR_EPOLL;
   }
 
   src->interests = 0;
+
   return FAITH_OK;
 }
 
@@ -164,9 +171,11 @@ faith_status_code_t reactor_destroy(reactor_context_t *reactor) {
       reactor->fd = -1;
 
       nob_log(ERROR, _MODULE_NAME "close() failed: %s", strerror(saved_errno));
+
       return FAITH_ERR_IO;
     }
   }
+
   reactor->fd = -1;
 
   return FAITH_OK;

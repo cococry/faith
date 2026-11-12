@@ -25,3 +25,8 @@ temp/
 *~
 /faith-server/chain.pem
 /faith-server/pkey.pem
+
+# Local deployment secrets and client profiles
+/.local/
+/.env
+/.env.production

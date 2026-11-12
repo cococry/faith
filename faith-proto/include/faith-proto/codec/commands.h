@@ -2,12 +2,14 @@
 
 #include <stdint.h>
 
+#include "../core/core.h"
 #include "auth.h"
 #include "core_types.h"
-#include "../core/core.h"
 
-#define FAITH_COMMAND_ID_SIZE  16
-#define FAITH_COMMAND_TYPES(X) X(FAITH_COMMAND_CREATE_CONVERSATION, 0)
+#define FAITH_COMMAND_ID_SIZE 16
+#define FAITH_COMMAND_TYPES(X)                                                 \
+  X(FAITH_COMMAND_CREATE_CONVERSATION, 0)                                      \
+  X(FAITH_COMMAND_GROUP_DELIVER, 1)
 
 typedef enum {
 #define X(name, value) name = value,
@@ -57,7 +59,7 @@ typedef struct {
                    sizeof(uint32_t) /* result */                               \
   )
 
-#define FAITH_COMMAND_PAYLOAD_SIZE_MAX 512
+#define FAITH_COMMAND_PAYLOAD_SIZE_MAX 8192
 
 #define FAITH_ENVL_CTS_COMMAND_BODY_SIZE_MAX                                   \
   _FAITH_BODY_SIZE(FAITH_ENVL_CTS_COMMAND_BODY_SIZE_FIXED +                    \

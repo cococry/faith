@@ -22,18 +22,21 @@ const char    *faith_status_code_name(faith_status_code_t code) {
 #define X(name, value)                                                         \
   case name:                                                                   \
     return #name;
+
     FAITH_STATUS_CODES(X)
 #undef X
   default:
     return "FAITH_ERR_UNKNOWN";
   }
 }
+
 uint64_t faith_now_ms(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
 
   uint64_t total_ms =
       (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+
   return total_ms;
 }
 
@@ -61,14 +64,18 @@ void faith_log_handler(Nob_Log_Level level, const char *fmt, va_list args) {
   case NOB_INFO:
     level_name = "INFO";
     break;
+
   case NOB_WARNING:
     level_name = "WARNING";
     break;
+
   case NOB_ERROR:
     level_name = "ERROR";
     break;
+
   case NOB_NO_LOGS:
     return;
+
   default:
     NOB_UNREACHABLE("Nob_Log_Level");
   }

@@ -1,13 +1,12 @@
 #pragma once
 
 #include "../auth/helpers.h"
+#include "../db/helpers.h"
+#include "../db/identity.h"
 #include "../reactor/reactor.h"
 #include "../transport/conn.h"
 #include "sess_registry.h"
-#include "../db/identity.h"
-#include "../db/helpers.h"
 
-#include <faith-proto/codec/auth.h>
 #include <faith-proto/codec/auth.h>
 
 #include <stdatomic.h>
@@ -18,8 +17,8 @@
   X(CLIENT_CLOSING, 2)                                                         \
   X(CLIENT_WAIT_FOR_HELLO, 3)                                                  \
   X(CLIENT_WAIT_FOR_CHALLENGE_RESPONSE, 4)                                     \
-  X(CLIENT_WAIT_FOR_DEVICE_LINK_RESPONSE, 5) \
-  X(CLIENT_WAIT_FOR_IDENTITY, 6) \
+  X(CLIENT_WAIT_FOR_DEVICE_LINK_RESPONSE, 5)                                   \
+  X(CLIENT_WAIT_FOR_IDENTITY, 6)                                               \
   X(CLIENT_WAIT_FOR_EVENTS, 7)
 
 typedef enum {
@@ -48,8 +47,8 @@ typedef struct client_conn_t {
 
   int authorized;
 
-  int closing;
-  int close_after_flush;
+  int      closing;
+  int      close_after_flush;
   uint64_t event_send_next;
   uint64_t event_last_sent;
 
@@ -70,13 +69,16 @@ typedef struct {
 
   sess_registry_state_t rt;
 
-  server_config_t cfg;
-  db_async_pool_t db_pool;
+  server_config_t  cfg;
+  db_async_pool_t  db_pool;
   reactor_source_t db_source;
-  uint64_t event_cleanup_at_ms;
-  bool event_cleanup_pending;
-  uint64_t command_window_ms;
-  unsigned command_count;
+  uint64_t         event_cleanup_at_ms;
+  bool             event_cleanup_pending;
+  size_t           event_cached_bytes;
+  uint64_t         event_sync_at_ms;
+  uint64_t         event_sync_cursor;
+  uint64_t         command_window_ms;
+  unsigned         command_count;
 } server_state_t;
 
 faith_status_code_t server_init(server_state_t *s, const server_config_t *cfg);

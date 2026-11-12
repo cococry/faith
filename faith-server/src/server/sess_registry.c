@@ -24,9 +24,11 @@ bool sess_registry_auth_id_registered(sess_registry_state_t *rt,
                                       const faith_auth_id_t *auth_id) {
   client_session_user_t *user = NULL;
   _FH_CHECK(sess_registry_get_user_from_auth_id(rt, auth_id, &user));
+
   if (_fh_rc != FAITH_OK) {
     return 0;
   }
+
   return user != NULL;
 }
 
@@ -41,6 +43,7 @@ sess_registry_get_devices(sess_registry_state_t    *rt,
 
   client_session_user_t *user = NULL;
   _FH_CHECK_RETURN(sess_registry_get_user_from_auth_id(rt, auth_id, &user));
+
   if (!user)
     return FAITH_ERR_NOT_FOUND;
 
@@ -61,6 +64,7 @@ faith_status_code_t sess_registry_register_session(
 
   /* allocate new session data */
   client_device_session_data_t *sess = calloc(1, sizeof(*sess));
+
   if (!sess) {
     return FAITH_ERR_NOMEM;
   }
@@ -95,8 +99,10 @@ faith_status_code_t sess_registry_register_session(
           _MODULE_NAME, auth_id_hex, device_id_hex, hmlen(rt->active_users));
 
   return FAITH_OK;
+
 defer:
   free(sess);
+
   return _fh_result;
 }
 
@@ -110,6 +116,7 @@ faith_status_code_t sess_registry_get_session(
 
   client_session_user_t *user = NULL;
   _FH_CHECK_RETURN(sess_registry_get_user_from_auth_id(rt, auth_id, &user));
+
   if (!user)
     return FAITH_ERR_NOT_FOUND;
 
@@ -136,12 +143,14 @@ sess_registry_unregister_session(sess_registry_state_t   *rt,
 
   client_session_user_t *user = NULL;
   _FH_CHECK_RETURN(sess_registry_get_user_from_auth_id(rt, auth_id, &user));
+
   if (!user)
     return FAITH_ERR_NOT_FOUND;
 
   client_session_device_t *devmap = user->value;
 
   client_session_device_t *dev = hmgetp_null(devmap, *device_id);
+
   if (!dev)
     return FAITH_ERR_NOT_FOUND;
 

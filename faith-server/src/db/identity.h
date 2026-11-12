@@ -2,7 +2,6 @@
 
 #include "device_repo.h"
 
-
 typedef struct {
   uint64_t            client_id;
   faith_auth_id_t     auth_id;

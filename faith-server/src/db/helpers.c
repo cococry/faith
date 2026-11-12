@@ -31,8 +31,10 @@ static void *_run(void *arg) {
         PGresult *settings = PQexec(
             db.conn,
             "SET statement_timeout = '3000ms'; SET lock_timeout = '2000ms'");
+
         bool configured =
             settings && PQresultStatus(settings) == PGRES_COMMAND_OK;
+
         PQclear(settings);
 
         if (!configured) {
@@ -57,11 +59,13 @@ static void *_run(void *arg) {
     pthread_mutex_unlock(&worker->mutex);
 
     uint64_t one = 1;
+
     while (write(worker->event_fd, &one, sizeof(one)) < 0 && errno == EINTR) {
     }
   }
 
   db_disconnect(&db);
+
   return NULL;
 }
 
@@ -92,6 +96,7 @@ faith_status_code_t db_async_init(db_async_pool_t *worker,
   }
 
   worker->started = true;
+
   return FAITH_OK;
 
 fail:
@@ -100,6 +105,7 @@ fail:
 
   free(worker->connection_str);
   worker->event_fd = -1;
+
   return FAITH_ERR_IO;
 }
 
@@ -114,6 +120,7 @@ faith_status_code_t db_async_submit(db_async_pool_t      *worker,
   if (worker->submitted - worker->consumed == DB_ASYNC_CAPACITY ||
       worker->stopping) {
     pthread_mutex_unlock(&worker->mutex);
+
     return FAITH_ERR_OVERFLOW;
   }
 
@@ -121,11 +128,13 @@ faith_status_code_t db_async_submit(db_async_pool_t      *worker,
   worker->submitted++;
   pthread_cond_signal(&worker->ready);
   pthread_mutex_unlock(&worker->mutex);
+
   return FAITH_OK;
 }
 
 void db_async_dispatch(db_async_pool_t *worker, void *owner) {
   uint64_t count;
+
   while (read(worker->event_fd, &count, sizeof(count)) < 0 && errno == EINTR) {
   }
 
