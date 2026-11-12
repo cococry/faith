@@ -38,7 +38,6 @@ struct PendingResize {
 
 pub struct StagingRing {
     buf: BufferHandle,
-    head: vk::DeviceSize,
     cap: vk::DeviceSize,
 }
 
@@ -166,6 +165,8 @@ pub struct Frame {
     pub image_available: vk::Semaphore,
     pub render_finished_per_image: Vec<vk::Semaphore>,
     pub in_flight_fence: vk::Fence,
+
+    pub staging_head: vk::DeviceSize,
 }
 
 impl VulkanRenderer {
@@ -1158,7 +1159,6 @@ impl VulkanRenderer {
 
         let staging_ring = StagingRing {
             cap: MAX_STAGING_RING_MEM,
-            head: 0,
             buf: staging_handle,
         };
 
@@ -1581,33 +1581,28 @@ impl VulkanRenderer {
         size: vk::DeviceSize,
         alignment: vk::DeviceSize,
     ) -> anyhow::Result<vk::DeviceSize> {
-        if size == 0 {
-            anyhow::bail!("Cannot allocate zero bytes from staging ring");
+        let frame_idx = self.frameloop.frame_idx;
+
+        let region_size = self.staging_ring.cap / FRAME_COUNT as u64;
+
+        let region_start = frame_idx as u64 * region_size;
+        let region_end = region_start + region_size;
+
+        let frame = &mut self.frameloop.frames[frame_idx];
+
+        let offset = Self::align_up(region_start + frame.staging_head, alignment);
+
+        let end = offset
+            .checked_add(size)
+            .ok_or_else(|| anyhow::anyhow!("staging offset overflow"))?;
+
+        if end > region_end {
+            anyhow::bail!("staging region exhausted");
         }
 
-        if size > self.staging_ring.cap {
-            anyhow::bail!(
-                "Staging allocation too large: requested {} bytes, capacity {} bytes",
-                size,
-                self.staging_ring.cap,
-            );
-        }
+        frame.staging_head = end - region_start;
 
-        let aligned_head = Self::align_up(self.staging_ring.head, alignment);
-
-        if aligned_head + size <= self.staging_ring.cap {
-            self.staging_ring.head = aligned_head + size;
-            return Ok(aligned_head);
-        }
-
-        let wrapped_head = 0;
-
-        if wrapped_head + size <= self.staging_ring.cap {
-            self.staging_ring.head = wrapped_head + size;
-            return Ok(wrapped_head);
-        }
-
-        anyhow::bail!("Staging ring out of memory")
+        Ok(offset)
     }
 
     fn align_up(value: vk::DeviceSize, alignment: vk::DeviceSize) -> vk::DeviceSize {
@@ -1631,7 +1626,6 @@ impl VulkanRenderer {
 
         self.skip_render = false;
         self.swapchain.image_idx = 0;
-        self.staging_ring.head = 0;
 
         let frame = &mut self.frameloop.frames[self.frameloop.frame_idx];
 
@@ -1639,6 +1633,8 @@ impl VulkanRenderer {
             self.logical_device
                 .wait_for_fences(&[frame.in_flight_fence], true, u64::MAX)?;
         }
+
+        frame.staging_head = 0;
 
         let acquire_res = unsafe {
             self.swapchain_dev.acquire_next_image(
