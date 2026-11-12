@@ -132,7 +132,10 @@ struct faith_client {
 
   pending_command_entry_t *pending_command_map;
 
-  uint64_t              ev_last_dispatched_seq;
+  atomic_uint_fast64_t ev_last_dispatched_seq;
+  atomic_bool event_stream_ready;
+  faith_client_store_event_fn store_event;
+  void *store_event_context;
   buffered_event_slot_t ev_reorder_window[EV_REORDER_WINDOW_SIZE];
 };
 
@@ -974,9 +977,14 @@ client_handle_event_conversation_created(faith_client_t               *client,
 
   char buf[33];
   _FH_CHECK_RETURN(faith_id128_to_hex(conv_created.conversation_id.bytes, buf));
-  nob_log(INFO, "[client] Conversation %s was created by the server.", buf);
+  if (client->store_event) {
+    _FH_CHECK_RETURN(client->store_event(client->store_event_context,
+        &client->ident.auth_id, &client->ident.device_id, event->seq_num,
+        event->type, event->data, event->data_size));
+  }
 
-  return FAITH_OK;
+  return client_push_event_ex(client, FAITH_EVENT_CONVERSATION_READY,
+      event->seq_num, 0, conv_created.conversation_id.bytes, NULL, buf, NULL, 0);
 }
 static faith_status_code_t
 client_dispatch_event(faith_client_t               *client,
@@ -998,7 +1006,7 @@ client_dispatch_event(faith_client_t               *client,
     _FH_CHECK_RETURN(client_handle_event_conversation_created(client, event));
     break;
   default:
-    break;
+    return FAITH_ERR_BAD_ENVELOPE;
   }
 
   client->ev_last_dispatched_seq = event->seq_num;
@@ -1141,7 +1149,7 @@ static faith_status_code_t client_handle_event(faith_client_t         *client,
   _FH_CHECK_DEFER(
       client_process_event(client, &event, &saw_duplicate, &made_progress));
 
-  if (saw_duplicate || made_progress) {
+  if (client->store_event && (saw_duplicate || made_progress)) {
     _FH_CHECK_DEFER(
         client_send_ack_until(client, client->ev_last_dispatched_seq));
   }
@@ -1169,7 +1177,7 @@ client_handle_event_batch(faith_client_t         *client,
     _FH_CHECK_DEFER(
         client_process_event(client, event, &saw_duplicate, &made_progress));
   }
-  if ((made_progress || saw_duplicate) &&
+  if (client->store_event && (made_progress || saw_duplicate) &&
       client->ev_last_dispatched_seq != UINT64_MAX) {
     _FH_CHECK_DEFER(
         client_send_ack_until(client, client->ev_last_dispatched_seq));
@@ -1413,9 +1421,15 @@ static faith_status_code_t client_handle_envelope(faith_client_t *client,
     _FH_CHECK_DEFER(client_handle_command_result(client, &envl));
     break;
   case FAITH_ENVELOPE_EVENT:
+    if (!atomic_load(&client->event_stream_ready))
+      _FH_RETURN_DEFER(FAITH_ERR_BAD_ENVELOPE);
+
     _FH_CHECK_DEFER(client_handle_event(client, &envl));
     break;
   case FAITH_ENVELOPE_EVENT_RESUME: {
+    if (atomic_load(&client->event_stream_ready))
+      _FH_RETURN_DEFER(FAITH_ERR_BAD_ENVELOPE);
+
     faith_envl_cts_event_ack_t base = {0};
     faith_status_code_t rc = faith_decode_event_ack_body(envl.body, envl.body_size, &base);
     _FH_CHECK_DEFER(rc);
@@ -1431,10 +1445,14 @@ static faith_status_code_t client_handle_envelope(faith_client_t *client,
     }
 
     client->ev_last_dispatched_seq = base.seq_num ? base.seq_num - 1 : UINT64_MAX;
+    atomic_store(&client->event_stream_ready, true);
     break;
   }
 
   case FAITH_ENVELOPE_EVENT_BATCH:
+    if (!atomic_load(&client->event_stream_ready))
+      _FH_RETURN_DEFER(FAITH_ERR_BAD_ENVELOPE);
+
     _FH_CHECK_DEFER(client_handle_event_batch(client, &envl));
     break;
   default:
@@ -1874,6 +1892,8 @@ static void *faith_client_thread_routine(void *arg) {
 
     atomic_store(&client->connected, true);
 
+    atomic_store(&client->event_stream_ready, false);
+
     /* Make protocol handshake with server */
     {
       int authorized = 0;
@@ -2053,6 +2073,8 @@ faith_client_t *faith_client_create(const faith_client_config_t *cfg) {
   }
 
   client->insecure_skip_verify = cfg->insecure_skip_verify;
+  client->store_event = cfg->store_event;
+  client->store_event_context = cfg->store_event_context;
 
   if (pthread_mutex_init(&client->lock, NULL) != 0)
     goto fail_client;
@@ -2516,4 +2538,17 @@ const char *faith_event_name(faith_event_type_t ev) {
   default:
     return "FAITH_EVENT_UNKNOWN";
   }
+}
+
+faith_status_code_t faith_client_ack_events(faith_client_t *client, uint64_t sequence) {
+  if (!client || !atomic_load(&client->event_stream_ready) ||
+      sequence == UINT64_MAX)
+    return FAITH_ERR_INVALID;
+
+  uint64_t dispatched = atomic_load(&client->ev_last_dispatched_seq);
+
+  if (dispatched == UINT64_MAX || sequence > dispatched)
+    return FAITH_ERR_INVALID;
+
+  return client_send_ack_until(client, sequence);
 }

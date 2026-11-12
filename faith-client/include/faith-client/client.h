@@ -23,7 +23,8 @@
   X(FAITH_EVENT_AUTHORIZED, 12)                                                \
   X(FAITH_EVENT_SERVER_DISCONNECT, 13)                                         \
   X(FAITH_EVENT_COMMAND_RESULT, 14)                                            \
-  X(FAITH_EVENT_COMMAND_FAILED, 15)
+  X(FAITH_EVENT_COMMAND_FAILED, 15) \
+  X(FAITH_EVENT_CONVERSATION_READY, 16)
 
 typedef enum {
 #define X(name, value) name = value,
@@ -32,6 +33,13 @@ typedef enum {
 } faith_event_type_t;
 
 typedef struct faith_client faith_client_t;
+
+/* Return FAITH_OK only after an idempotent durable commit. The callback runs
+ * on the reader thread. Key stored events by (auth_id, device_id, sequence).
+ * A repeated sequence must not repeat application side effects. */
+typedef faith_status_code_t (*faith_client_store_event_fn)(void *context,
+    const faith_auth_id_t *auth_id, const faith_device_id_t *device_id,
+    uint64_t sequence, uint32_t type, const uint8_t *data, size_t size);
 
 typedef struct {
 
@@ -43,6 +51,8 @@ typedef struct {
   int         insecure_skip_verify;
 
   uint16_t proto_ver;
+  faith_client_store_event_fn store_event;
+  void *store_event_context;
 
 } faith_client_config_t;
 
@@ -92,3 +102,8 @@ faith_client_create_conversation(faith_client_t *client,
 faith_status_code_t faith_client_reconnect(faith_client_t *client);
 
 const char *faith_event_name(faith_event_type_t ev);
+
+/* Without store_event, events are delivered to the application without ACK.
+ * Call this only after durably applying every event through sequence. For
+ * CONVERSATION_READY, value0 is sequence and value0_128 is conversation ID. */
+faith_status_code_t faith_client_ack_events(faith_client_t *client, uint64_t sequence);
