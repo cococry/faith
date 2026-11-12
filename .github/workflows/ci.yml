@@ -59,6 +59,9 @@ jobs:
             libx11-dev \
             libx11-xcb-dev \
             libxcb1-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libssl-dev \
             libwayland-dev \
             libegl1-mesa-dev \
             libgl1-mesa-dev \
@@ -102,6 +105,9 @@ jobs:
             libx11-dev \
             libx11-xcb-dev \
             libxcb1-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libssl-dev \
             libwayland-dev \
             libegl1-mesa-dev \
             libgl1-mesa-dev \
@@ -146,6 +152,9 @@ jobs:
             libx11-dev \
             libx11-xcb-dev \
             libxcb1-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libssl-dev \
             libwayland-dev \
             libegl1-mesa-dev \
             libgl1-mesa-dev \
@@ -205,6 +214,9 @@ jobs:
             libx11-dev \
             libx11-xcb-dev \
             libxcb1-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libssl-dev \
             libwayland-dev \
             libegl1-mesa-dev \
             libgl1-mesa-dev \

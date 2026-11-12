@@ -18,6 +18,7 @@
   do {                                                                         \
     const size_t _fh_cap = (size_t)(cap);                                      \
     const size_t _fh_off = (size_t)(off);                                      \
+    const void  *_fh_ptr = (ptr);                                              \
     const size_t _fh_len = (size_t)(len);                                      \
                                                                                \
     if (!(buf)) {                                                              \
@@ -31,7 +32,7 @@
       return FAITH_ERR_INVALID;                                                \
     }                                                                          \
                                                                                \
-    if (_fh_len > 0 && !(ptr)) {                                               \
+    if (_fh_len > 0 && !_fh_ptr) {                                             \
       _FH_LOG_CODEC_FAILURE("Buffer append",                                   \
                             "source is NULL for a non-empty copy",             \
                             "  buffer   : %s\n"                                \
@@ -69,7 +70,7 @@
     }                                                                          \
                                                                                \
     if (_fh_len > 0)                                                           \
-      memcpy((buf) + _fh_off, (ptr), _fh_len);                                 \
+      memcpy((buf) + _fh_off, _fh_ptr, _fh_len);                               \
                                                                                \
     (off) += _fh_len;                                                          \
   } while (0)
@@ -79,6 +80,7 @@
   do {                                                                         \
     const size_t _fh_payload_size = (size_t)(payload_size);                    \
     const size_t _fh_offset = (size_t)(offset);                                \
+    void        *_fh_dst = (dst);                                              \
     const size_t _fh_size = (size_t)(size);                                    \
                                                                                \
     if (!(payload)) {                                                          \
@@ -93,7 +95,7 @@
       invalid_failure;                                                         \
     }                                                                          \
                                                                                \
-    if (_fh_size > 0 && !(dst)) {                                              \
+    if (_fh_size > 0 && !_fh_dst) {                                            \
       _FH_LOG_CODEC_FAILURE(                                                   \
           "Buffer decode", "destination is NULL for a non-empty copy",         \
           "  payload      : %s\n"                                              \
@@ -131,7 +133,7 @@
     }                                                                          \
                                                                                \
     if (_fh_size > 0)                                                          \
-      memcpy((dst), (payload) + _fh_offset, _fh_size);                         \
+      memcpy(_fh_dst, (payload) + _fh_offset, _fh_size);                       \
                                                                                \
     (offset) += _fh_size;                                                      \
   } while (0)
