@@ -153,8 +153,11 @@ impl InputField {
             [bounds.x, bounds.y, bounds.width, bounds.height],
             Color::rgba(0.88, 0.91, 0.95, 1.0),
         )?;
+
         let available = (bounds.width - 24.0).max(1.0);
+
         let mut boundaries: Vec<usize> = self.text.grapheme_indices(true).map(|(i, _)| i).collect();
+
         boundaries.push(self.text.len());
         let cursor = boundaries.binary_search(&self.cursor).unwrap_or(0);
         let mut lo = 0;
