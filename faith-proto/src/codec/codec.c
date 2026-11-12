@@ -710,6 +710,9 @@ faith_status_code_t faith_encode_event_body(uint8_t           *out_buf,
 faith_status_code_t faith_decode_event_body(const uint8_t    *payload,
                                             faith_body_size_t payload_size,
                                             faith_envl_stc_event_t *out) {
+  if (out)
+    memset(out, 0, sizeof(*out));
+
   FAITH_DECODE_PROLOGUE(FAITH_ENVL_STC_EVENT_BODY_SIZE_FIXED, <);
 
   size_t offset = 0;
@@ -717,6 +720,12 @@ faith_status_code_t faith_decode_event_body(const uint8_t    *payload,
   FAITH_DECODE_U64_BE_RETURN(payload, payload_size, offset, out->seq_num);
   FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset, out->type);
   FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset, out->data_size);
+
+  if (out->data_size > FAITH_EVENT_DATA_MAX_SIZE ||
+      out->data_size != payload_size - offset) {
+    memset(out, 0, sizeof(*out));
+    return FAITH_ERR_BAD_ENVELOPE;
+  }
 
   faith_status_code_t _fh_result = FAITH_OK;
 
@@ -850,6 +859,9 @@ faith_decode_event_batch_body(const uint8_t                *payload,
                               faith_body_size_t             payload_size,
                               faith_envl_stc_event_batch_t *out) {
 
+  if (out)
+    memset(out, 0, sizeof(*out));
+
   FAITH_DECODE_PROLOGUE(FAITH_ENVL_STC_EVENT_BATCH_BODY_SIZE_FIXED, <);
 
   out->n_events = 0;
@@ -857,14 +869,15 @@ faith_decode_event_batch_body(const uint8_t                *payload,
   out->events = NULL;
 
   size_t offset = 0;
+  uint16_t count = 0;
 
-  FAITH_DECODE_U16_BE_RETURN(payload, payload_size, offset, out->n_events);
+  FAITH_DECODE_U16_BE_RETURN(payload, payload_size, offset, count);
 
-  if (out->n_events > FAITH_EVENT_BATCH_MAX_EVENTS) {
+  if (count > FAITH_EVENT_BATCH_MAX_EVENTS) {
     nob_log(ERROR,
             "[%s] Invalid EVENT_BATCH body: event count %" PRIu16
             " exceeds maximum %u.",
-            _MODULE_NAME, out->n_events, FAITH_EVENT_BATCH_MAX_EVENTS);
+            _MODULE_NAME, count, FAITH_EVENT_BATCH_MAX_EVENTS);
     return FAITH_ERR_BAD_ENVELOPE;
   }
 
@@ -895,9 +908,17 @@ faith_decode_event_batch_body(const uint8_t                *payload,
 
   faith_status_code_t _fh_result = FAITH_OK;
 
-  if (out->n_events != 0) {
-    arrsetlen(out->events, out->n_events);
+  if (count > out->events_data_size / (sizeof(uint16_t) + FAITH_ENVL_STC_EVENT_BODY_SIZE_FIXED)) {
+    out->events_data_size = 0;
+    return FAITH_ERR_BAD_ENVELOPE;
   }
+
+  if (count != 0) {
+    arrsetlen(out->events, count);
+    memset(out->events, 0, count * sizeof(*out->events));
+  }
+
+  out->n_events = count;
 
   uint16_t decoded_events = 0;
   for (uint16_t i = 0; i < out->n_events; i++) {

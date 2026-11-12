@@ -21,6 +21,7 @@
 #define FAITH_EVENTS_CODEC(X) X(FAITH_EVENT_CONVERSATION_CREATED, 0)
 
 #define FAITH_EVENT_BATCH_MAX_EVENTS 256u
+#define FAITH_EVENT_DATA_MAX_SIZE (UINT16_MAX - 16u)
 
 typedef enum {
 #define X(name, value) name = value,

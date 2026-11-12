@@ -97,6 +97,8 @@ static faith_status_code_t _open_stream(server_state_t *s, client_conn_t *cl,
         .seq_num = sess->inbox.last_acked_seq == UINT64_MAX
                        ? 0 : sess->inbox.last_acked_seq + 1};
     faith_encode_event_ack_body(resume, &size, sizeof(resume), &base);
+    cl->event_send_next = base.seq_num;
+    cl->event_last_sent = UINT64_MAX;
     faith_envelope_t envl = {.type = FAITH_ENVELOPE_EVENT_RESUME,
                              .recipient_id = cl->ident.auth_id,
                              .body = resume, .body_size = size};
@@ -111,6 +113,30 @@ static faith_status_code_t _open_stream(server_state_t *s, client_conn_t *cl,
 static void _event_complete(void *owner, void *data, faith_status_code_t status) {
   server_state_t *s = owner;
   db_events_job_t *job = data;
+  if (job->operation == DB_EVENTS_EXPIRE) {
+    s->event_cleanup_pending = false;
+
+    if (status != FAITH_OK)
+      return;
+
+    for (size_t i = 0; i < arrlenu(job->expired); i++) {
+      db_expired_inbox_t *entry = &job->expired[i];
+      client_device_session_data_t *expired = NULL;
+      sess_registry_get_session(&s->rt, &entry->auth_id, &entry->device_id, &expired);
+
+      if (!expired || !expired->events_loaded)
+        continue;
+
+      device_event_inbox_remove_until(&expired->inbox, entry->until);
+
+      if (expired->conn)
+        server_client_queue_disconnect(s, expired->conn, FAITH_DISCONNECT_TEMPORARY_FAILURE,
+            FAITH_CLIENT_RECONNECT_ALLOWED, 0, 0, "Event retention window expired; reconnect to resume.");
+    }
+
+    return;
+  }
+
   client_device_session_data_t *sess = NULL;
   sess_registry_get_session(&s->rt, &job->auth_id, &job->device_id, &sess);
 
@@ -157,8 +183,18 @@ static void _event_complete(void *owner, void *data, faith_status_code_t status)
       return;
     }
 
-    if (cl && cl->state == CLIENT_OPEN && !cl->closing && !cl->close_after_flush)
-      _queue_event_online_user(s, cl, &job->event);
+    if (cl && cl->state == CLIENT_OPEN && !cl->closing && !cl->close_after_flush) {
+      if (cl->event_send_next == job->event.seq_num && cl->conn.out.size < 131072) {
+        if (_queue_event_online_user(s, cl, &job->event) == FAITH_OK) {
+          cl->event_send_next = job->event.seq_num + 1;
+          cl->event_last_sent = job->event.seq_num;
+        }
+
+      } else {
+        delivery_queue_pending_events(s, cl);
+      }
+
+    }
 
   } else {
     device_event_inbox_remove_until(&sess->inbox, job->event.seq_num);
@@ -261,49 +297,45 @@ faith_status_code_t delivery_queue_pending_events(server_state_t *s,
   if (!sess)
     return FAITH_ERR_NOT_FOUND;
 
-  size_t n_events = arrlen(sess->inbox.events);
+  if (cl->closing || cl->close_after_flush || cl->state != CLIENT_OPEN ||
+      cl->conn.out.size >= 131072)
+    return FAITH_OK;
 
-  size_t n_fitting = 0;
-  for (size_t offset = 0; offset < n_events; offset += n_fitting) {
-    size_t remaining = n_events - offset;
+  size_t count = arrlenu(sess->inbox.events);
+  size_t low = 0, high = count;
 
-    faith_envl_stc_event_t *batch = &sess->inbox.events[offset];
+  while (low < high) {
+    size_t middle = low + (high - low) / 2;
 
-    size_t n_in_batch = remaining < FAITH_EVENT_BATCH_MAX_EVENTS
-                            ? remaining
-                            : FAITH_EVENT_BATCH_MAX_EVENTS;
-
-    const size_t batch_overhead =
-        FAITH_ENVL_STC_EVENT_BATCH_BODY_SIZE_FIXED + FAITH_ENVL_HEADER_SIZE;
-
-    if (FAITH_MAX_STC_PAYLOAD_SIZE < batch_overhead) {
-      return FAITH_ERR_TOO_LARGE;
-    }
-
-    const size_t max_events_data_size =
-        FAITH_MAX_STC_PAYLOAD_SIZE - batch_overhead;
-
-    faith_body_size_t events_data_size = 0;
-    n_fitting = 0;
-
-    _FH_CHECK_RETURN(faith_codec_event_batch_data_size_fit(
-        batch, n_in_batch, &events_data_size, &n_fitting,
-        max_events_data_size));
-
-    if (n_fitting == 0 || n_fitting > n_in_batch) {
-      nob_log(ERROR,
-              "[%s] Event data is too large or codec returned invalid count.",
-              _MODULE_NAME);
-      return FAITH_ERR_TOO_LARGE;
-    }
-
-    faith_envl_stc_event_batch_t batch_envl = {0};
-    batch_envl.events_data_size = events_data_size;
-    batch_envl.events = batch;
-    batch_envl.n_events = (uint16_t)n_fitting;
-
-    _FH_CHECK_RETURN(_queue_event_batch_envl(s, cl, &batch_envl));
+    if (sess->inbox.events[middle].seq_num < cl->event_send_next)
+      low = middle + 1;
+    else
+      high = middle;
   }
+
+  if (low == count)
+    return FAITH_OK;
+
+  faith_envl_stc_event_t *events = &sess->inbox.events[low];
+
+  if (events[0].seq_num != cl->event_send_next)
+    return FAITH_ERR_RESYNC_REQUIRED;
+
+  size_t remaining = count - low;
+  uint16_t n = remaining < 64 ? (uint16_t)remaining : 64;
+  faith_body_size_t data_size = 0;
+  size_t fitting = 0;
+  _FH_CHECK_RETURN(faith_codec_event_batch_data_size_fit(
+      events, n, &data_size, &fitting, 131072 - 54));
+
+  if (!fitting)
+    return FAITH_ERR_TOO_LARGE;
+
+  faith_envl_stc_event_batch_t batch = {
+      .events = events, .n_events = fitting, .events_data_size = data_size};
+  _FH_CHECK_RETURN(_queue_event_batch_envl(s, cl, &batch));
+  cl->event_last_sent = events[fitting - 1].seq_num;
+  cl->event_send_next = cl->event_last_sent + 1;
 
   return FAITH_OK;
 }
@@ -331,13 +363,12 @@ faith_status_code_t delivery_handle_event_acked(server_state_t   *s,
   _FH_CHECK_RETURN(
       faith_decode_event_ack_body(envl->body, envl->body_size, &ack));
 
-  if (sess->inbox.last_sent_seq == UINT64_MAX ||
-      ack.seq_num > sess->inbox.last_sent_seq)
-    return FAITH_ERR_BAD_ENVELOPE;
-
   if (sess->inbox.last_acked_seq != UINT64_MAX &&
       ack.seq_num <= sess->inbox.last_acked_seq)
     return FAITH_OK;
+
+  if (cl->event_last_sent == UINT64_MAX || ack.seq_num > cl->event_last_sent)
+    return FAITH_ERR_BAD_ENVELOPE;
 
   db_events_job_t *job = calloc(1, sizeof(*job));
 
@@ -354,4 +385,19 @@ faith_status_code_t delivery_handle_event_acked(server_state_t   *s,
 void delivery_event_complete(server_state_t *s, db_events_job_t *job,
                               faith_status_code_t status) {
   _event_complete(s, job, status);
+}
+
+void delivery_expire_events(server_state_t *s) {
+  if (s->event_cleanup_pending)
+    return;
+
+  db_events_job_t *job = calloc(1, sizeof(*job));
+
+  if (!job)
+    return;
+
+  job->operation = DB_EVENTS_EXPIRE;
+
+  if (_submit_event(s, job) == FAITH_OK)
+    s->event_cleanup_pending = true;
 }

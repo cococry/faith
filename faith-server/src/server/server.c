@@ -2,6 +2,7 @@
 
 #include "server.h"
 #include "../auth/handshake.h"
+#include "../delivery/events.h"
 #include "../logging/logging.h"
 #include "client_io.h"
 #include "client_lifecycle.h"
@@ -314,7 +315,15 @@ faith_status_code_t server_loop(server_state_t *s) {
       }
     }
 
-    int timeout_ms = shutting_down ? 100 : -1;
+    uint64_t now = faith_now_ms();
+
+    if (!shutting_down && now >= s->event_cleanup_at_ms) {
+      delivery_expire_events(s);
+      s->event_cleanup_at_ms = now + 60000;
+    }
+
+    int timeout_ms = shutting_down ? 100 :
+        (int)(s->event_cleanup_at_ms > now ? s->event_cleanup_at_ms - now : 0);
 
     size_t n_events = 0;
     _FH_CHECK(reactor_wait(&s->reactor, timeout_ms, events, &n_events));

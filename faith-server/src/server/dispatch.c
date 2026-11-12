@@ -61,7 +61,7 @@ static faith_status_code_t server_dispatch_envelope(server_state_t *s,
     _FH_CHECK_DEFER(command_dispatch(s, cl, &envl));
     break;
   case FAITH_ENVELOPE_EVENT_ACK:
-    _FH_CHECK_RETURN(delivery_handle_event_acked(s, cl, &envl));
+    _FH_CHECK_DEFER(delivery_handle_event_acked(s, cl, &envl));
     break;
   default:
     _FH_RETURN_DEFER(FAITH_ERR_BAD_ENVELOPE);

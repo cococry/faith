@@ -50,6 +50,9 @@ typedef struct client_conn_t {
 
   int closing;
   int close_after_flush;
+  uint64_t event_send_next;
+  uint64_t event_last_sent;
+
 } client_conn_t;
 
 typedef struct {
@@ -70,6 +73,10 @@ typedef struct {
   server_config_t cfg;
   db_async_pool_t db_pool;
   reactor_source_t db_source;
+  uint64_t event_cleanup_at_ms;
+  bool event_cleanup_pending;
+  uint64_t command_window_ms;
+  unsigned command_count;
 } server_state_t;
 
 faith_status_code_t server_init(server_state_t *s, const server_config_t *cfg);

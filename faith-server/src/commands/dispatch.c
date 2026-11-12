@@ -63,6 +63,51 @@ faith_status_code_t command_dispatch(server_state_t *s, client_conn_t *cl,
   _FH_CHECK_RETURN(
       faith_decode_command_body(envl->body, envl->body_size, &cmd));
 
+  client_device_session_data_t *sess = NULL;
+  faith_status_code_t lookup = sess_registry_get_session(&s->rt,
+      &cl->ident.auth_id, &cl->ident.device_id, &sess);
+
+  if (lookup != FAITH_OK || !sess) {
+    free(cmd.payload);
+    return FAITH_ERR_UNAUTHORIZED;
+  }
+
+  for (size_t i = 0; i < sess->recent_command_count; i++) {
+    if (memcmp(sess->recent_command_ids[i], cmd.cmd_id.bytes, 16) == 0) {
+      free(cmd.payload);
+      return command_queue_result(s, cl, &cmd.cmd_id, cmd.type,
+          FAITH_COMMAND_ERR_BAD_COMMAND, FAITH_COMMAND_RESULT_REJECTED);
+    }
+
+  }
+
+  uint64_t now = faith_now_ms();
+
+  if (now - sess->command_window_ms >= 60000) {
+    sess->command_window_ms = now;
+    sess->command_count = 0;
+  }
+
+  if (now - s->command_window_ms >= 60000) {
+    s->command_window_ms = now;
+    s->command_count = 0;
+  }
+
+  if (sess->command_count >= 60 || s->command_count >= 6000) {
+    free(cmd.payload);
+    return command_queue_result(s, cl, &cmd.cmd_id, cmd.type,
+        FAITH_COMMAND_ERR_TIMED_OUT, FAITH_COMMAND_RESULT_REJECTED);
+  }
+
+  memcpy(sess->recent_command_ids[sess->recent_command_next], cmd.cmd_id.bytes, 16);
+  sess->recent_command_next = (sess->recent_command_next + 1) % 64;
+
+  if (sess->recent_command_count < 64)
+    sess->recent_command_count++;
+
+  sess->command_count++;
+  s->command_count++;
+
   switch (cmd.type) {
   case FAITH_COMMAND_CREATE_CONVERSATION:
     {
@@ -84,7 +129,7 @@ faith_status_code_t command_dispatch(server_state_t *s, client_conn_t *cl,
     result = FAITH_COMMAND_RESULT_REJECTED;
   }
 
-  _FH_CHECK_RETURN(
-      command_queue_result(s, cl, &cmd.cmd_id, cmd.type, err, result));
-  return FAITH_OK;
+  faith_status_code_t rc = command_queue_result(s, cl, &cmd.cmd_id, cmd.type, err, result);
+  free(cmd.payload);
+  return rc;
 }
