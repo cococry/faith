@@ -721,7 +721,8 @@ faith_status_code_t faith_decode_event_body(const uint8_t    *payload,
   FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset, out->type);
   FAITH_DECODE_U32_BE_RETURN(payload, payload_size, offset, out->data_size);
 
-  if (out->data_size != payload_size - offset) {
+  if (out->data_size > FAITH_EVENT_DATA_MAX_SIZE ||
+      out->data_size != payload_size - offset) {
     memset(out, 0, sizeof(*out));
     return FAITH_ERR_BAD_ENVELOPE;
   }

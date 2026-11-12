@@ -72,6 +72,15 @@ faith_status_code_t command_dispatch(server_state_t *s, client_conn_t *cl,
     return FAITH_ERR_UNAUTHORIZED;
   }
 
+  for (size_t i = 0; i < sess->recent_command_count; i++) {
+    if (memcmp(sess->recent_command_ids[i], cmd.cmd_id.bytes, 16) == 0) {
+      free(cmd.payload);
+      return command_queue_result(s, cl, &cmd.cmd_id, cmd.type,
+          FAITH_COMMAND_ERR_BAD_COMMAND, FAITH_COMMAND_RESULT_REJECTED);
+    }
+
+  }
+
   uint64_t now = faith_now_ms();
 
   if (now - sess->command_window_ms >= 60000) {
@@ -89,6 +98,12 @@ faith_status_code_t command_dispatch(server_state_t *s, client_conn_t *cl,
     return command_queue_result(s, cl, &cmd.cmd_id, cmd.type,
         FAITH_COMMAND_ERR_TIMED_OUT, FAITH_COMMAND_RESULT_REJECTED);
   }
+
+  memcpy(sess->recent_command_ids[sess->recent_command_next], cmd.cmd_id.bytes, 16);
+  sess->recent_command_next = (sess->recent_command_next + 1) % 64;
+
+  if (sess->recent_command_count < 64)
+    sess->recent_command_count++;
 
   sess->command_count++;
   s->command_count++;

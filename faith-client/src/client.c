@@ -1481,7 +1481,14 @@ static void *reader(void *arg) {
       break;
     }
     case FAITH_MSG_ENVL: {
-      _FH_CHECK(client_handle_envelope(client, &frame));
+      faith_status_code_t rc = client_handle_envelope(client, &frame);
+
+      if (rc != FAITH_OK) {
+        faith_free_frame(&frame);
+        atomic_store(&client->connected, false);
+        return NULL;
+      }
+
       break;
     }
     default:

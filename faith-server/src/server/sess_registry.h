@@ -14,6 +14,9 @@ typedef struct {
   bool events_loaded;
   uint64_t command_window_ms;
   unsigned command_count;
+  uint8_t recent_command_ids[64][16];
+  size_t recent_command_count;
+  size_t recent_command_next;
 } client_device_session_data_t;
 
 typedef struct {
