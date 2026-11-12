@@ -1,7 +1,9 @@
 use crate::platform::window::WindowHandleInfo;
 
 use super::event::WindowEvent;
+use super::keyboard::Keyboard;
 use super::window::WindowConfig;
+use xkbcommon::xkb;
 
 extern crate anyhow;
 extern crate x11;
@@ -45,6 +47,10 @@ pub struct X11Platform {
     xcb_conn: XCBConnection,
     window: u32,
     wm_delete_window: u32,
+    keyboard: Keyboard,
+    context: xkb::Context,
+    keyboard_device: i32,
+    pending_input: Vec<WindowEvent>,
 
     // Eventfd used to wake the blocking X11
     // event poll from another thread.
@@ -144,7 +150,8 @@ impl X11Platform {
                     EventMask::EXPOSURE
                         | EventMask::STRUCTURE_NOTIFY
                         | EventMask::KEY_PRESS
-                        | EventMask::KEY_RELEASE,
+                        | EventMask::KEY_RELEASE
+                        | EventMask::FOCUS_CHANGE,
                 ),
         )?;
 
@@ -191,6 +198,56 @@ impl X11Platform {
             EfdFlags::EFD_NONBLOCK | EfdFlags::EFD_CLOEXEC,
         )?);
 
+        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+        let (mut major, mut minor, mut event, mut error) = (0, 0, 0, 0);
+        anyhow::ensure!(
+            xkb::x11::setup_xkb_extension(
+                &conn,
+                1,
+                0,
+                xkb::x11::SetupXkbExtensionFlags::NoFlags,
+                &mut major,
+                &mut minor,
+                &mut event,
+                &mut error
+            ),
+            "XKB extension unavailable"
+        );
+        let keyboard_device = xkb::x11::get_core_keyboard_device_id(&conn);
+        anyhow::ensure!(keyboard_device >= 0, "XKB keyboard unavailable");
+        let keymap = xkb::x11::keymap_new_from_device(
+            &context,
+            &conn,
+            keyboard_device,
+            xkb::KEYMAP_COMPILE_NO_FLAGS,
+        );
+        anyhow::ensure!(!keymap.get_raw_ptr().is_null(), "XKB keymap unavailable");
+        let state = xkb::x11::state_new_from_device(&keymap, &conn, keyboard_device);
+        anyhow::ensure!(!state.get_raw_ptr().is_null(), "XKB state unavailable");
+        let keyboard = Keyboard::new(&context, keymap, state);
+        use x11rb::protocol::xkb::{self as protocol, EventType, MapPart};
+        protocol::select_events(
+            &conn,
+            keyboard_device as u16,
+            EventType::default(),
+            EventType::NEW_KEYBOARD_NOTIFY | EventType::MAP_NOTIFY | EventType::STATE_NOTIFY,
+            MapPart::from(0xffu8),
+            MapPart::from(0xffu8),
+            &protocol::SelectEventsAux::default(),
+        )?
+        .check()?;
+        protocol::per_client_flags(
+            &conn,
+            keyboard_device as u16,
+            protocol::PerClientFlag::DETECTABLE_AUTO_REPEAT,
+            protocol::PerClientFlag::DETECTABLE_AUTO_REPEAT,
+            protocol::BoolCtrl::default(),
+            protocol::BoolCtrl::default(),
+            protocol::BoolCtrl::default(),
+        )?
+        .reply()?;
+        conn.flush()?;
+
         Ok(Self {
             width: window_config.width,
             height: window_config.height,
@@ -198,6 +255,10 @@ impl X11Platform {
             xcb_conn: conn,
             window: win_id,
             wm_delete_window,
+            keyboard,
+            context,
+            keyboard_device,
+            pending_input: Vec::new(),
             wake_fd,
         })
     }
@@ -226,12 +287,53 @@ impl X11Platform {
                 *latest_resize = Some((self.width, self.height));
             }
 
-            Event::KeyPress(_e) => {
-                // later
+            Event::KeyPress(e) => {
+                self.pending_input
+                    .extend(self.keyboard.press(e.detail as u32));
             }
 
-            Event::KeyRelease(_e) => {
-                // later
+            Event::XkbStateNotify(e) => {
+                self.keyboard.state.update_mask(
+                    e.base_mods.into(),
+                    e.latched_mods.into(),
+                    e.locked_mods.into(),
+                    e.base_group as u32,
+                    e.latched_group as u32,
+                    e.locked_group.into(),
+                );
+            }
+
+            Event::XkbMapNotify(_) | Event::XkbNewKeyboardNotify(_) => {
+                let keymap = xkb::x11::keymap_new_from_device(
+                    &self.context,
+                    &self.xcb_conn,
+                    self.keyboard_device,
+                    xkb::KEYMAP_COMPILE_NO_FLAGS,
+                );
+                if !keymap.get_raw_ptr().is_null() {
+                    let state = xkb::x11::state_new_from_device(
+                        &keymap,
+                        &self.xcb_conn,
+                        self.keyboard_device,
+                    );
+                    if !state.get_raw_ptr().is_null() {
+                        self.keyboard = Keyboard::new(&self.context, keymap, state);
+                    }
+                }
+            }
+
+            Event::FocusIn(_) => {
+                self.keyboard.state = xkb::x11::state_new_from_device(
+                    &self.keyboard.keymap,
+                    &self.xcb_conn,
+                    self.keyboard_device,
+                );
+                self.pending_input.push(WindowEvent::FocusChanged(true));
+            }
+
+            Event::FocusOut(_) => {
+                self.keyboard.reset();
+                self.pending_input.push(WindowEvent::FocusChanged(false));
             }
 
             _ => {}
@@ -286,7 +388,7 @@ impl X11Platform {
         }
 
         // Respond to potentially queued events
-        let mut events = Vec::new();
+        let mut events = std::mem::take(&mut self.pending_input);
 
         if close_requested {
             events.push(WindowEvent::CloseRequested);
@@ -303,6 +405,10 @@ impl X11Platform {
             return Ok(events);
         }
 
+        if !events.is_empty() {
+            return Ok(events);
+        }
+
         // Get raw X11 FD
         let x11_fd_raw = self.xcb_conn.as_raw_fd();
 
@@ -316,7 +422,19 @@ impl X11Platform {
         ];
 
         // Poll on the file descriptors
-        poll(&mut poll_fds, PollTimeout::NONE)?;
+        match poll(&mut poll_fds, PollTimeout::NONE) {
+            Ok(_) => {}
+            Err(nix::errno::Errno::EINTR) => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        }
+        for fd in &poll_fds {
+            anyhow::ensure!(
+                !fd.revents()
+                    .unwrap_or(PollFlags::empty())
+                    .intersects(PollFlags::POLLERR | PollFlags::POLLHUP | PollFlags::POLLNVAL),
+                "X11 connection closed"
+            );
+        }
 
         // Repond to potential events on either
         // of the file descriptors
@@ -356,7 +474,7 @@ impl X11Platform {
         }
 
         // Respond to X11 potentially collected events
-        let mut events = Vec::new();
+        let mut events = std::mem::take(&mut self.pending_input);
 
         if close_requested {
             events.push(WindowEvent::CloseRequested);
@@ -428,6 +546,17 @@ impl X11Platform {
             tracing::info!("Created Vulkan X11/Xlib surface successfully.");
 
             unsafe { Ok(xlib_surface_inst.create_xlib_surface(&create_info, None)?) }
+        }
+    }
+}
+
+impl Drop for X11Platform {
+    fn drop(&mut self) {
+        let _ = self.xcb_conn.destroy_window(self.window);
+        let _ = self.xcb_conn.flush();
+        // XCBConnection borrows this connection (should_drop=false).
+        unsafe {
+            x11::xlib::XCloseDisplay(self.xdisplay.as_ptr());
         }
     }
 }

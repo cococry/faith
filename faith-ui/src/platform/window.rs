@@ -29,6 +29,8 @@ pub struct PlatformWaker {
 enum PlatformWakerInner {
     X11(X11Waker),
     Wayland(WaylandWaker),
+    #[cfg(test)]
+    Test(std::sync::Arc<nix::sys::eventfd::EventFd>),
 }
 
 impl Default for WindowConfig {
@@ -44,8 +46,8 @@ impl Default for WindowConfig {
 
 /// Platform-specific window implementation.
 pub enum Platform {
-    X11(super::x11::X11Platform),
-    Wayland(super::wayland::WaylandPlatform),
+    X11(Box<super::x11::X11Platform>),
+    Wayland(Box<super::wayland::WaylandPlatform>),
 }
 
 /// Native window handle information used by
@@ -62,11 +64,27 @@ pub enum WindowHandleInfo {
 }
 
 impl PlatformWaker {
+    #[cfg(test)]
+    pub fn for_test() -> Self {
+        use nix::sys::eventfd::{EfdFlags, EventFd};
+        Self {
+            inner: PlatformWakerInner::Test(std::sync::Arc::new(
+                EventFd::from_value_and_flags(0, EfdFlags::EFD_NONBLOCK | EfdFlags::EFD_CLOEXEC)
+                    .unwrap(),
+            )),
+        }
+    }
+
     #[allow(dead_code)]
     pub fn request_redraw(&self) -> anyhow::Result<()> {
         match &self.inner {
             PlatformWakerInner::X11(waker) => waker.request_redraw(),
             PlatformWakerInner::Wayland(waker) => waker.request_redraw(),
+            #[cfg(test)]
+            PlatformWakerInner::Test(fd) => {
+                fd.write(1)?;
+                Ok(())
+            }
         }
     }
 }
@@ -89,12 +107,14 @@ impl Platform {
 
             PlatformBackend::Wayland => {
                 info!("using Wayland backend");
-                Ok(Self::Wayland(super::wayland::WaylandPlatform::new(config)?))
+                Ok(Self::Wayland(Box::new(
+                    super::wayland::WaylandPlatform::new(config)?,
+                )))
             }
 
             PlatformBackend::X11 => {
                 info!("using X11 backend");
-                Ok(Self::X11(super::x11::X11Platform::new(config)?))
+                Ok(Self::X11(Box::new(super::x11::X11Platform::new(config)?)))
             }
         }
     }
@@ -104,7 +124,7 @@ impl Platform {
             match super::wayland::WaylandPlatform::new(config) {
                 Ok(platform) => {
                     info!("using Wayland backend");
-                    return Ok(Self::Wayland(platform));
+                    return Ok(Self::Wayland(Box::new(platform)));
                 }
                 Err(err) => {
                     warn!("Wayland windowing failed, falling back to X11: {err}");
@@ -113,7 +133,7 @@ impl Platform {
         }
 
         info!("using X11 backend");
-        Ok(Self::X11(super::x11::X11Platform::new(config)?))
+        Ok(Self::X11(Box::new(super::x11::X11Platform::new(config)?)))
     }
 
     /// Polls and collects pending window events

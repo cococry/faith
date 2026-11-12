@@ -1438,6 +1438,37 @@ impl TextRenderer {
         })
     }
 
+    /// Draw wrapped text only on complete lines inside the vertical viewport.
+    /// The layout origin may lie above the viewport when showing recent history.
+    pub fn render_viewport<G: GraphicsDevice>(
+        &mut self,
+        viewport: ([f32; 2], [f32; 2], f32),
+        content: &str,
+        font: FontHandle,
+        gpu: &mut G,
+        ui: &mut UIRenderer,
+    ) -> anyhow::Result<()> {
+        let (origin, clip_y, width) = viewport;
+        let layout = self.layout_cached(content, font, TextLayoutOptions { max_width: width })?;
+        let mut y = origin[1];
+        for line in &layout.lines {
+            if y >= clip_y[0] && y + layout.line_height <= clip_y[1] {
+                let mut x = if line.is_rtl {
+                    origin[0] + width - line.width
+                } else {
+                    origin[0]
+                };
+                for slice in &line.slices {
+                    let run = &layout.paragraph_runs[slice.run_index];
+                    self.render_run_slice(x, y + layout.ascender, run, slice, gpu, ui)?;
+                    x += slice.x_advance;
+                }
+            }
+            y += layout.line_height;
+        }
+        Ok(())
+    }
+
     /// Renders text with word wrapping.
     ///
     /// Lays out the text into wrapped lines using

@@ -30,3 +30,6 @@ temp/
 /.local/
 /.env
 /.env.production
+
+# Library-only Cargo invocations; the application lockfile is faith-ui/Cargo.lock.
+/faith-client/rust/*/Cargo.lock

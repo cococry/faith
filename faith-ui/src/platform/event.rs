@@ -1,3 +1,18 @@
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Key {
+    Enter,
+    Backspace,
+    Delete,
+    Left,
+    Right,
+    Home,
+    End,
+    Escape,
+    PageUp,
+    PageDown,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum WindowEvent {
     CloseRequested,
     RedrawRequested,
@@ -5,12 +20,11 @@ pub enum WindowEvent {
         width: u32,
         height: u32,
     },
-    #[allow(dead_code)]
+    /// Committed UTF-8, after keyboard layout and compose processing.
+    TextInput(String),
     KeyPressed {
-        keycode: u32,
+        key: Key,
+        control: bool,
     },
-    #[allow(dead_code)]
-    KeyReleased {
-        keycode: u32,
-    },
+    FocusChanged(bool),
 }

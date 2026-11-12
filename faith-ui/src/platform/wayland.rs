@@ -3,17 +3,20 @@
 use std::{ffi::c_void, os::fd::AsFd, sync::Arc};
 
 use super::event::WindowEvent;
+use super::keyboard::{KeyRepeat, Keyboard};
 use super::window::WindowConfig;
 use crate::platform::window::WindowHandleInfo;
+use std::io::Read;
+use xkbcommon::xkb;
 
 use ash::vk::WaylandSurfaceCreateInfoKHR;
 use nix::{
-    poll::{PollFd, PollFlags, PollTimeout, poll},
+    poll::{PollFd, PollFlags, poll},
     sys::eventfd::{EfdFlags, EventFd},
 };
 use wayland_client::{
     Connection, Dispatch, EventQueue, Proxy, QueueHandle,
-    protocol::{wl_compositor, wl_registry, wl_surface},
+    protocol::{wl_compositor, wl_keyboard, wl_registry, wl_seat, wl_surface},
 };
 
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
@@ -42,6 +45,13 @@ pub struct WaylandState {
 
     pending_events: Vec<WindowEvent>,
     pending_resize: Option<(u32, u32)>,
+    seat: Option<wl_seat::WlSeat>,
+    seat_name: Option<u32>,
+    keyboard_proxy: Option<wl_keyboard::WlKeyboard>,
+    keyboard: Option<Keyboard>,
+    repeat: KeyRepeat,
+    focused: bool,
+    input_error: Option<String>,
 }
 
 /// Wayland window platform implementation.
@@ -139,14 +149,25 @@ impl Dispatch<wl_registry::WlRegistry, WaylandHandler> for WaylandState {
         qh: &QueueHandle<Self>,
     ) {
         if let wl_registry::Event::Global {
-            name, interface, ..
+            name,
+            interface,
+            version,
         } = event
         {
             match interface.as_str() {
+                "wl_seat" if state.seat.is_none() => {
+                    state.seat = Some(registry.bind::<wl_seat::WlSeat, _, _>(
+                        name,
+                        version.min(7),
+                        qh,
+                        WaylandHandler,
+                    ));
+                    state.seat_name = Some(name);
+                }
                 "wl_compositor" => {
                     let compositor = registry.bind::<wl_compositor::WlCompositor, _, _>(
                         name,
-                        4,
+                        version.min(4),
                         qh,
                         WaylandHandler,
                     );
@@ -174,6 +195,159 @@ impl Dispatch<wl_registry::WlRegistry, WaylandHandler> for WaylandState {
 
                 _ => {}
             }
+        } else if let wl_registry::Event::GlobalRemove { name } = event
+            && state.seat_name == Some(name)
+        {
+            if let Some(keyboard) = state.keyboard_proxy.take()
+                && keyboard.version() >= 3
+            {
+                keyboard.release();
+            }
+            if let Some(seat) = state.seat.take()
+                && seat.version() >= 5
+            {
+                seat.release();
+            }
+            state.seat_name = None;
+            state.keyboard = None;
+            state.focused = false;
+            state.repeat.cancel();
+            state.pending_events.push(WindowEvent::FocusChanged(false));
+        }
+    }
+}
+
+impl Dispatch<wl_seat::WlSeat, WaylandHandler> for WaylandState {
+    fn event(
+        state: &mut Self,
+        seat: &wl_seat::WlSeat,
+        event: wl_seat::Event,
+        _: &WaylandHandler,
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let wl_seat::Event::Capabilities {
+            capabilities: wayland_client::WEnum::Value(caps),
+        } = event
+        {
+            if caps.contains(wl_seat::Capability::Keyboard) {
+                if state.keyboard_proxy.is_none() {
+                    state.keyboard_proxy = Some(seat.get_keyboard(qh, WaylandHandler));
+                }
+            } else {
+                if let Some(keyboard) = state.keyboard_proxy.take()
+                    && keyboard.version() >= 3
+                {
+                    keyboard.release();
+                }
+                state.keyboard = None;
+                state.repeat.cancel();
+                state.focused = false;
+                state.pending_events.push(WindowEvent::FocusChanged(false));
+            }
+        }
+    }
+}
+
+impl Dispatch<wl_keyboard::WlKeyboard, WaylandHandler> for WaylandState {
+    fn event(
+        state: &mut Self,
+        _: &wl_keyboard::WlKeyboard,
+        event: wl_keyboard::Event,
+        _: &WaylandHandler,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        use wayland_client::WEnum;
+        match event {
+            wl_keyboard::Event::Keymap {
+                format: WEnum::Value(wl_keyboard::KeymapFormat::XkbV1),
+                fd,
+                size,
+            } => {
+                state.repeat.cancel();
+                let result = (|| -> anyhow::Result<Keyboard> {
+                    anyhow::ensure!(
+                        size > 0 && size <= 4 * 1024 * 1024,
+                        "invalid Wayland keymap size"
+                    );
+                    let mut bytes = Vec::with_capacity(size as usize);
+                    std::fs::File::from(fd)
+                        .take(size as u64)
+                        .read_to_end(&mut bytes)?;
+                    anyhow::ensure!(
+                        bytes.len() == size as usize && bytes.last() == Some(&0),
+                        "truncated Wayland keymap"
+                    );
+                    bytes.pop();
+                    let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+                    let keymap = xkb::Keymap::new_from_string(
+                        &context,
+                        String::from_utf8(bytes)?,
+                        xkb::KEYMAP_FORMAT_TEXT_V1,
+                        xkb::KEYMAP_COMPILE_NO_FLAGS,
+                    )
+                    .ok_or_else(|| anyhow::anyhow!("invalid Wayland XKB keymap"))?;
+                    let keyboard_state = xkb::State::new(&keymap);
+                    Ok(Keyboard::new(&context, keymap, keyboard_state))
+                })();
+                match result {
+                    Ok(keyboard) => state.keyboard = Some(keyboard),
+                    Err(e) => state.input_error = Some(e.to_string()),
+                }
+            }
+            wl_keyboard::Event::Enter { surface, .. }
+                if state.surface.as_ref() == Some(&surface) =>
+            {
+                state.focused = true;
+                state.repeat.cancel();
+                state.pending_events.push(WindowEvent::FocusChanged(true));
+            }
+            wl_keyboard::Event::Leave { .. } => {
+                state.focused = false;
+                state.repeat.cancel();
+                if let Some(keyboard) = &mut state.keyboard {
+                    keyboard.reset();
+                }
+                state.pending_events.push(WindowEvent::FocusChanged(false));
+            }
+            wl_keyboard::Event::Modifiers {
+                mods_depressed,
+                mods_latched,
+                mods_locked,
+                group,
+                ..
+            } => {
+                if let Some(keyboard) = &mut state.keyboard {
+                    keyboard.state.update_mask(
+                        mods_depressed,
+                        mods_latched,
+                        mods_locked,
+                        0,
+                        0,
+                        group,
+                    );
+                }
+            }
+            wl_keyboard::Event::RepeatInfo { rate, delay } => state.repeat.configure(rate, delay),
+            wl_keyboard::Event::Key {
+                key,
+                state: WEnum::Value(key_state),
+                ..
+            } if state.focused => {
+                let code = key + 8;
+                if key_state == wl_keyboard::KeyState::Pressed {
+                    if let Some(keyboard) = &mut state.keyboard {
+                        state.pending_events.extend(keyboard.press(code));
+                        state
+                            .repeat
+                            .press(code, keyboard.keymap.key_repeats(xkb::Keycode::new(code)));
+                    }
+                } else {
+                    state.repeat.release(code);
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -293,6 +467,13 @@ impl WaylandPlatform {
             configured: false,
             pending_events: Vec::new(),
             pending_resize: None,
+            seat: None,
+            seat_name: None,
+            keyboard_proxy: None,
+            keyboard: None,
+            repeat: KeyRepeat::default(),
+            focused: false,
+            input_error: None,
         };
 
         conn.display().get_registry(&handle, WaylandHandler);
@@ -337,9 +518,39 @@ impl WaylandPlatform {
         Ok(())
     }
 
+    // A full socket is backpressure, not a fatal connection error. Poll for
+    // writable readiness alongside input instead of retrying in a busy loop.
+    fn flush_pending(&self) -> anyhow::Result<bool> {
+        loop {
+            match self.conn.flush() {
+                Ok(()) => return Ok(false),
+                Err(wayland_client::backend::WaylandError::Io(error))
+                    if error.kind() == std::io::ErrorKind::WouldBlock =>
+                {
+                    return Ok(true);
+                }
+                Err(wayland_client::backend::WaylandError::Io(error))
+                    if error.kind() == std::io::ErrorKind::Interrupted =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
     pub fn poll_events(&mut self) -> anyhow::Result<Vec<WindowEvent>> {
         // Collect any already queued events
         while self.ev_queue.dispatch_pending(&mut self.state)? > 0 {}
+
+        if let Some(error) = self.state.input_error.take() {
+            anyhow::bail!(error);
+        }
+        if let Some(code) = self.state.repeat.due()
+            && let Some(keyboard) = &mut self.state.keyboard
+        {
+            self.state.pending_events.extend(keyboard.press(code));
+        }
 
         // If there are still any queued/pending events,
         // do not block yet and return.
@@ -347,7 +558,7 @@ impl WaylandPlatform {
             return Ok(std::mem::take(&mut self.state.pending_events));
         }
 
-        self.conn.flush()?;
+        let mut needs_flush = self.flush_pending()?;
 
         // prepare_read() returns None when events became pending between
         // dispatch_pending() and prepare_read(). In that case, dispatch again.
@@ -357,7 +568,10 @@ impl WaylandPlatform {
             }
 
             while self.ev_queue.dispatch_pending(&mut self.state)? > 0 {}
-            self.conn.flush()?;
+            if !self.state.pending_events.is_empty() {
+                return Ok(std::mem::take(&mut self.state.pending_events));
+            }
+            needs_flush = self.flush_pending()?;
         };
 
         // Get Wayland FD
@@ -366,12 +580,31 @@ impl WaylandPlatform {
         // Set up FDs to poll on. Those being
         // the Wayland FD and the wake FD.
         let mut poll_fds = [
-            PollFd::new(wl_fd, PollFlags::POLLIN),
+            PollFd::new(
+                wl_fd,
+                if needs_flush {
+                    PollFlags::POLLIN | PollFlags::POLLOUT
+                } else {
+                    PollFlags::POLLIN
+                },
+            ),
             PollFd::new(self.wake_fd.as_fd(), PollFlags::POLLIN),
         ];
 
         // Poll on the file descriptors
-        poll(&mut poll_fds, PollTimeout::NONE)?;
+        match poll(&mut poll_fds, self.state.repeat.timeout()) {
+            Ok(_) => {}
+            Err(nix::errno::Errno::EINTR) => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        }
+        for fd in &poll_fds {
+            anyhow::ensure!(
+                !fd.revents()
+                    .unwrap_or(PollFlags::empty())
+                    .intersects(PollFlags::POLLERR | PollFlags::POLLHUP | PollFlags::POLLNVAL),
+                "Wayland connection closed"
+            );
+        }
 
         // Repond to potential events on either
         // of the file descriptors
@@ -402,7 +635,15 @@ impl WaylandPlatform {
         // respond to pending Wayland events
         while self.ev_queue.dispatch_pending(&mut self.state)? > 0 {}
 
-        self.conn.flush()?;
+        self.flush_pending()?;
+        if let Some(error) = self.state.input_error.take() {
+            anyhow::bail!(error);
+        }
+        if let Some(code) = self.state.repeat.due()
+            && let Some(keyboard) = &mut self.state.keyboard
+        {
+            self.state.pending_events.extend(keyboard.press(code));
+        }
 
         Ok(std::mem::take(&mut self.state.pending_events))
     }

@@ -7,6 +7,10 @@ description = "Faith Instant Messaging Client"
 edition = "2024"
 
 [dependencies]
+faith-client = { path = "../faith-client/rust/client" }
+rusqlite = { version = "0.37", features = ["bundled"] }
+xkbcommon = { version = "0.9", features = ["x11"] }
+
 anyhow = "1.0.102"
 glow = "0.17.0"
 khronos-egl = { version = "6.0.0", features = ["static"] }
@@ -14,7 +18,7 @@ wayland-client = "0.31.14"
 wayland-egl = "0.32.11"
 wayland-protocols = { version = "0.32.12", features = ["client"] }
 x11 = { version = "2.21", features = ["xlib", "xlib_xcb"] }
-x11rb = { version = "0.13", features = ["allow-unsafe-code"] }
+x11rb = { version = "0.13", features = ["allow-unsafe-code", "xkb"] }
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
