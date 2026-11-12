@@ -114,7 +114,7 @@ faith_status_code_t command_dispatch(server_state_t *s, client_conn_t *cl,
     result = FAITH_COMMAND_RESULT_REJECTED;
   }
 
-  _FH_CHECK_RETURN(
-      command_queue_result(s, cl, &cmd.cmd_id, cmd.type, err, result));
-  return FAITH_OK;
+  faith_status_code_t rc = command_queue_result(s, cl, &cmd.cmd_id, cmd.type, err, result);
+  free(cmd.payload);
+  return rc;
 }
