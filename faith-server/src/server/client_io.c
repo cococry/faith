@@ -8,6 +8,7 @@
 #include <faith-proto/codec/envelopes.h>
 
 #include "dispatch.h"
+#include "../delivery/events.h"
 
 #define _MODULE_NAME "server/client_io"
 
@@ -141,6 +142,14 @@ faith_status_code_t server_flush_client_output(server_state_t       *s,
     nob_log(ERROR, "Got invalid transport result from conn_flush_output (%u).",
             (uint32_t)res);
     return FAITH_ERR_INVALID;
+  }
+
+  if (res == TRANSPORT_RES_COMPLETE && cl->state == CLIENT_OPEN &&
+      !cl->closing && !cl->close_after_flush) {
+    _FH_CHECK_RETURN(delivery_queue_pending_events(s, cl));
+
+    if (cl->conn.out.size > cl->conn.out.off)
+      desired_interests |= REACTOR_WRITABLE;
   }
 
   if (desired_interests == cl->reactor_source.interests)

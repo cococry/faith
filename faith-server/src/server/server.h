@@ -50,6 +50,8 @@ typedef struct client_conn_t {
 
   int closing;
   int close_after_flush;
+  uint64_t event_send_next;
+  uint64_t event_last_sent;
 
 } client_conn_t;
 
