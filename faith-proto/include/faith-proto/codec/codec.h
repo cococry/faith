@@ -1,11 +1,11 @@
 #pragma once
 
+#include "../core/core.h"
 #include "envelopes.h"
 #include "msg.h"
-#include "../core/core.h"
 
 #include "auth.h"
-#include "server.h" 
+#include "server.h"
 
 #include "commands.h"
 #include "core_types.h"
@@ -16,8 +16,10 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-#define FAITH_MAX_CTS_PAYLOAD_SIZE 256
-#define FAITH_MAX_CTS_FRAME_SIZE   512
+#define FAITH_MAX_CTS_PAYLOAD_SIZE                                             \
+  (FAITH_ENVL_HEADER_SIZE + FAITH_ENVL_CTS_COMMAND_BODY_SIZE_MAX)
+#define FAITH_MAX_CTS_FRAME_SIZE                                               \
+  (FAITH_FRAME_METADATA_SIZE + FAITH_MAX_CTS_PAYLOAD_SIZE)
 
 #define FAITH_FRAME_LENGTH_SIZE sizeof(uint32_t)
 

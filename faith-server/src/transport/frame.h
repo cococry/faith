@@ -1,7 +1,7 @@
 #pragma once
 
-#include <faith-proto/codec/codec.h>
 #include "conn.h"
+#include <faith-proto/codec/codec.h>
 
 transport_result_t frame_try_full_read(transport_conn_t *conn,
                                        faith_frame_t    *frame);

@@ -23,7 +23,7 @@
   X(FAITH_ENVELOPE_COMMAND_RESULT, 17)                                         \
   X(FAITH_ENVELOPE_EVENT, 18)                                                  \
   X(FAITH_ENVELOPE_EVENT_BATCH, 19)                                            \
-  X(FAITH_ENVELOPE_EVENT_ACK, 20) \
+  X(FAITH_ENVELOPE_EVENT_ACK, 20)                                              \
   X(FAITH_ENVELOPE_EVENT_RESUME, 21)
 
 typedef enum {

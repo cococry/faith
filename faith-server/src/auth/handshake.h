@@ -1,7 +1,7 @@
 #pragma once
 
-#include <faith-proto/core/core.h>
 #include <faith-proto/codec/envelopes.h>
+#include <faith-proto/core/core.h>
 
 #include "../server/server.h"
 
@@ -25,9 +25,9 @@ faith_status_code_t auth_handshake_complete(server_state_t          *s,
 faith_status_code_t auth_queue_auth_pending(server_state_t *s,
                                             client_conn_t  *recipient_cl);
 
-faith_status_code_t auth_identity_submit(server_state_t *s,
-                                          const db_identity_job_t *request);
+faith_status_code_t auth_identity_submit(server_state_t          *s,
+                                         const db_identity_job_t *request);
 
 faith_status_code_t auth_handshake_ready(server_state_t *s, client_conn_t *cl,
-                                         const faith_auth_id_t *auth_id,
+                                         const faith_auth_id_t   *auth_id,
                                          const faith_device_id_t *device_id);

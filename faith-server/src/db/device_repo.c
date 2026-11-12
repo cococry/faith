@@ -17,6 +17,7 @@ faith_status_code_t db_device_repo_insert(faith_db_t             *db,
   };
   const int lengths[] = {FAITH_AUTH_ID_SIZE, FAITH_DEVICE_ID_SIZE,
                          FAITH_ED25519_PUBLIC_KEY_SIZE};
+
   const int formats[] = {1, 1, 1};
 
   PGresult *res =
@@ -35,6 +36,7 @@ faith_status_code_t db_device_repo_insert(faith_db_t             *db,
   if (PQresultStatus(res) != PGRES_TUPLES_OK) {
     char auth_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1] = {0};
     _FH_CHECK(faith_id128_to_hex(auth_id->bytes, auth_id_hex));
+
     if (_fh_rc == FAITH_OK) {
       nob_log(ERROR, "[%s] Device registration failed (auth_id=%s): %s",
               _MODULE_NAME, auth_id_hex, PQresultErrorMessage(res));
@@ -51,6 +53,7 @@ faith_status_code_t db_device_repo_insert(faith_db_t             *db,
 
 defer:
   PQclear(res);
+
   return _fh_result;
 }
 
@@ -87,11 +90,14 @@ faith_status_code_t db_device_repo_delete(faith_db_t              *db,
     faith_status_code_t rc = FAITH_OK;
     {
       _FH_CHECK(faith_id128_to_hex(auth_id->bytes, auth_id_hex));
+
       if (_fh_rc != FAITH_OK)
         rc = _fh_rc;
     }
+
     {
       _FH_CHECK(faith_id128_to_hex(device_id->bytes, device_id_hex));
+
       if (_fh_rc != FAITH_OK)
         rc = _fh_rc;
     }
@@ -126,6 +132,7 @@ faith_status_code_t db_device_repo_delete(faith_db_t              *db,
 
 defer:
   PQclear(res);
+
   return _fh_result;
 }
 
@@ -159,6 +166,7 @@ db_device_repo_get_device_list(faith_db_t *db, const faith_auth_id_t *auth_id,
   if (PQresultStatus(res) != PGRES_TUPLES_OK) {
     char auth_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1] = {0};
     _FH_CHECK(faith_id128_to_hex(auth_id->bytes, auth_id_hex));
+
     if (_fh_rc == FAITH_OK) {
       nob_log(ERROR, "[%s] Device query failed (auth_id=%s): %s", _MODULE_NAME,
               auth_id_hex, PQresultErrorMessage(res));
@@ -177,6 +185,7 @@ db_device_repo_get_device_list(faith_db_t *db, const faith_auth_id_t *auth_id,
     _FH_RETURN_DEFER(FAITH_OK);
 
   int n_fields = PQnfields(res);
+
   if (n_fields != DB_DEVICE_REPO_USER_DEVICE_FIELDS) {
     nob_log(ERROR,
             "[%s] Device query returned an unexpected number of columns: %d",
@@ -186,6 +195,7 @@ db_device_repo_get_device_list(faith_db_t *db, const faith_auth_id_t *auth_id,
   }
 
   devices = calloc((size_t)n_rows, sizeof(*devices));
+
   if (!devices)
     _FH_RETURN_DEFER(FAITH_ERR_NOMEM);
 
@@ -195,6 +205,7 @@ db_device_repo_get_device_list(faith_db_t *db, const faith_auth_id_t *auth_id,
     for (int f = 0; f < n_fields; f++) {
       if (!PQgetisnull(res, r, f))
         continue;
+
       nob_log(ERROR,
               "[%s] Device query returned an unexpected NULL field value "
               "(field %i)",
@@ -228,6 +239,7 @@ db_device_repo_get_device_list(faith_db_t *db, const faith_auth_id_t *auth_id,
            PQgetvalue(res, r, DB_DEVICE_FIELD_PUBLIC_KEY),
            FAITH_ED25519_PUBLIC_KEY_SIZE);
   }
+
   o_list->devices = devices;
   o_list->n_devices = (size_t)n_rows;
   devices = NULL;
@@ -236,7 +248,9 @@ defer:
   if (devices != NULL) {
     free(devices);
   }
+
   PQclear(res);
+
   return _fh_result;
 }
 

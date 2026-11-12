@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 typedef struct {
+  size_t   bytes;
   uint64_t next_seq;
   uint64_t last_acked_seq;
   uint64_t last_sent_seq;

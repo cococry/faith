@@ -7,8 +7,10 @@
 faith_status_code_t faith_random_bytes(uint8_t *o_buf, int num) {
   if (RAND_bytes(o_buf, num) != 1) {
     nob_log(ERROR, "Failed to generate auth_id with OpenSSL RAND_bytes()");
+
     return FAITH_ERR_SSL;
   }
+
   return FAITH_OK;
 }
 
@@ -26,6 +28,7 @@ faith_gen_ed25519_keypair(void   *handle,
   EVP_PKEY_CTX *ctx = NULL;
 
   ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519, NULL);
+
   if (!ctx) {
     status = FAITH_ERR_CRYPTO;
     goto cleanup;
@@ -52,6 +55,7 @@ faith_gen_ed25519_keypair(void   *handle,
     if (priv_len != FAITH_ED25519_PRIVATE_KEY_SIZE) {
       nob_log(ERROR, "[%s] Generated private key has unexpected byte size: %zu",
               _MODULE_NAME, priv_len);
+
       status = FAITH_ERR_INVALID;
       goto cleanup;
     }
@@ -73,6 +77,7 @@ faith_gen_ed25519_keypair(void   *handle,
     if (pub_len != FAITH_ED25519_PUBLIC_KEY_SIZE) {
       nob_log(ERROR, "[%s] Generated public key has unexpected byte size: %zu",
               _MODULE_NAME, pub_len);
+
       status = FAITH_ERR_INVALID;
       goto cleanup;
     }
@@ -89,6 +94,7 @@ faith_gen_ed25519_keypair(void   *handle,
 cleanup:
   EVP_PKEY_free(keypair);
   EVP_PKEY_CTX_free(ctx);
+
   return status;
 }
 
@@ -102,6 +108,7 @@ faith_status_code_t faith_gen_signature(EVP_PKEY *keypair, uint8_t *o_signature,
   }
 
   EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+
   if (!ctx)
     return FAITH_ERR_NOMEM;
 
@@ -134,6 +141,7 @@ faith_status_code_t faith_gen_signature(EVP_PKEY *keypair, uint8_t *o_signature,
 
 defer:
   EVP_MD_CTX_free(ctx);
+
   return result;
 }
 
@@ -148,6 +156,7 @@ faith_status_code_t faith_verify_signature(EVP_PKEY      *public_key,
   }
 
   EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+
   if (!ctx)
     return FAITH_ERR_NOMEM;
 
@@ -168,6 +177,7 @@ faith_status_code_t faith_verify_signature(EVP_PKEY      *public_key,
 
 defer:
   EVP_MD_CTX_free(ctx);
+
   return _fh_result;
 }
 
@@ -190,5 +200,6 @@ faith_status_code_t faith_verify_signature_raw_pubkey(
                                                   signature, signature_size);
 
   EVP_PKEY_free(pkey);
+
   return rc;
 }

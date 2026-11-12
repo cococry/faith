@@ -1,0 +1,15 @@
+.git
+.local
+.env*
+**/build
+**/target
+**/test
+**/tests
+**/.cache
+**/__pycache__
+**/nob
+**/nob.old
+**/compile_commands.json
+**/ident
+**/*.pem
+faith-db/secrets

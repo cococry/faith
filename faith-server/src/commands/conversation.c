@@ -7,7 +7,7 @@
 #include <third_party/stb_ds.h>
 
 typedef struct {
-  bool uncertain;
+  bool               uncertain;
   uint64_t           client_id;
   faith_auth_id_t    sender;
   faith_device_id_t  device;
@@ -26,6 +26,7 @@ static bool _command(faith_db_t *db, const char *sql) {
   PGresult *res = PQexec(db->conn, sql);
   bool      ok = res && PQresultStatus(res) == PGRES_COMMAND_OK;
   PQclear(res);
+
   return ok;
 }
 
@@ -40,11 +41,13 @@ static faith_status_code_t _create(faith_db_t *db, void *data) {
 
   if (!devices.n_devices) {
     db_device_repo_destroy_device_list(&devices);
+
     return FAITH_ERR_NOT_FOUND;
   }
 
   if (!_command(db, "BEGIN")) {
     db_device_repo_destroy_device_list(&devices);
+
     return FAITH_ERR_IO;
   }
 
@@ -92,7 +95,6 @@ static void _complete(void *owner, void *data, faith_status_code_t status) {
       delivery_event_complete(s, &job->events[i], status);
   }
 
-
   client_conn_t *cl = s->clients;
 
   while (cl && cl->conn.id != job->client_id)
@@ -122,6 +124,7 @@ conv_handle_create_conversation(server_state_t *s, client_conn_t *cl,
   faith_cmd_create_converstation_t request = {0};
   _FH_CHECK_RETURN(faith_decode_cmd_create_conversation(
       cmd->payload, cmd->payload_size, &request));
+
   conversation_job_t *job = calloc(1, sizeof(*job));
 
   if (!job)
@@ -140,6 +143,7 @@ conv_handle_create_conversation(server_state_t *s, client_conn_t *cl,
                            .complete = _complete,
                            .destroy = _destroy,
                            .data = job};
+
     rc = db_async_submit(&s->db_pool, &task);
   }
 

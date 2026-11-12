@@ -11,21 +11,19 @@
   command_loc(__FILE__, __LINE__, (arg), (commands), (name), (signature),      \
               (description))
 
-#define BUILD_FOLDER "./build/"
+#define BUILD_FOLDER  "./build/"
 #define OBJECT_FOLDER BUILD_FOLDER "obj/"
 
-#define TEST_SOURCE "tui.c"
-#define TEST_OBJECT OBJECT_FOLDER "tui.o"
+#define TEST_SOURCE     "tui.c"
+#define TEST_OBJECT     OBJECT_FOLDER "tui.o"
 #define TEST_EXECUTABLE BUILD_FOLDER "faith-tui"
 
 #define FAITH_CLIENT_INCLUDE "../include"
-#define FAITH_CLIENT_HEADER                                                   \
-  FAITH_CLIENT_INCLUDE "/faith-client/client.h"
+#define FAITH_CLIENT_HEADER  FAITH_CLIENT_INCLUDE "/faith-client/client.h"
 #define FAITH_CLIENT_LIBRARY "../build/libfaith_client.a"
 
 #define FAITH_PROTO_INCLUDE "../../faith-proto/include"
-#define FAITH_PROTO_HEADER                                                    \
-  FAITH_PROTO_INCLUDE "/faith-proto/codec/codec.h"
+#define FAITH_PROTO_HEADER  FAITH_PROTO_INCLUDE "/faith-proto/codec/codec.h"
 #define FAITH_PROTO_LIBRARY "../../faith-proto/build/libfaith_proto.a"
 
 typedef struct {
@@ -110,26 +108,31 @@ bool command_loc(const char *file, int line, const char *arg,
 static bool required_files_exist(void) {
   if (!nob_file_exists(TEST_SOURCE)) {
     nob_log(ERROR, "Test source is missing: %s", TEST_SOURCE);
+
     return false;
   }
 
   if (!nob_file_exists(FAITH_CLIENT_HEADER)) {
     nob_log(ERROR, "Client header is missing: %s", FAITH_CLIENT_HEADER);
+
     return false;
   }
 
   if (!nob_file_exists(FAITH_CLIENT_LIBRARY)) {
     nob_log(ERROR, "Client library is missing: %s", FAITH_CLIENT_LIBRARY);
+
     return false;
   }
 
   if (!nob_file_exists(FAITH_PROTO_HEADER)) {
     nob_log(ERROR, "Protocol header is missing: %s", FAITH_PROTO_HEADER);
+
     return false;
   }
 
   if (!nob_file_exists(FAITH_PROTO_LIBRARY)) {
     nob_log(ERROR, "Protocol library is missing: %s", FAITH_PROTO_LIBRARY);
+
     return false;
   }
 
@@ -159,7 +162,7 @@ static bool link_test(void) {
   nob_cc_output(&cmd, TEST_EXECUTABLE);
 
   nob_cmd_append(&cmd, TEST_OBJECT, FAITH_CLIENT_LIBRARY, FAITH_PROTO_LIBRARY,
-                 "-lssl", "-lcrypto", "-lpthread");
+                 "-lssl", "-lcrypto", "-lpthread", "-lsqlite3");
 
   bool result = nob_cmd_run(&cmd);
   nob_cmd_free(cmd);
@@ -211,12 +214,14 @@ int main(int argc, char **argv) {
               "Build the native client test executable")) {
     bool result = build();
     nob_da_free(commands);
+
     return result ? 0 : 1;
   }
 
   if (command(command_name, &commands, "help", "", "Print this help message")) {
     print_available_commands(commands);
     nob_da_free(commands);
+
     return 0;
   }
 

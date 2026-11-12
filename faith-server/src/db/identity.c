@@ -6,6 +6,7 @@ static bool _command(faith_db_t *db, const char *sql) {
   PGresult *res = PQexec(db->conn, sql);
   bool      ok = res && PQresultStatus(res) == PGRES_COMMAND_OK;
   PQclear(res);
+
   return ok;
 }
 
@@ -18,6 +19,7 @@ faith_status_code_t db_identity_resolve(faith_db_t        *db,
       !_command(db, "SET LOCAL statement_timeout = '3000ms'") ||
       !_command(db, "SET LOCAL lock_timeout = '2000ms'")) {
     _command(db, "ROLLBACK");
+
     return FAITH_ERR_IO;
   }
 

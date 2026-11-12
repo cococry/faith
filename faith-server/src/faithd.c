@@ -27,19 +27,27 @@ static int parse_args(int argc, char **argv) {
       continue;
     }
 
-    if (strcmp(arg, "-p") == 0 || strcmp(arg, "--pport") == 0) {
+    if (strcmp(arg, "-p") == 0 || strcmp(arg, "--port") == 0) {
       if (i + 1 > argc - 1) {
         fprintf(stderr, "No port number specified for: %s\n", arg);
         fprintf(stderr, "Usage: -p, --port [port]\n");
+
         return OPTIONS_INVALID;
       }
-      listen_port = atoi(argv[i + 1]);
+
+      char *end = NULL;
+      long  port = strtol(argv[i + 1], &end, 10);
+
+      if (!end || *end || port < 1 || port > 65535)
+        return OPTIONS_INVALID;
+      listen_port = port;
       i++;
       continue;
     }
 
     if (strcmp(arg, "-h") == 0 || strcmp(arg, "--help") == 0) {
       print_usage(argv[0]);
+
       return JUST_PRINT_PRINT_HELP;
     }
 
@@ -65,16 +73,19 @@ int main(int argc, char **argv) {
 
   if (server_init(&s, &cfg) != FAITH_OK) {
     nob_log(INFO, "Server initialization failed.");
+
     return EXIT_FAILURE;
   }
 
   if (server_loop(&s) != FAITH_OK) {
     nob_log(INFO, "Server loop failed.");
+
     return EXIT_FAILURE;
   }
 
   if (server_destroy(&s) != FAITH_OK) {
     nob_log(INFO, "Server de-initialization failed.");
+
     return EXIT_FAILURE;
   }
 

@@ -24,6 +24,7 @@ delivery_route_envelope_to_auth_id(server_state_t *s, client_conn_t *cl_sender,
   client_session_user_t *recipient_user = NULL;
   _FH_CHECK_RETURN(sess_registry_get_user_from_auth_id(
       &s->rt, recipient_auth_id, &recipient_user));
+
   if (!recipient_user) {
 
     char recipient_auth_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
@@ -34,8 +35,7 @@ delivery_route_envelope_to_auth_id(server_state_t *s, client_conn_t *cl_sender,
     nob_log(INFO,
             "[%s: client=%" PRIu64 " fd=%i] Envelope %s: Recipient "
             "(auth_id: %s) is offline; Not routing envelope.",
-            _MODULE_NAME,
-            cl_sender->conn.id, cl_sender->conn.fd,
+            _MODULE_NAME, cl_sender->conn.id, cl_sender->conn.fd,
             faith_envelope_name(envl->type), recipient_auth_id_hex);
 
     return FAITH_OK;
@@ -64,10 +64,10 @@ delivery_route_envelope_to_auth_id(server_state_t *s, client_conn_t *cl_sender,
                   "[%s: client=%" PRIu64
                   " fd=%i] Envelope %s: Failed to route envelope to "
                   "recipient device (auth_id: %s, device_id: %s).",
-                  _MODULE_NAME,
-                  cl_sender->conn.id, cl_sender->conn.fd,
+                  _MODULE_NAME, cl_sender->conn.id, cl_sender->conn.fd,
                   faith_envelope_name(envl->type), recipient_auth_id_hex,
                   recipient_device_id_hex);
+
           continue;
         }
 
@@ -75,8 +75,7 @@ delivery_route_envelope_to_auth_id(server_state_t *s, client_conn_t *cl_sender,
                 "[%s: client=%" PRIu64
                 " fd=%i] Envelope %s: Routed envelope to recipient "
                 "device (auth_id: %s, device_id: %s).",
-                _MODULE_NAME,
-                cl_sender->conn.id, cl_sender->conn.fd,
+                _MODULE_NAME, cl_sender->conn.id, cl_sender->conn.fd,
                 faith_envelope_name(envl->type), recipient_auth_id_hex,
                 recipient_device_id_hex);
       });

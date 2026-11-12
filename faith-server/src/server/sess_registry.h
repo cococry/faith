@@ -2,21 +2,22 @@
 
 #include "../application/user.h"
 
+#include "../delivery/event_inbox.h"
 #include <faith-proto/codec/auth.h>
 #include <faith-proto/core/core.h>
-#include "../delivery/event_inbox.h"
 
 typedef struct {
   struct client_conn_t       *conn;
   application_user_identity_t ident;
   device_event_inbox_t        inbox;
-  uint64_t verified_at_ms;
-  bool events_loaded;
-  uint64_t command_window_ms;
-  unsigned command_count;
-  uint8_t recent_command_ids[64][16];
-  size_t recent_command_count;
-  size_t recent_command_next;
+  uint64_t                    verified_at_ms;
+  bool                        events_loaded;
+  bool                        sync_pending;
+  uint64_t                    command_window_ms;
+  unsigned                    command_count;
+  uint8_t                     recent_command_ids[64][16];
+  size_t                      recent_command_count;
+  size_t                      recent_command_next;
 } client_device_session_data_t;
 
 typedef struct {

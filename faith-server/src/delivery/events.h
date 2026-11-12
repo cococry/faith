@@ -1,10 +1,10 @@
 #pragma once
 
-#include <faith-proto/codec/events.h>
-#include <faith-proto/codec/envelopes.h>
-#include <faith-proto/core/core.h>
-#include "../server/server.h"
 #include "../db/events_repo.h"
+#include "../server/server.h"
+#include <faith-proto/codec/envelopes.h>
+#include <faith-proto/codec/events.h>
+#include <faith-proto/core/core.h>
 
 faith_status_code_t delivery_queue_event(server_state_t          *s,
                                          const faith_auth_id_t   *auth_id,
@@ -23,6 +23,8 @@ faith_status_code_t delivery_handle_event_acked(server_state_t   *s,
 faith_status_code_t delivery_load_events(server_state_t *s, client_conn_t *cl);
 
 void delivery_event_complete(server_state_t *s, db_events_job_t *job,
-                              faith_status_code_t status);
+                             faith_status_code_t status);
 
 void delivery_expire_events(server_state_t *s);
+
+void delivery_sync_events(server_state_t *s);

@@ -2,7 +2,7 @@
 
 #include "../core/crypto.h"
 
-#include "auth.h" 
+#include "auth.h"
 
 #define FAITH_SIGNATURE_DEVICE_LINK_RESPONSE_SIZE                              \
   (FAITH_AUTH_ID_SIZE /* auth ID */ +                                          \

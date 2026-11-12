@@ -11,8 +11,8 @@
   command_loc(__FILE__, __LINE__, (arg), (commands), (name), (signature),      \
               (description))
 
-#define BUILD_FOLDER  "./build/"
-#define OBJECT_FOLDER BUILD_FOLDER "obj/"
+#define BUILD_FOLDER   "./build/"
+#define OBJECT_FOLDER  BUILD_FOLDER "obj/"
 #define OUTPUT_LIBRARY BUILD_FOLDER "libfaith_proto.a"
 
 typedef struct {
@@ -33,31 +33,21 @@ typedef struct {
 } Commands;
 
 static const char *faith_proto_sources[] = {
-    "src/codec/auth.c",
-    "src/codec/codec.c",
-    "src/codec/commands.c",
-    "src/codec/envelopes.c",
-    "src/codec/events.c",
-    "src/codec/helpers.c",
-    "src/codec/msg.c",
-    "src/codec/signatures.c",
+    "src/codec/auth.c",    "src/codec/codec.c",     "src/codec/commands.c",
+    "src/codec/group.c",   "src/codec/envelopes.c", "src/codec/events.c",
+    "src/codec/helpers.c", "src/codec/msg.c",       "src/codec/signatures.c",
 
-    "src/core/core.c",
-    "src/core/crypto.c",
+    "src/core/core.c",     "src/core/crypto.c",
 };
 
 static const char *faith_proto_objects[] = {
-    OBJECT_FOLDER "codec_auth.o",
-    OBJECT_FOLDER "codec_codec.o",
-    OBJECT_FOLDER "codec_commands.o",
-    OBJECT_FOLDER "codec_envelopes.o",
-    OBJECT_FOLDER "codec_events.o",
-    OBJECT_FOLDER "codec_helpers.o",
-    OBJECT_FOLDER "codec_msg.o",
+    OBJECT_FOLDER "codec_auth.o",       OBJECT_FOLDER "codec_codec.o",
+    OBJECT_FOLDER "codec_commands.o",   OBJECT_FOLDER "codec_group.o",
+    OBJECT_FOLDER "codec_envelopes.o",  OBJECT_FOLDER "codec_events.o",
+    OBJECT_FOLDER "codec_helpers.o",    OBJECT_FOLDER "codec_msg.o",
     OBJECT_FOLDER "codec_signatures.o",
 
-    OBJECT_FOLDER "core_core.o",
-    OBJECT_FOLDER "core_crypto.o",
+    OBJECT_FOLDER "core_core.o",        OBJECT_FOLDER "core_crypto.o",
 };
 
 static void commands_reset(Commands *commands) {
@@ -83,36 +73,25 @@ static void print_available_commands(Commands commands) {
   nob_log(INFO, "Available commands:");
 
   da_foreach(Command, command, &commands) {
-    nob_log(INFO,
-            "    %-*s %-*s - %s",
-            (int)max_name_width,
-            command->name,
-            (int)max_sign_width,
-            command->signature,
-            command->description);
+    nob_log(INFO, "    %-*s %-*s - %s", (int)max_name_width, command->name,
+            (int)max_sign_width, command->signature, command->description);
   }
 }
 
-static bool command_loc(const char *file,
-                        int line,
-                        const char *arg,
-                        Commands *commands,
-                        const char *name,
-                        const char *signature,
-                        const char *description) {
+static bool command_loc(const char *file, int line, const char *arg,
+                        Commands *commands, const char *name,
+                        const char *signature, const char *description) {
   if (commands->picked) {
     fprintf(stderr,
             "%s:%d: ASSERTION FAILED: the branch for command `%s` fell "
             "through.\n",
-            commands->picked_at_file,
-            commands->picked_at_line,
+            commands->picked_at_file, commands->picked_at_line,
             commands->picked_name);
 
     fprintf(stderr,
             "%s:%d: NOTE: execution proceeded here after a command had "
             "already been picked.\n",
-            file,
-            line);
+            file, line);
 
     abort();
   }
@@ -133,8 +112,7 @@ static bool command_loc(const char *file,
   return commands->picked;
 }
 
-static bool compile_source_async(Procs *procs,
-                                 const char *source,
+static bool compile_source_async(Procs *procs, const char *source,
                                  const char *object) {
   Cmd cmd = {0};
 
@@ -145,26 +123,22 @@ static bool compile_source_async(Procs *procs,
   nob_cmd_append(&cmd, "-fPIC");
 #endif
 
-  nob_cmd_append(&cmd,
-                 "-I.",
-                 "-Iinclude/faith-proto/",
-                 "-I../third_party/",
-                 "-c",
-                 source,
-                 "-o",
-                 object);
+  nob_cmd_append(&cmd, "-I.", "-Iinclude/faith-proto/", "-I../third_party/",
+                 "-c", source, "-o", object);
 
   if (!nob_cmd_run(&cmd, .async = procs, .max_procs = 0)) {
     nob_cmd_free(cmd);
+
     return false;
   }
 
   nob_cmd_free(cmd);
+
   return true;
 }
 
 static bool archive_static_library(void) {
-  Cmd cmd = {0};
+  Cmd  cmd = {0};
   bool result = false;
 
   if (nob_file_exists(OUTPUT_LIBRARY)) {
@@ -187,17 +161,17 @@ static bool archive_static_library(void) {
 
 cleanup:
   nob_cmd_free(cmd);
+
   return result;
 }
 
 static bool build(void) {
   Procs procs = {0};
-  bool result = false;
+  bool  result = false;
 
-  _Static_assert(
-      NOB_ARRAY_LEN(faith_proto_sources) ==
-          NOB_ARRAY_LEN(faith_proto_objects),
-      "faith-proto source/object count mismatch");
+  _Static_assert(NOB_ARRAY_LEN(faith_proto_sources) ==
+                     NOB_ARRAY_LEN(faith_proto_objects),
+                 "faith-proto source/object count mismatch");
 
   if (!nob_mkdir_if_not_exists(BUILD_FOLDER))
     goto cleanup;
@@ -206,10 +180,8 @@ static bool build(void) {
     goto cleanup;
 
   for (size_t i = 0; i < NOB_ARRAY_LEN(faith_proto_sources); ++i) {
-    if (!compile_source_async(
-            &procs,
-            faith_proto_sources[i],
-            faith_proto_objects[i])) {
+    if (!compile_source_async(&procs, faith_proto_sources[i],
+                              faith_proto_objects[i])) {
       goto cleanup;
     }
   }
@@ -227,6 +199,7 @@ cleanup:
     result = false;
 
   nob_da_free(procs);
+
   return result;
 }
 
@@ -248,23 +221,18 @@ int main(int argc, char **argv) {
   Commands commands = {0};
   commands_reset(&commands);
 
-  if (command(command_name,
-              &commands,
-              "build",
-              "",
+  if (command(command_name, &commands, "build", "",
               "Build the static faith protocol library")) {
     const bool ok = build();
     nob_da_free(commands);
+
     return ok ? 0 : 1;
   }
 
-  if (command(command_name,
-              &commands,
-              "help",
-              "",
-              "Print this help message")) {
+  if (command(command_name, &commands, "help", "", "Print this help message")) {
     print_available_commands(commands);
     nob_da_free(commands);
+
     return 0;
   }
 
@@ -272,5 +240,6 @@ int main(int argc, char **argv) {
   nob_log(ERROR, "Unknown command %s", command_name);
 
   nob_da_free(commands);
+
   return 1;
 }

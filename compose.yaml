@@ -1,0 +1,82 @@
+name: faith
+x-api: &api
+  image: ${FAITH_API_IMAGE:-faith-api:local}
+  build:
+    context: .
+    args:
+      BASE_IMAGE: ${FAITH_BASE_IMAGE:-debian:bookworm-slim}
+  user: "10001:10001"
+  read_only: true
+  tmpfs: ["/tmp:rw,noexec,nosuid,size=32m,mode=1777"]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  pids_limit: 64
+  mem_limit: 512m
+  cpus: 1
+  logging:
+    driver: json-file
+    options: {max-size: "10m", max-file: "3"}
+services:
+  db:
+    image: ${POSTGRES_IMAGE:-postgres:17-bookworm}
+    environment:
+      POSTGRES_DB: faith
+      POSTGRES_USER: faith_admin
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_admin_password
+    secrets: [db_admin_password]
+    volumes: ["database:/var/lib/postgresql/data"]
+    networks: [backend]
+    restart: unless-stopped
+    shm_size: 128m
+    mem_limit: 1g
+    pids_limit: 256
+    stop_grace_period: 60s
+    command: ["postgres", "-c", "log_min_error_statement=panic", "-c", "log_parameter_max_length_on_error=0"]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -h 127.0.0.1 -U faith_admin -d faith"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+  migrate:
+    <<: *api
+    entrypoint: ["/bin/sh", "/app/migrate.sh"]
+    healthcheck: {disable: true}
+    environment: {PGHOST: db, PGUSER: faith_admin, PGDATABASE: faith}
+    secrets: [db_admin_password, db_app_password]
+    networks: [backend]
+    depends_on:
+      db: {condition: service_healthy}
+    restart: "no"
+  api:
+    <<: *api
+    environment:
+      FAITH_DATABASE_URL: "host=db dbname=faith user=faith_app sslmode=disable"
+      FAITH_DATABASE_PASSWORD_FILE: /run/secrets/db_app_password
+      FAITH_TLS_CERT_FILE: /run/secrets/tls_certificate
+      FAITH_TLS_KEY_FILE: /run/secrets/tls_key
+      FAITH_LOG_LEVEL: ${FAITH_LOG_LEVEL:-warning}
+    secrets: [db_app_password, tls_certificate, tls_key]
+    networks: [backend, edge]
+    ports: ["${FAITH_BIND_ADDRESS:-127.0.0.1}:${FAITH_PORT_RANGE:-4433-4448}:4433"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    restart: unless-stopped
+    stop_grace_period: 30s
+    ulimits: {nofile: {soft: 16384, hard: 16384}}
+secrets:
+  db_admin_password:
+    file: ${FAITH_DB_ADMIN_PASSWORD_FILE:?Set FAITH_DB_ADMIN_PASSWORD_FILE}
+  db_app_password:
+    file: ${FAITH_DB_APP_PASSWORD_FILE:?Set FAITH_DB_APP_PASSWORD_FILE}
+  tls_certificate:
+    file: ${FAITH_TLS_CERT_FILE:?Set FAITH_TLS_CERT_FILE}
+  tls_key:
+    file: ${FAITH_TLS_KEY_FILE:?Set FAITH_TLS_KEY_FILE}
+volumes:
+  database:
+networks:
+  backend: {internal: true}
+  edge: {}

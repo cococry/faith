@@ -5,6 +5,7 @@ const char *faith_frame_msg_name(faith_frame_msg_type_t msg) {
 #define X(name, value)                                                         \
   case name:                                                                   \
     return #name;
+
     FAITH_MSG_TYPES(X)
 #undef X
   default:

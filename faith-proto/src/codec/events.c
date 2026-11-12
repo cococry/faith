@@ -30,11 +30,13 @@ faith_status_code_t faith_decode_event_conversation_created(
 
   return FAITH_OK;
 }
+
 const char *faith_event_codec_type_name(faith_event_codec_type_t type) {
   switch (type) {
 #define X(name, value)                                                         \
   case name:                                                                   \
     return #name;
+
     FAITH_EVENTS_CODEC(X)
 #undef X
   default:

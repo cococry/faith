@@ -48,6 +48,7 @@ transport_result_t frame_try_full_read(transport_conn_t *conn,
                 " fd=%i] Frame incomplete, reading more bytes...",
                 _MODULE_NAME, conn->id, conn->fd);
       }
+
       transport_result_t res = conn_read_more_ssl_bytes(conn);
 
       if (res == TRANSPORT_RES_GOT_BYTES) {
@@ -57,6 +58,7 @@ transport_result_t frame_try_full_read(transport_conn_t *conn,
                   " fd=%i] Got new bytes, parsing frame again...",
                   _MODULE_NAME, conn->id, conn->fd);
         }
+
         continue;
       }
 
@@ -67,6 +69,7 @@ transport_result_t frame_try_full_read(transport_conn_t *conn,
                   " fd=%i] SSL_read needs to wait for socket to be readable",
                   _MODULE_NAME, conn->id, conn->fd);
         }
+
         return res;
       }
 
@@ -77,6 +80,7 @@ transport_result_t frame_try_full_read(transport_conn_t *conn,
                   " fd=%i] SSL_read needs to wait for socket to be writable",
                   _MODULE_NAME, conn->id, conn->fd);
         }
+
         return res;
       }
 
@@ -85,6 +89,7 @@ transport_result_t frame_try_full_read(transport_conn_t *conn,
                 "[%s: client=%" PRIu64
                 " fd=%i] Connection closed while reading incomplete frame.",
                 _MODULE_NAME, conn->id, conn->fd);
+
         return res;
       }
 
@@ -96,12 +101,13 @@ transport_result_t frame_try_full_read(transport_conn_t *conn,
       return res;
     }
 
-    nob_log(ERROR, "[%s: client=%" PRIu64 " fd=%i] Failed to read frame", _MODULE_NAME, conn->id,
-            conn->fd);
+    nob_log(ERROR, "[%s: client=%" PRIu64 " fd=%i] Failed to read frame",
+            _MODULE_NAME, conn->id, conn->fd);
 
     return TRANSPORT_RES_ERROR;
   }
 }
+
 faith_status_code_t frame_try_parse_from_buffer(const uint8_t *payload,
                                                 size_t         payload_size,
                                                 faith_frame_t *out,

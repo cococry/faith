@@ -48,6 +48,7 @@ faith_status_code_t reactor_modify_interests(reactor_context_t *ctx,
 
 faith_status_code_t reactor_remove(reactor_context_t *ctx,
                                    reactor_source_t  *src);
+
 faith_status_code_t reactor_wait(reactor_context_t *ctx, int timeout_ms,
                                  reactor_event_data_t *o_events,
                                  size_t               *o_n_events);

@@ -1,8 +1,8 @@
 #include "handshake.h"
 
 #include "../server/client_io.h"
-#include "device_link.h"
 #include "../server/client_lifecycle.h"
+#include "device_link.h"
 #include <faith-proto/codec/auth.h>
 #include <faith-proto/codec/codec.h>
 #include <faith-proto/codec/signatures.h>
@@ -42,6 +42,7 @@ static void _identity_complete(void *owner, void *data,
     client_device_session_data_t *sess = NULL;
     sess_registry_get_session(&s->rt, &job->auth_id, &job->device.device_id,
                               &sess);
+
     if (sess)
       sess->verified_at_ms = faith_now_ms();
 
@@ -80,6 +81,7 @@ faith_status_code_t auth_handle_hello(server_state_t *s, client_conn_t *cl,
             "[%s: client=%" PRIu64
             " fd=%i] Server got invalid HELLO from client.",
             _MODULE_NAME, cl->conn.id, cl->conn.fd);
+
     return FAITH_ERR_BAD_ENVELOPE;
   }
 
@@ -141,6 +143,7 @@ faith_status_code_t auth_handle_challenge_response(
             "FAITH_ENVELOPE_CHALLENGE_RESPONSE, got %s",
             _MODULE_NAME, cl->conn.id, cl->conn.fd,
             faith_envelope_name(challenge_response_envl->type));
+
     return FAITH_ERR_INVALID;
   }
 
@@ -149,6 +152,7 @@ faith_status_code_t auth_handle_challenge_response(
             "[%s: client=%" PRIu64
             " fd=%i] Server got invalid CHALLENGE_RESPONSE from client.",
             _MODULE_NAME, cl->conn.id, cl->conn.fd);
+
     return FAITH_ERR_BAD_ENVELOPE;
   }
 
@@ -160,6 +164,7 @@ faith_status_code_t auth_handle_challenge_response(
             "[%s: client=%" PRIu64
             " fd=%i] Server got CHALLENGE_RESPONSE from invalid client.",
             _MODULE_NAME, cl->conn.id, cl->conn.fd);
+
     return FAITH_ERR_INVALID;
   }
 
@@ -169,12 +174,13 @@ faith_status_code_t auth_handle_challenge_response(
             "[%s: client=%" PRIu64
             " fd=%i] Server got invalid CHALLENGE_RESPONSE envelope contents.",
             _MODULE_NAME, cl->conn.id, cl->conn.fd);
+
     return FAITH_ERR_INVALID;
   }
 
-  uint8_t *verification_public_key = params->public_key;
+  uint8_t                      *verification_public_key = params->public_key;
   client_device_session_data_t *sess = NULL;
-  faith_status_code_t sess_rc = sess_registry_get_session(
+  faith_status_code_t           sess_rc = sess_registry_get_session(
       &s->rt, &params->sender_auth_id, &params->device_id, &sess);
 
   if (sess_rc != FAITH_OK && sess_rc != FAITH_ERR_NOT_FOUND)
@@ -217,6 +223,7 @@ faith_status_code_t auth_handle_challenge_response(
   {
     _FH_CHECK(faith_gen_sign_buf_hello_handshake(msg_buf, &msg_size,
                                                  sizeof(msg_buf), &sign_msg));
+
     if (_fh_rc != FAITH_OK) {
       nob_log(ERROR,
               "[%s: client=%" PRIu64
@@ -238,6 +245,7 @@ faith_status_code_t auth_handle_challenge_response(
   }
 
   bool authorized = verification_rc == FAITH_OK;
+
   if (!authorized) {
     goto reject;
   }
@@ -262,14 +270,16 @@ faith_status_code_t auth_handle_challenge_response(
     _FH_CHECK_RETURN(auth_identity_submit(s, &job));
 
     server_set_client_state(s, cl, CLIENT_WAIT_FOR_IDENTITY);
+
     return FAITH_OK;
   }
 
-  _FH_CHECK_RETURN(auth_authorize_client(
-      s, cl, &params->sender_auth_id, &params->device_id,
-      verification_public_key, false));
+  _FH_CHECK_RETURN(auth_authorize_client(s, cl, &params->sender_auth_id,
+                                         &params->device_id,
+                                         verification_public_key, false));
 
   return FAITH_OK;
+
 reject: {
 
   /* =============================== */
@@ -280,6 +290,7 @@ reject: {
   char device_id_hex[FAITH_AUTH_ID_SIZE * 2 + 1];
   _FH_CHECK_RETURN(
       faith_id128_to_hex(params->sender_auth_id.bytes, sender_auth_id_hex));
+
   _FH_CHECK_RETURN(faith_id128_to_hex(params->device_id.bytes, device_id_hex));
   nob_log(ERROR,
           "[%s: client=%" PRIu64
@@ -287,6 +298,7 @@ reject: {
           "(auth_id=%s, device_id=%s). ",
           _MODULE_NAME, cl->conn.id, cl->conn.fd, sender_auth_id_hex,
           device_id_hex);
+
   return FAITH_ERR_UNAUTHORIZED;
 }
 }
@@ -302,12 +314,12 @@ faith_status_code_t auth_authorize_client(
   cl->ident.device_id = *device_id;
 
   if (register_session) {
-    _FH_CHECK_RETURN(sess_registry_register_session(
-        &s->rt, auth_id, device_id, cl, public_key));
+    _FH_CHECK_RETURN(sess_registry_register_session(&s->rt, auth_id, device_id,
+                                                    cl, public_key));
   } else {
     client_device_session_data_t *sess = NULL;
-    _FH_CHECK_RETURN(sess_registry_get_session(
-        &s->rt, auth_id, device_id, &sess));
+    _FH_CHECK_RETURN(
+        sess_registry_get_session(&s->rt, auth_id, device_id, &sess));
 
     if (!sess)
       return FAITH_ERR_UNAUTHORIZED;
@@ -336,10 +348,9 @@ faith_status_code_t auth_authorize_client(
   return FAITH_OK;
 }
 
-faith_status_code_t
-auth_handshake_ready(server_state_t *s, client_conn_t *cl,
-                        const faith_auth_id_t   *sender_id,
-                        const faith_device_id_t *device_id) {
+faith_status_code_t auth_handshake_ready(server_state_t *s, client_conn_t *cl,
+                                         const faith_auth_id_t   *sender_id,
+                                         const faith_device_id_t *device_id) {
   if (!s || !cl || cl->closing || !device_id)
     return FAITH_ERR_INVALID;
 
@@ -388,16 +399,19 @@ faith_status_code_t auth_queue_auth_pending(server_state_t *s,
   return FAITH_OK;
 }
 
-faith_status_code_t auth_identity_submit(server_state_t *s,
-                                          const db_identity_job_t *request) {
+faith_status_code_t auth_identity_submit(server_state_t          *s,
+                                         const db_identity_job_t *request) {
   db_identity_job_t *job = malloc(sizeof(*job));
 
   if (!job)
     return FAITH_ERR_NOMEM;
 
   *job = *request;
-  db_async_job_t task = {.run = _identity_run, .complete = _identity_complete,
-                         .destroy = free, .data = job};
+  db_async_job_t task = {.run = _identity_run,
+                         .complete = _identity_complete,
+                         .destroy = free,
+                         .data = job};
+
   faith_status_code_t rc = db_async_submit(&s->db_pool, &task);
 
   if (rc != FAITH_OK)
@@ -406,10 +420,12 @@ faith_status_code_t auth_identity_submit(server_state_t *s,
   return rc;
 }
 
-faith_status_code_t auth_handshake_complete(server_state_t *s, client_conn_t *cl,
-                                            const faith_auth_id_t *auth_id,
-                                            const faith_device_id_t *device_id) {
+faith_status_code_t
+auth_handshake_complete(server_state_t *s, client_conn_t *cl,
+                        const faith_auth_id_t   *auth_id,
+                        const faith_device_id_t *device_id) {
   (void)auth_id;
   (void)device_id;
+
   return delivery_load_events(s, cl);
 }

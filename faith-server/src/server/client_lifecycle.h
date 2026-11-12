@@ -1,7 +1,7 @@
 #pragma once
 
-#include <faith-proto/core/core.h>
 #include <faith-proto/codec/server.h>
+#include <faith-proto/core/core.h>
 
 #include "server.h"
 

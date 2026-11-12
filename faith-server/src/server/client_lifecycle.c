@@ -11,10 +11,13 @@
 faith_status_code_t server_client_adopt_fd(server_state_t *s, int client_fd) {
 
   struct client_conn_t *cl = calloc(1, sizeof(*cl));
+
   if (!cl) {
     nob_log(WARNING, "failed to allocate memory with calloc() for pending "
                      "client connection.");
+
     close(client_fd);
+
     return FAITH_ERR_NOMEM;
   }
 
@@ -44,8 +47,10 @@ faith_status_code_t server_client_adopt_fd(server_state_t *s, int client_fd) {
           client_fd);
 
   return FAITH_OK;
+
 defer:
   _FH_CHECK_SCOPED(server_close_client(s, &cl));
+
   return _fh_result;
 }
 
@@ -57,6 +62,7 @@ faith_status_code_t server_close_client(server_state_t *s,
   struct client_conn_t *cl = *cl_ptr;
 
   faith_status_code_t result = FAITH_OK;
+
   if (cl->state == CLIENT_WAIT_FOR_DEVICE_LINK_RESPONSE) {
     faith_status_code_t rc = device_link_queue_request_cancellation(s, cl);
 
@@ -85,12 +91,14 @@ faith_status_code_t server_close_client(server_state_t *s,
     client_session_device_t *devices = NULL;
     faith_status_code_t      rc =
         sess_registry_get_devices(&s->rt, &cl->ident.auth_id, &devices);
+
     if (rc != FAITH_OK || devices == NULL) {
       nob_log(ERROR,
               "[%s: client=%" PRIu64
               " fd=%d] Failed to enumerate account devices: %s",
               _MODULE_NAME, cl->conn.id, cl->conn.fd,
               faith_status_code_name(rc));
+
       if (result == FAITH_OK)
         result = rc;
     }
@@ -101,6 +109,7 @@ faith_status_code_t server_close_client(server_state_t *s,
           FAITH_CLIENT_RECONNECT_ALLOWED, 0, 0,
           "All authorized devices of the account you "
           "are trying to link to have disconnected.");
+
       if (result == FAITH_OK)
         result = rc;
     }
@@ -115,11 +124,17 @@ faith_status_code_t server_close_client(server_state_t *s,
 
     if (sess && sess->conn == cl) {
       sess->conn = NULL;
+      s->event_cached_bytes -= sess->inbox.bytes;
+      device_event_inbox_destroy(&sess->inbox);
+      device_event_inbox_init(&sess->inbox);
+      sess->events_loaded = false;
+      sess->sync_pending = false;
     }
   }
 
   {
     _FH_CHECK(reactor_remove(&s->reactor, &cl->reactor_source));
+
     if (_fh_rc != FAITH_OK) {
       result = _fh_rc;
     }
@@ -127,6 +142,7 @@ faith_status_code_t server_close_client(server_state_t *s,
 
   {
     _FH_CHECK(tls_shutdown(&cl->conn.tls));
+
     if (_fh_rc != FAITH_OK) {
       result = _fh_rc;
     }
@@ -150,12 +166,15 @@ faith_status_code_t server_close_client(server_state_t *s,
   /* An LLM would have generated .in then .out */
   {
     _FH_CHECK(conn_queue_free(&cl->conn.out));
+
     if (_fh_rc != FAITH_OK) {
       result = _fh_rc;
     }
   }
+
   {
     _FH_CHECK(conn_queue_free(&cl->conn.in));
+
     if (_fh_rc != FAITH_OK) {
       result = _fh_rc;
     }
@@ -197,9 +216,11 @@ server_client_queue_disconnect(server_state_t *s, struct client_conn_t *cl,
   {
     _FH_CHECK(faith_encode_client_disconnect_body(
         body, &body_size, sizeof(body), &disconnect_envl));
+
     if (_fh_rc != FAITH_OK) {
       /* We cannot produce the final protocol message, so close immediately */
       cl->closing = 1;
+
       return _fh_rc;
     }
   }
@@ -209,6 +230,7 @@ server_client_queue_disconnect(server_state_t *s, struct client_conn_t *cl,
   envl.recipient_id = cl->state == CLIENT_WAIT_FOR_DEVICE_LINK_RESPONSE
                           ? cl->pending_auth_id
                           : cl->ident.auth_id;
+
   envl.body = body;
   envl.body_size = body_size;
 
@@ -219,6 +241,7 @@ server_client_queue_disconnect(server_state_t *s, struct client_conn_t *cl,
       /* Sending failed. There is no useful recovery for this connection, so
        * close immediately. */
       cl->closing = 1;
+
       return _fh_rc;
     }
   }

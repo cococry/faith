@@ -11,8 +11,8 @@
   command_loc(__FILE__, __LINE__, (arg), (commands), (name), (signature),      \
               (description))
 
-#define BUILD_FOLDER "./build/"
-#define FAITH_PROTO_ROOT "../faith-proto/"
+#define BUILD_FOLDER        "./build/"
+#define FAITH_PROTO_ROOT    "../faith-proto/"
 #define FAITH_PROTO_INCLUDE FAITH_PROTO_ROOT "include"
 #define FAITH_PROTO_LIBRARY FAITH_PROTO_ROOT "build/libfaith_proto.a"
 
@@ -112,6 +112,7 @@ static const char *faithd_sources[] = {
     "src/transport/frame.c",
     "src/transport/tls.c",
     "src/commands/conversation.c",
+    "src/commands/group.c",
     "src/commands/dispatch.c",
     "src/db/conn.c",
     "src/db/device_repo.c",
@@ -138,6 +139,7 @@ static const char *faithd_objects[] = {
     BUILD_FOLDER "obj/transport_frame.o",
     BUILD_FOLDER "obj/transport_tls.o",
     BUILD_FOLDER "obj/commands_conversation.o",
+    BUILD_FOLDER "obj/commands_group.o",
     BUILD_FOLDER "obj/commands_dispatch.o",
     BUILD_FOLDER "obj/db_conn.o",
     BUILD_FOLDER "obj/db_device_repo.o",
@@ -153,14 +155,17 @@ static bool compile_source_async(Procs *procs, const char *source,
 
   nob_cc(&cmd);
   nob_cc_flags(&cmd);
-  nob_cmd_append(&cmd, "-I/usr/include/postgresql", "-I" FAITH_PROTO_INCLUDE, "-I../third_party/", "-c", source, "-o", object);
+  nob_cmd_append(&cmd, "-I/usr/include/postgresql", "-I" FAITH_PROTO_INCLUDE,
+                 "-I../third_party/", "-c", source, "-o", object);
 
   if (!nob_cmd_run(&cmd, .async = procs, .max_procs = 0)) {
     nob_cmd_free(cmd);
+
     return false;
   }
 
   nob_cmd_free(cmd);
+
   return true;
 }
 
@@ -180,6 +185,7 @@ bool build(void) {
   if (!nob_file_exists(FAITH_PROTO_INCLUDE)) {
     nob_log(ERROR, "Required include directory is missing: %s",
             FAITH_PROTO_INCLUDE);
+
     goto cleanup;
   }
 
@@ -203,7 +209,8 @@ bool build(void) {
   for (size_t i = 0; i < NOB_ARRAY_LEN(faithd_objects); ++i)
     nob_cmd_append(&cmd, faithd_objects[i]);
 
-  nob_cmd_append(&cmd, FAITH_PROTO_LIBRARY, "-lssl", "-lcrypto", "-lpq", "-pthread");
+  nob_cmd_append(&cmd, FAITH_PROTO_LIBRARY, "-lssl", "-lcrypto", "-lpq",
+                 "-pthread");
 
   if (!nob_cmd_run(&cmd))
     goto cleanup;
@@ -275,6 +282,7 @@ int main(int argc, char **argv) {
 
   if (command(command_name, &commands, "help", "", "Print this help message")) {
     print_available_commands(commands);
+
     return 0;
   }
 
