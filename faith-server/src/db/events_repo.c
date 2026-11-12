@@ -37,8 +37,54 @@ faith_status_code_t db_events_repo_execute(faith_db_t *db, void *data) {
   if (!db || !db->conn || !job || job->event.data_size > INT_MAX)
     return FAITH_ERR_INVALID;
 
+  if (job->operation == DB_EVENTS_EXPIRE) {
+    PGresult *expired = PQexec(db->conn, "SELECT * FROM expire_device_events()");
+
+    if (!expired || PQresultStatus(expired) != PGRES_TUPLES_OK) {
+      PQclear(expired);
+      return FAITH_ERR_IO;
+    }
+
+    for (int i = 0; i < PQntuples(expired); i++) {
+      db_expired_inbox_t entry = {0};
+      size_t size;
+      unsigned char *bytes = PQunescapeBytea((unsigned char *)PQgetvalue(expired, i, 0), &size);
+
+      if (!bytes || size != sizeof(entry.auth_id)) {
+        PQfreemem(bytes);
+        PQclear(expired);
+        return FAITH_ERR_IO;
+      }
+
+      memcpy(&entry.auth_id, bytes, size);
+      PQfreemem(bytes);
+      bytes = PQunescapeBytea((unsigned char *)PQgetvalue(expired, i, 1), &size);
+
+      if (!bytes || size != sizeof(entry.device_id)) {
+        PQfreemem(bytes);
+        PQclear(expired);
+        return FAITH_ERR_IO;
+      }
+
+      memcpy(&entry.device_id, bytes, size);
+      PQfreemem(bytes);
+      entry.until = strtoull(PQgetvalue(expired, i, 2), NULL, 10);
+      arrput(job->expired, entry);
+    }
+
+    PQclear(expired);
+    return FAITH_OK;
+  }
+
   if (!job->in_transaction && !_command(db, "BEGIN"))
     return FAITH_ERR_IO;
+
+  if (!_command(db, "UPDATE event_storage_usage SET pending_bytes = pending_bytes WHERE singleton")) {
+    if (!job->in_transaction)
+      _command(db, "ROLLBACK");
+
+    return FAITH_ERR_IO;
+  }
 
   faith_status_code_t rc = FAITH_ERR_IO;
   char                sequence[32];
@@ -186,6 +232,7 @@ done:
 void db_events_repo_destroy(void *data) {
   db_events_job_t *job = data;
   free(job->event.data);
+  arrfree(job->expired);
 
   for (size_t i = 0; i < arrlenu(job->inbox.events); i++)
     free(job->inbox.events[i].data);

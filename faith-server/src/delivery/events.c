@@ -111,6 +111,30 @@ static faith_status_code_t _open_stream(server_state_t *s, client_conn_t *cl,
 static void _event_complete(void *owner, void *data, faith_status_code_t status) {
   server_state_t *s = owner;
   db_events_job_t *job = data;
+  if (job->operation == DB_EVENTS_EXPIRE) {
+    s->event_cleanup_pending = false;
+
+    if (status != FAITH_OK)
+      return;
+
+    for (size_t i = 0; i < arrlenu(job->expired); i++) {
+      db_expired_inbox_t *entry = &job->expired[i];
+      client_device_session_data_t *expired = NULL;
+      sess_registry_get_session(&s->rt, &entry->auth_id, &entry->device_id, &expired);
+
+      if (!expired || !expired->events_loaded)
+        continue;
+
+      device_event_inbox_remove_until(&expired->inbox, entry->until);
+
+      if (expired->conn)
+        server_client_queue_disconnect(s, expired->conn, FAITH_DISCONNECT_TEMPORARY_FAILURE,
+            FAITH_CLIENT_RECONNECT_ALLOWED, 0, 0, "Event retention window expired; reconnect to resume.");
+    }
+
+    return;
+  }
+
   client_device_session_data_t *sess = NULL;
   sess_registry_get_session(&s->rt, &job->auth_id, &job->device_id, &sess);
 
@@ -354,4 +378,19 @@ faith_status_code_t delivery_handle_event_acked(server_state_t   *s,
 void delivery_event_complete(server_state_t *s, db_events_job_t *job,
                               faith_status_code_t status) {
   _event_complete(s, job, status);
+}
+
+void delivery_expire_events(server_state_t *s) {
+  if (s->event_cleanup_pending)
+    return;
+
+  db_events_job_t *job = calloc(1, sizeof(*job));
+
+  if (!job)
+    return;
+
+  job->operation = DB_EVENTS_EXPIRE;
+
+  if (_submit_event(s, job) == FAITH_OK)
+    s->event_cleanup_pending = true;
 }

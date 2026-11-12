@@ -24,3 +24,5 @@ faith_status_code_t delivery_load_events(server_state_t *s, client_conn_t *cl);
 
 void delivery_event_complete(server_state_t *s, db_events_job_t *job,
                               faith_status_code_t status);
+
+void delivery_expire_events(server_state_t *s);

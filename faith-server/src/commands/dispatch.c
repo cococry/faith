@@ -63,6 +63,36 @@ faith_status_code_t command_dispatch(server_state_t *s, client_conn_t *cl,
   _FH_CHECK_RETURN(
       faith_decode_command_body(envl->body, envl->body_size, &cmd));
 
+  client_device_session_data_t *sess = NULL;
+  faith_status_code_t lookup = sess_registry_get_session(&s->rt,
+      &cl->ident.auth_id, &cl->ident.device_id, &sess);
+
+  if (lookup != FAITH_OK || !sess) {
+    free(cmd.payload);
+    return FAITH_ERR_UNAUTHORIZED;
+  }
+
+  uint64_t now = faith_now_ms();
+
+  if (now - sess->command_window_ms >= 60000) {
+    sess->command_window_ms = now;
+    sess->command_count = 0;
+  }
+
+  if (now - s->command_window_ms >= 60000) {
+    s->command_window_ms = now;
+    s->command_count = 0;
+  }
+
+  if (sess->command_count >= 60 || s->command_count >= 6000) {
+    free(cmd.payload);
+    return command_queue_result(s, cl, &cmd.cmd_id, cmd.type,
+        FAITH_COMMAND_ERR_TIMED_OUT, FAITH_COMMAND_RESULT_REJECTED);
+  }
+
+  sess->command_count++;
+  s->command_count++;
+
   switch (cmd.type) {
   case FAITH_COMMAND_CREATE_CONVERSATION:
     {

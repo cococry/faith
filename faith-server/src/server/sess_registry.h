@@ -12,6 +12,8 @@ typedef struct {
   device_event_inbox_t        inbox;
   uint64_t verified_at_ms;
   bool events_loaded;
+  uint64_t command_window_ms;
+  unsigned command_count;
 } client_device_session_data_t;
 
 typedef struct {
