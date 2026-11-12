@@ -206,7 +206,6 @@ fn main() -> anyhow::Result<()> {
         for (message, layout) in snapshot.messages.iter().zip(&layouts).rev() {
             y -= layout.height + 8.0;
             if y < history_bottom {
-
                 text.render_viewport(
                     ([16.0, y], [100.0, history_bottom], available),
                     message,

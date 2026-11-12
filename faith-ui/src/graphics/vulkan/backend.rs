@@ -1590,10 +1590,7 @@ impl VulkanRenderer {
 
         let frame = &mut self.frameloop.frames[frame_idx];
 
-        let offset = Self::align_up(
-            region_start + frame.staging_head,
-            alignment,
-        );
+        let offset = Self::align_up(region_start + frame.staging_head, alignment);
 
         let end = offset
             .checked_add(size)
@@ -1608,16 +1605,16 @@ impl VulkanRenderer {
         Ok(offset)
     }
 
-        fn align_up(value: vk::DeviceSize, alignment: vk::DeviceSize) -> vk::DeviceSize {
-            if alignment <= 1 {
-                value
-            } else {
-                (value + alignment - 1) & !(alignment - 1)
-            }
+    fn align_up(value: vk::DeviceSize, alignment: vk::DeviceSize) -> vk::DeviceSize {
+        if alignment <= 1 {
+            value
+        } else {
+            (value + alignment - 1) & !(alignment - 1)
         }
+    }
 
-        fn resize(&mut self, width: u32, height: u32) {
-            self.pending_resize.width = width;
+    fn resize(&mut self, width: u32, height: u32) {
+        self.pending_resize.width = width;
         self.pending_resize.height = height;
         self.pending_resize.pending = true;
     }
