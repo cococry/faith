@@ -65,6 +65,7 @@ pub enum WindowHandleInfo {
 
 impl PlatformWaker {
     #[cfg(test)]
+    #[allow(dead_code)]
     pub fn for_test() -> Self {
         use nix::sys::eventfd::{EfdFlags, EventFd};
         Self {
