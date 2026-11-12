@@ -1,3 +1,4 @@
+pub mod input;
 pub mod quad;
 pub mod renderer;
 pub mod text;
