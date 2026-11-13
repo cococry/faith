@@ -45,4 +45,4 @@ while [ "$i" -le "$instances" ]; do
   docker compose --env-file .local/system.env port --index "$i" api 4433
   i=$((i + 1))
 done
-printf '\nDONE, let's start.' 
+printf '\nDONE, lets go.' 
