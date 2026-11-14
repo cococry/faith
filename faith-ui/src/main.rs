@@ -12,6 +12,7 @@ use profiles::Profile;
 use ui::{
     framework::{DivOptions, Font, Fonts, Framework, Style},
     renderer::Image,
+    theme::ThemeName,
     widgets::input::InputOptions,
 };
 
@@ -19,6 +20,7 @@ const MENU: &str = "\u{eb94}";
 const ACCOUNTS: &str = "\u{eb99}";
 const CHATS: &str = "\u{eac7}";
 const SETTINGS: &str = "\u{eb51}";
+const THEME: &str = "\u{eac6}";
 const MORE: &str = "\u{ea7c}";
 const ADD: &str = "\u{ea60}";
 const LOCK: &str = "\u{ea75}";
@@ -46,6 +48,7 @@ enum Action {
     ToggleMenu,
     ListPage(usize),
     Conversation(faith_client::Id),
+    Theme(ThemeName),
 }
 
 struct App {
@@ -58,6 +61,7 @@ struct App {
     collapsed: bool,
     list_offset: usize,
     conversation: Option<faith_client::Id>,
+    theme: ThemeName,
 }
 
 impl App {
@@ -140,6 +144,10 @@ impl App {
             Action::ToggleMenu => self.collapsed = !self.collapsed,
             Action::ListPage(offset) => self.list_offset = offset,
             Action::Conversation(id) => self.conversation = Some(id),
+            Action::Theme(theme) => {
+                self.theme = theme;
+                ui.set_theme(theme.colors());
+            }
         }
         platform.request_redraw()?;
         Ok(())
@@ -301,12 +309,11 @@ fn navigation(
     Ok(action)
 }
 
-fn item_list(
+fn list_header(
     ui: &mut Framework,
     gpu: &mut Renderer,
     app: &App,
-    snapshot: &client::Snapshot,
-    height: f32,
+    title: &str,
 ) -> anyhow::Result<Action> {
     let mut action = Action::None;
     let width = ui.div_width();
@@ -321,22 +328,54 @@ fn item_list(
         Some((width - if app.collapsed { 118.0 } else { 80.0 }).max(1.0)),
         None,
     );
-    label(
+    label(ui, gpu, title, 20, true, false, false)?;
+    ui.pop_sizing();
+    ui.set_position(width - 52.0, 16.0);
+    let _ = icon(ui, gpu, "list-more", MORE, false)?;
+    Ok(action)
+}
+
+fn settings_list(
+    ui: &mut Framework,
+    gpu: &mut Renderer,
+    app: &App,
+    height: f32,
+) -> anyhow::Result<Action> {
+    let mut action = list_header(ui, gpu, app, "Settings")?;
+    let width = ui.div_width();
+    panel(
+        ui,
+        16.0,
+        94.0,
+        width - 32.0,
+        (height - 110.0).max(48.0),
+        true,
+    )?;
+    if row_button(ui, gpu, "settings-theme", THEME, "Theme", true, false)? {
+        action = Action::Settings;
+    }
+    end_panel(ui);
+    Ok(action)
+}
+
+fn item_list(
+    ui: &mut Framework,
+    gpu: &mut Renderer,
+    app: &App,
+    snapshot: &client::Snapshot,
+    height: f32,
+) -> anyhow::Result<Action> {
+    let mut action = list_header(
         ui,
         gpu,
+        app,
         if app.page == Page::Conversations {
             "Conversations"
         } else {
             "Profiles"
         },
-        20,
-        true,
-        false,
-        false,
     )?;
-    ui.pop_sizing();
-    ui.set_position(width - 52.0, 16.0);
-    let _ = icon(ui, gpu, "list-more", MORE, false)?;
+    let width = ui.div_width();
     let chats = app.page == Page::Conversations;
     let count = if chats {
         snapshot.conversations.len()
@@ -697,31 +736,46 @@ fn logged_in_page(
     Ok(action)
 }
 
-fn settings_page(ui: &mut Framework, gpu: &mut Renderer) -> anyhow::Result<()> {
-    ui.set_position(32.0, 36.0);
-    label(ui, gpu, "Settings", 26, true, false, false)?;
-    ui.set_position(32.0, 98.0);
-    ui.push_sizing(Some((ui.div_width() - 64.0).max(1.0)), None);
+fn settings_page(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Result<Action> {
+    let width = (ui.div_width() - 64.0).max(1.0);
+    let height = (ui.div_height() - 72.0).max(1.0);
+    panel(ui, 32.0, 36.0, width, height, false)?;
+    label(ui, gpu, "Theme", 26, true, false, false)?;
+    ui.space(12.0);
     label(
         ui,
         gpu,
-        "Your preferences will live here.",
+        "Choose the colors that feel like home.",
         15,
         false,
         true,
         false,
     )?;
-    label(
-        ui,
+    ui.space(36.0);
+    label(ui, gpu, "Appearance", 13, true, true, false)?;
+    ui.space(10.0);
+    ui.push_style(Style {
+        font_size: 15,
+        padding: 12.0,
+        background: Some(ui.theme().input),
+        border_color: Some(ui.theme().border),
+        ..ui.style()
+    });
+    ui.push_sizing(Some(width.min(340.0)), None);
+    let choice = ui.dropdown(
         gpu,
-        "For now, choose a theme at startup with --theme light or --theme dark.",
-        14,
-        false,
-        true,
-        false,
+        "settings-theme-dropdown",
+        &["Dark (Gruvbox)", "Light (Blossom Light)"],
+        if app.theme == ThemeName::Dark { 0 } else { 1 },
     )?;
     ui.pop_sizing();
-    Ok(())
+    ui.pop_style();
+    end_panel(ui);
+    Ok(match choice {
+        Some(0) => Action::Theme(ThemeName::Dark),
+        Some(1) => Action::Theme(ThemeName::Light),
+        _ => Action::None,
+    })
 }
 
 fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyhow::Result<Action> {
@@ -744,7 +798,11 @@ fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyh
         end_panel(ui);
     }
     panel(ui, rail, 0.0, list, height, true)?;
-    let list_action = item_list(ui, gpu, app, &snapshot, height)?;
+    let list_action = if app.page == Page::Settings {
+        settings_list(ui, gpu, app, height)?
+    } else {
+        item_list(ui, gpu, app, &snapshot, height)?
+    };
     if !matches!(list_action, Action::None) {
         action = list_action;
     }
@@ -770,10 +828,7 @@ fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyh
         }
         Page::Create => profile_creation_page(ui, gpu, !app.profiles.is_empty())?,
         Page::Conversations => logged_in_page(ui, gpu, app, &snapshot)?,
-        Page::Settings => {
-            settings_page(ui, gpu)?;
-            Action::None
-        }
+        Page::Settings => settings_page(ui, gpu, app)?,
     };
     if !matches!(content_action, Action::None) {
         action = content_action;
@@ -838,6 +893,7 @@ fn main() -> anyhow::Result<()> {
         collapsed: false,
         list_offset: 0,
         conversation: None,
+        theme: cli.theme,
     };
     if let Some(path) = &cli.profile {
         app.login(

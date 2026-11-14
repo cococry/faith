@@ -1,7 +1,7 @@
 use crate::graphics::Color;
 use clap::ValueEnum;
 
-#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum ThemeName {
     #[default]
     #[value(alias = "blossom_light")]

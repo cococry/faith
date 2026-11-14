@@ -3,7 +3,7 @@ use super::{
     TextRenderer, UIRenderer,
     text::TextLayoutOptions,
     widgets::{
-        button,
+        button, dropdown,
         input::{Bounds, InputField, InputOptions},
     },
 };
@@ -14,7 +14,10 @@ use crate::{
         mouse::{CursorPosition, MouseButton},
     },
 };
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Style {
@@ -130,6 +133,11 @@ impl Layout {
 
 pub struct Framework {
     theme: Theme,
+    dropdowns: HashMap<String, dropdown::State>,
+    dropdown_seen: HashSet<String>,
+    active_dropdown: Option<String>,
+    dropdown_events: Vec<WindowEvent>,
+    pending_popup: Option<dropdown::Popup>,
     text_renderer: TextRenderer,
     ui_renderer: UIRenderer,
     fonts: Fonts,
@@ -156,6 +164,11 @@ impl Framework {
         let (w, h) = platform.size();
         let mut framework = Self {
             theme: Theme::LIGHT,
+            dropdowns: HashMap::new(),
+            dropdown_seen: HashSet::new(),
+            active_dropdown: None,
+            dropdown_events: Vec::new(),
+            pending_popup: None,
             text_renderer: TextRenderer::new()?,
             ui_renderer: UIRenderer::new(gpu, w, h)?,
             fonts,
@@ -208,6 +221,23 @@ impl Framework {
         self.styles = vec![self.base_style()];
         self.sizing = vec![(None, None)];
         self.events = events.to_vec();
+        self.dropdown_events.clear();
+        self.dropdown_seen.clear();
+        self.pending_popup = None;
+        if self.active_dropdown.is_some() {
+            self.dropdown_events.extend_from_slice(events);
+            self.events.retain(|event| {
+                !matches!(
+                    event,
+                    WindowEvent::MouseButtonPressed { .. }
+                        | WindowEvent::MouseButtonReleased { .. }
+                        | WindowEvent::MouseScrolled { .. }
+                        | WindowEvent::TextInput(_)
+                        | WindowEvent::KeyPressed { .. }
+                )
+            });
+            self.events.push(WindowEvent::MouseCancelled);
+        }
         self.button_occurrences.clear();
         self.batch_pointer = self.pointer;
         for event in events {
@@ -227,6 +257,23 @@ impl Framework {
                 .get(label)
                 .is_some_and(|count| occurrence < count)
         });
+        self.dropdowns
+            .retain(|id, _| self.dropdown_seen.contains(id));
+        if self
+            .active_dropdown
+            .as_ref()
+            .is_some_and(|id| !self.dropdown_seen.contains(id))
+        {
+            self.active_dropdown = None;
+        }
+        if let Some(popup) = self.pending_popup.take() {
+            popup.render(
+                &mut self.text_renderer,
+                gpu,
+                &mut self.ui_renderer,
+                self.theme,
+            )?;
+        }
         self.ui_renderer.end(gpu)
     }
     pub fn style(&self) -> Style {
@@ -497,6 +544,87 @@ impl Framework {
         result?;
         Ok(())
     }
+    pub fn dropdown<G: GraphicsDevice>(
+        &mut self,
+        gpu: &mut G,
+        id: &str,
+        options: &[&str],
+        selected: usize,
+    ) -> anyhow::Result<Option<usize>> {
+        anyhow::ensure!(
+            !options.is_empty() && selected < options.len(),
+            "invalid dropdown selection"
+        );
+        self.dropdown_seen.insert(id.to_owned());
+        let font = self.font(Font::Regular)?;
+        let icons = self.font(Font::Icons)?;
+        let style = self.style();
+        let metrics = self.text_renderer.measure(options[selected], font)?;
+        let bounds = self.place(
+            self.div_width() - 2.0 * style.margin,
+            metrics.height + 2.0 * style.padding,
+        );
+        let window = self.layouts.first().unwrap().bounds;
+        let popup = dropdown::popup_bounds(bounds, options.len(), [window.width, window.height]);
+        let events = if self.active_dropdown.as_deref() == Some(id) {
+            &self.dropdown_events
+        } else {
+            &self.events
+        };
+        let state = self.dropdowns.entry(id.to_owned()).or_default();
+        let response = state.update(bounds, popup, options.len(), self.batch_pointer, events);
+        let open = state.open;
+        if open {
+            self.active_dropdown = Some(id.to_owned());
+            self.pending_popup = Some(dropdown::Popup {
+                bounds: popup,
+                options: options.iter().map(|value| (*value).to_owned()).collect(),
+                selected,
+                hovered: response.hovered_row,
+                font,
+                icons,
+            });
+        } else if self.active_dropdown.as_deref() == Some(id) {
+            self.active_dropdown = None;
+        }
+        let style = button::appearance(style, response.hovered, response.pressed);
+        self.paint_style(bounds, style)?;
+        self.ui_renderer.push_clip(content_clip(bounds, style));
+        self.text_renderer.color = style.color;
+        let result = (|| -> anyhow::Result<()> {
+            let glyph = if open { dropdown::UP } else { dropdown::DOWN };
+            let gm = self.text_renderer.measure(glyph, icons)?;
+            let right = bounds.x + bounds.width - style.padding - gm.width;
+            self.ui_renderer.push_clip([
+                bounds.x,
+                bounds.y,
+                (right - bounds.x - 12.0).max(0.0),
+                bounds.height,
+            ]);
+            let result = self.text_renderer.render(
+                bounds.x + style.padding,
+                bounds.y + (bounds.height - metrics.height) * 0.5,
+                options[selected],
+                font,
+                gpu,
+                &mut self.ui_renderer,
+            );
+            self.ui_renderer.pop_clip();
+            result?;
+            self.text_renderer.render(
+                right,
+                bounds.y + (bounds.height - gm.height) * 0.5,
+                glyph,
+                icons,
+                gpu,
+                &mut self.ui_renderer,
+            )
+        })();
+        self.ui_renderer.pop_clip();
+        result?;
+        Ok(response.selected)
+    }
+
     pub fn load_image<G: GraphicsDevice>(
         &mut self,
         gpu: &mut G,
