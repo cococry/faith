@@ -2,6 +2,7 @@ use crate::platform::window::WindowHandleInfo;
 
 use super::event::WindowEvent;
 use super::keyboard::Keyboard;
+use super::mouse::{CursorPosition, Mouse, MouseButton, ScrollDelta};
 use super::window::WindowConfig;
 use xkbcommon::xkb;
 
@@ -47,6 +48,7 @@ pub struct X11Platform {
     xcb_conn: XCBConnection,
     window: u32,
     wm_delete_window: u32,
+    pub(crate) mouse: Mouse,
     keyboard: Keyboard,
     context: xkb::Context,
     keyboard_device: i32,
@@ -151,7 +153,12 @@ impl X11Platform {
                         | EventMask::STRUCTURE_NOTIFY
                         | EventMask::KEY_PRESS
                         | EventMask::KEY_RELEASE
-                        | EventMask::FOCUS_CHANGE,
+                        | EventMask::FOCUS_CHANGE
+                        | EventMask::POINTER_MOTION
+                        | EventMask::BUTTON_PRESS
+                        | EventMask::BUTTON_RELEASE
+                        | EventMask::ENTER_WINDOW
+                        | EventMask::LEAVE_WINDOW,
                 ),
         )?;
 
@@ -255,6 +262,7 @@ impl X11Platform {
             xcb_conn: conn,
             window: win_id,
             wm_delete_window,
+            mouse: Mouse::default(),
             keyboard,
             context,
             keyboard_device,
@@ -287,6 +295,29 @@ impl X11Platform {
                 *latest_resize = Some((self.width, self.height));
             }
 
+            Event::EnterNotify(e) => {
+                self.pending_input.push(WindowEvent::MouseEntered {
+                    position: CursorPosition {
+                        x: e.event_x.into(),
+                        y: e.event_y.into(),
+                    },
+                });
+            }
+            Event::LeaveNotify(_) => self.pending_input.push(WindowEvent::MouseLeft),
+            Event::MotionNotify(e) => {
+                self.pending_input.push(WindowEvent::MouseMoved {
+                    position: CursorPosition {
+                        x: e.event_x.into(),
+                        y: e.event_y.into(),
+                    },
+                });
+            }
+            Event::ButtonPress(e) => {
+                self.pending_input.push(x11_button_event(e.detail, true));
+            }
+            Event::ButtonRelease(e) if !(4..=7).contains(&e.detail) => {
+                self.pending_input.push(x11_button_event(e.detail, false));
+            }
             Event::KeyPress(e) => {
                 self.pending_input
                     .extend(self.keyboard.press(e.detail as u32));
@@ -558,5 +589,34 @@ impl Drop for X11Platform {
         unsafe {
             x11::xlib::XCloseDisplay(self.xdisplay.as_ptr());
         }
+    }
+}
+
+/// Core X11 represents wheel steps as button presses; releases are ignored.
+fn x11_button_event(detail: u8, pressed: bool) -> WindowEvent {
+    let delta = match detail {
+        4 => Some((0.0, -1.0)),
+        5 => Some((0.0, 1.0)),
+        6 => Some((-1.0, 0.0)),
+        7 => Some((1.0, 0.0)),
+        _ => None,
+    };
+    if let Some((x, y)) = delta {
+        return WindowEvent::MouseScrolled {
+            delta: ScrollDelta::Lines { x, y },
+        };
+    }
+    let button = match detail {
+        1 => MouseButton::Left,
+        2 => MouseButton::Middle,
+        3 => MouseButton::Right,
+        8 => MouseButton::Back,
+        9 => MouseButton::Forward,
+        other => MouseButton::Other(other.into()),
+    };
+    if pressed {
+        WindowEvent::MouseButtonPressed { button }
+    } else {
+        WindowEvent::MouseButtonReleased { button }
     }
 }

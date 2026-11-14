@@ -118,6 +118,7 @@ fn main() -> anyhow::Result<()> {
             }
             let response = input.handle(&event);
             redraw |= response.changed;
+
             if let Some(line) = response.submitted {
                 if line.trim() == "/quit" {
                     return Ok(());

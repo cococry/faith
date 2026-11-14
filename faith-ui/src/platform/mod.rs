@@ -1,5 +1,6 @@
 pub mod event;
 mod keyboard;
+pub mod mouse;
 mod wayland;
 pub mod window;
 mod x11;
