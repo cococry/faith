@@ -36,6 +36,12 @@ enum Page {
     Settings,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum SettingsItem {
+    Theme,
+    Misc,
+}
+
 enum Action {
     None,
     Select(usize),
@@ -49,6 +55,8 @@ enum Action {
     ListPage(usize),
     Conversation(faith_client::Id),
     Theme(ThemeName),
+    SettingsItem(SettingsItem),
+    Rounded(bool),
 }
 
 struct App {
@@ -62,6 +70,8 @@ struct App {
     list_offset: usize,
     conversation: Option<faith_client::Id>,
     theme: ThemeName,
+    settings_item: SettingsItem,
+    rounded: bool,
 }
 
 impl App {
@@ -144,6 +154,11 @@ impl App {
             Action::ToggleMenu => self.collapsed = !self.collapsed,
             Action::ListPage(offset) => self.list_offset = offset,
             Action::Conversation(id) => self.conversation = Some(id),
+            Action::SettingsItem(item) => self.settings_item = item,
+            Action::Rounded(enabled) => {
+                self.rounded = enabled;
+                ui.set_rounded_corners(enabled);
+            }
             Action::Theme(theme) => {
                 self.theme = theme;
                 ui.set_theme(theme.colors());
@@ -215,6 +230,7 @@ fn icon(
     ui.push_style(Style {
         font_size: 20,
         padding: 4.0,
+        radius: ui.corner_radii().icon,
         color: if selected {
             ui.theme().selected_icon
         } else {
@@ -242,6 +258,7 @@ fn row_button(
     ui.push_style(Style {
         font_size: 16,
         padding: 14.0,
+        radius: ui.corner_radii().row,
         color: if primary {
             ui.theme().primary_text
         } else if selected {
@@ -351,8 +368,28 @@ fn settings_list(
         (height - 110.0).max(48.0),
         true,
     )?;
-    if row_button(ui, gpu, "settings-theme", THEME, "Theme", true, false)? {
-        action = Action::Settings;
+    if row_button(
+        ui,
+        gpu,
+        "settings-theme",
+        THEME,
+        "Theme",
+        app.settings_item == SettingsItem::Theme,
+        false,
+    )? {
+        action = Action::SettingsItem(SettingsItem::Theme);
+    }
+    ui.space(10.0);
+    if row_button(
+        ui,
+        gpu,
+        "settings-misc",
+        "\u{eb52}",
+        "Misc",
+        app.settings_item == SettingsItem::Misc,
+        false,
+    )? {
+        action = Action::SettingsItem(SettingsItem::Misc);
     }
     end_panel(ui);
     Ok(action)
@@ -521,16 +558,19 @@ fn item_list(
 fn brand_page(ui: &mut Framework, gpu: &mut Renderer, logo: Image) -> anyhow::Result<()> {
     let width = ui.div_width();
     let height = ui.div_height();
-    let size = 100.0_f32.min((width - 48.0).max(32.0));
+    let content_width = (width - 40.0).max(1.0);
+    let size = 100.0_f32.min(content_width);
     let top = ((height - 250.0) * 0.5).max(24.0);
-    ui.set_position((width - size) * 0.5, top);
+    ui.set_position(20.0, top);
+    ui.div_begin(DivOptions {
+        width: Some(content_width),
+        ..Default::default()
+    })?;
+    ui.set_position((content_width - size) * 0.5, 0.0);
     ui.image(logo, size, size)?;
-    ui.set_position(20.0, top + 132.0);
-    ui.push_sizing(Some((width - 40.0).max(1.0)), None);
+    ui.space(32.0);
     label(ui, gpu, "Faith Messenger", 30, true, false, true)?;
-    ui.pop_sizing();
-    ui.set_position(24.0, top + 186.0);
-    ui.push_sizing(Some((width - 48.0).max(1.0)), None);
+    ui.space(12.0);
     label(
         ui,
         gpu,
@@ -540,7 +580,7 @@ fn brand_page(ui: &mut Framework, gpu: &mut Renderer, logo: Image) -> anyhow::Re
         true,
         true,
     )?;
-    ui.pop_sizing();
+    ui.div_end();
     Ok(())
 }
 
@@ -594,6 +634,7 @@ fn profile_creation_page(
     ui.push_style(Style {
         padding: 12.0,
         font_size: 16,
+        radius: ui.corner_radii().control,
         border_color: Some(ui.theme().border),
         background: Some(ui.theme().input),
         ..ui.style()
@@ -736,7 +777,48 @@ fn logged_in_page(
     Ok(action)
 }
 
+fn misc_settings_page(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Result<Action> {
+    let width = (ui.div_width() - 64.0).max(1.0);
+    let height = (ui.div_height() - 72.0).max(1.0);
+    panel(ui, 32.0, 36.0, width, height, false)?;
+    label(ui, gpu, "Misc", 26, true, false, false)?;
+    ui.space(12.0);
+    label(
+        ui,
+        gpu,
+        "Adjust details in the user interface.",
+        15,
+        false,
+        true,
+        false,
+    )?;
+    ui.space(36.0);
+    label(ui, gpu, "Interface", 13, true, true, false)?;
+    ui.space(10.0);
+    let change = ui.checkbox(
+        gpu,
+        "settings-rounded-corners",
+        "UI rounded corners",
+        app.rounded,
+    )?;
+    ui.space(8.0);
+    label(
+        ui,
+        gpu,
+        "Adds rounded corners to elements in the interface.",
+        13,
+        false,
+        true,
+        false,
+    )?;
+    end_panel(ui);
+    Ok(change.map_or(Action::None, Action::Rounded))
+}
+
 fn settings_page(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Result<Action> {
+    if app.settings_item == SettingsItem::Misc {
+        return misc_settings_page(ui, gpu, app);
+    }
     let width = (ui.div_width() - 64.0).max(1.0);
     let height = (ui.div_height() - 72.0).max(1.0);
     panel(ui, 32.0, 36.0, width, height, false)?;
@@ -758,6 +840,7 @@ fn settings_page(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::R
         font_size: 15,
         padding: 12.0,
         background: Some(ui.theme().input),
+        radius: ui.corner_radii().control,
         border_color: Some(ui.theme().border),
         ..ui.style()
     });
@@ -783,7 +866,7 @@ fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyh
     let height = ui.div_height();
     let rail = if app.collapsed { 0.0 } else { 72.0 };
     let remaining = (width - rail).max(1.0);
-    let list = (remaining / 3.0)
+    let list = (remaining / 4.0)
         .clamp(220.0, 400.0)
         .min((remaining - 200.0).max(100.0));
     let content = (remaining - list).max(1.0);
@@ -894,6 +977,8 @@ fn main() -> anyhow::Result<()> {
         list_offset: 0,
         conversation: None,
         theme: cli.theme,
+        settings_item: SettingsItem::Theme,
+        rounded: false,
     };
     if let Some(path) = &cli.profile {
         app.login(

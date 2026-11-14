@@ -5,14 +5,16 @@ use crate::{
         WindowEvent,
         mouse::{CursorPosition, MouseButton},
     },
-    ui::{TextRenderer, UIRenderer, theme::Theme},
+    ui::{
+        TextRenderer, UIRenderer,
+        theme::{CornerRadii, Theme},
+    },
 };
 
 pub const DOWN: &str = "\u{eab4}";
 pub const UP: &str = "\u{eab7}";
 const CHECK: &str = "\u{eab2}";
 const ROW_HEIGHT: f32 = 38.0;
-
 
 #[derive(Default)]
 pub struct State {
@@ -147,17 +149,15 @@ impl Popup {
         gpu: &mut G,
         ui: &mut UIRenderer,
         theme: Theme,
+        radii: CornerRadii,
     ) -> anyhow::Result<()> {
         let b = self.bounds;
-        ui.quad([b.x, b.y, b.width, b.height], theme.surface)?;
-        for rect in [
-            [b.x, b.y, b.width, 1.0],
-            [b.x, b.y + b.height - 1.0, b.width, 1.0],
-            [b.x, b.y, 1.0, b.height],
-            [b.x + b.width - 1.0, b.y, 1.0, b.height],
-        ] {
-            ui.quad(rect, theme.border)?;
-        }
+        ui.rounded_box(
+            [b.x, b.y, b.width, b.height],
+            radii.popup,
+            Some(theme.surface),
+            Some(theme.border),
+        )?;
         ui.push_clip([
             b.x + 1.0,
             b.y + 1.0,
@@ -168,7 +168,12 @@ impl Popup {
             for (index, value) in self.options.iter().enumerate() {
                 let row = row_bounds(b, index);
                 if self.hovered == Some(index) || self.selected == index {
-                    ui.quad([row.x, row.y, row.width, row.height], theme.button)?;
+                    ui.rounded_box(
+                        [row.x, row.y, row.width, row.height],
+                        radii.row,
+                        Some(theme.button),
+                        None,
+                    )?;
                 }
                 let metrics = text.measure(value, self.font)?;
                 text.color = theme.text;
