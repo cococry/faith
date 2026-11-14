@@ -6,7 +6,7 @@ pub struct Cli {
     #[arg(long, default_value = "127.0.0.1")]
     pub host: String,
 
-    #[arg(long, default_value_t = 4433)]
+    #[arg(long, default_value_t = 4434)]
     pub port: u16,
 
     #[arg(long)]
@@ -15,8 +15,8 @@ pub struct Cli {
     #[arg(long)]
     pub ca_file: Option<std::path::PathBuf>,
 
-    #[arg(long, default_value_os_t = default_profile())]
-    pub profile: std::path::PathBuf,
+    #[arg(long)]
+    pub profile: Option<std::path::PathBuf>,
 
     #[arg(long, value_enum, default_value_t = PlatformBackend::Auto)]
     pub platform: PlatformBackend,
@@ -29,6 +29,31 @@ pub struct Cli {
 
     #[arg(long, default_value_t = 720)]
     pub height: u32,
+}
+
+impl Cli {
+    pub fn resolve_local_tls(&mut self) {
+        if !matches!(self.host.as_str(), "127.0.0.1" | "localhost" | "::1") {
+            return;
+        }
+
+        if self.ca_file.is_none()
+            && self
+                .server_name
+                .as_deref()
+                .is_none_or(|name| name == "localhost")
+        {
+            let certificate =
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.local/system/cert.pem");
+            if certificate.is_file() {
+                self.ca_file = Some(certificate);
+            }
+        }
+
+        if self.ca_file.is_some() && self.server_name.is_none() {
+            self.server_name = Some("localhost".into());
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -55,14 +80,4 @@ impl From<GraphicsBackendArg> for crate::graphics::GraphicsBackend {
             GraphicsBackendArg::OpenGl => crate::graphics::GraphicsBackend::OpenGL,
         }
     }
-}
-
-fn default_profile() -> std::path::PathBuf {
-    std::env::var_os("XDG_DATA_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| ".".into()))
-                .join(".local/share")
-        })
-        .join("faith/default")
 }

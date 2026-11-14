@@ -7,10 +7,11 @@ use nix::{
     sys::eventfd::{EfdFlags, EventFd},
 };
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     os::fd::AsFd,
+    path::PathBuf,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Receiver, SyncSender},
     },
@@ -22,6 +23,7 @@ use store::Store;
 #[allow(dead_code)]
 pub struct Snapshot {
     pub auth: Option<Id>,
+    pub authorized: bool,
     pub status: String,
     pub selected: Option<Id>,
     pub members: Vec<Id>,
@@ -42,17 +44,26 @@ pub struct Session {
     stopping: Arc<AtomicBool>,
     snapshot: Arc<Mutex<Snapshot>>,
     worker: Option<JoinHandle<()>>,
+    profile: PathBuf,
 }
 
 #[allow(dead_code)]
 impl Session {
     pub fn start(mut config: Config, waker: PlatformWaker) -> anyhow::Result<Self> {
-        let profile = config
-            .identity_path
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("identity needs a profile directory"))?;
-        let store = Arc::new(Store::open(profile)?);
-        config.store = Some(store.clone());
+        let profile = std::path::absolute(
+            config
+                .identity_path
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("identity needs a profile directory"))?,
+        )?;
+        let previous = {
+            let mut retiring = retiring_sessions()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            retiring.retain(|_, worker| !worker.is_finished());
+            retiring.remove(&profile)
+        };
+        let thread_profile = profile.clone();
         let (commands, rx) = mpsc::sync_channel(32);
         let wake = Arc::new(EventFd::from_value_and_flags(
             0,
@@ -66,6 +77,16 @@ impl Session {
             .name("faith-session".into())
             .spawn(move || {
                 let result = (|| -> anyhow::Result<()> {
+                    if let Some(previous) = previous {
+                        let _ = previous.join();
+                    }
+
+                    if thread_stop.load(Ordering::Acquire) {
+                        return Ok(());
+                    }
+
+                    let store = Arc::new(Store::open(&thread_profile)?);
+                    config.store = Some(store.clone());
                     let client = Client::new(config)?;
                     let (auth, _) = client.identity()?;
                     let mut state = Worker {
@@ -87,11 +108,16 @@ impl Session {
                         .first()
                         .map(|c| c.id));
                     state.publish(&thread_snapshot, &waker)?;
+                    if thread_stop.load(Ordering::Acquire) {
+                        return Ok(());
+                    }
+
                     state.client.start()?;
                     state.run(rx, &thread_wake, &thread_stop, &thread_snapshot, &waker)
                 })();
                 if let Err(error) = result {
                     if let Ok(mut snapshot) = thread_snapshot.lock() {
+                        snapshot.authorized = false;
                         snapshot.status = format!("Client stopped: {error}");
                         snapshot.generation += 1;
                     }
@@ -105,6 +131,7 @@ impl Session {
             stopping,
             snapshot,
             worker: Some(worker),
+            profile,
         })
     }
     pub fn submit(&self, line: String) -> anyhow::Result<u64> {
@@ -131,9 +158,18 @@ impl Drop for Session {
         self.stopping.store(true, Ordering::Release);
         let _ = self.wake.write(1);
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            let mut retiring = retiring_sessions()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            retiring.retain(|_, worker| !worker.is_finished());
+            retiring.insert(self.profile.clone(), worker);
         }
     }
+}
+
+fn retiring_sessions() -> &'static Mutex<HashMap<PathBuf, JoinHandle<()>>> {
+    static RETIRING: OnceLock<Mutex<HashMap<PathBuf, JoinHandle<()>>>> = OnceLock::new();
+    RETIRING.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 #[allow(dead_code)]
@@ -173,6 +209,7 @@ impl Worker {
         self.generation += 1;
         let snapshot = Snapshot {
             auth: Some(self.auth),
+            authorized: self.authorized,
             status: self.status.clone(),
             selected: self.selected,
             active: conversation.as_ref().is_some_and(|c| c.active),

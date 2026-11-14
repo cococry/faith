@@ -19,10 +19,17 @@ pub struct InputResponse {
     pub submitted: Option<String>,
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct InputOptions {
+    pub max_chars: Option<usize>,
+    pub filter: Option<fn(char) -> bool>,
+}
+
 /// A single-line, UTF-8 input widget. Editing is grapheme-aware; platform text
 /// commits are distinct from navigation keys. No timer or rendering loop lives
 /// here. The caller redraws its bounds only when a response reports a change.
 pub struct InputField {
+    options: InputOptions,
     text: String,
     cursor: usize,
     focused: bool,
@@ -32,6 +39,7 @@ pub struct InputField {
 impl InputField {
     pub fn new(max_bytes: usize) -> Self {
         Self {
+            options: InputOptions::default(),
             text: String::new(),
             cursor: 0,
             focused: true,
@@ -39,6 +47,10 @@ impl InputField {
             scroll_x: 0.0,
         }
     }
+    pub fn set_options(&mut self, options: InputOptions) {
+        self.options = options;
+    }
+
     fn previous(&self) -> usize {
         self.text[..self.cursor]
             .grapheme_indices(true)
@@ -59,7 +71,16 @@ impl InputField {
                 self.focused = *focused;
             }
             WindowEvent::TextInput(text) if self.focused => {
-                let text: String = text.chars().filter(|c| !c.is_control()).collect();
+                let remaining = self.options.max_chars.map_or(usize::MAX, |max| {
+                    max.saturating_sub(self.text.chars().count())
+                });
+                let text: String = text
+                    .chars()
+                    .filter(|c| {
+                        !c.is_control() && self.options.filter.is_none_or(|filter| filter(*c))
+                    })
+                    .take(remaining)
+                    .collect();
                 if !text.is_empty() && self.text.len() + text.len() <= self.max_bytes {
                     self.text.insert_str(self.cursor, &text);
                     self.cursor += text.len();

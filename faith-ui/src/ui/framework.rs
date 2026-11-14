@@ -3,7 +3,7 @@ use super::{
     text::TextLayoutOptions,
     widgets::{
         button,
-        input::{Bounds, InputField},
+        input::{Bounds, InputField, InputOptions},
     },
 };
 use crate::{
@@ -472,7 +472,24 @@ impl Framework {
         result?;
         Ok(response.clicked)
     }
+    #[allow(dead_code)]
     pub fn input<G: GraphicsDevice>(&mut self, gpu: &mut G, id: &str) -> anyhow::Result<String> {
+        self.input_with_options(gpu, id, InputOptions::default())
+    }
+
+    pub fn clear_input(&mut self, id: &str) {
+        self.inputs.remove(id);
+        if self.focused.as_deref() == Some(id) {
+            self.focused = None;
+        }
+    }
+
+    pub fn input_with_options<G: GraphicsDevice>(
+        &mut self,
+        gpu: &mut G,
+        id: &str,
+        options: InputOptions,
+    ) -> anyhow::Result<String> {
         let font = self.font(Font::Regular)?;
         let s = self.style();
         let b = self.place(
@@ -488,6 +505,7 @@ impl Framework {
             .inputs
             .entry(id.into())
             .or_insert_with(|| InputField::new(4096));
+        field.set_options(options);
         dispatch_input(
             field,
             &mut self.focused,
