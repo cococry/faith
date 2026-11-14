@@ -39,7 +39,7 @@ fn main() -> anyhow::Result<()> {
         },
     )?;
 
-    let mut done = false;
+    let mut submitted_handle: Option<String> = None;
     platform.request_redraw()?;
     loop {
         let events = platform.poll_events()?;
@@ -101,11 +101,11 @@ fn main() -> anyhow::Result<()> {
             background: Some(Color::rgba(0.83, 0.88, 1.0, 1.0)),
             ..ui.style()
         });
-        if ui.button(&mut renderer, "Done")? {
-            done = !handle.trim().is_empty();
+        if ui.button(&mut renderer, "Done")? && !handle.trim().is_empty() {
+            submitted_handle = Some(handle);
         }
         ui.pop_style();
-        if done {
+        if let Some(handle) = &submitted_handle {
             ui.text(&mut renderer, &format!("Welcome, {handle}"), None)?;
         }
         ui.div_end();
