@@ -105,8 +105,7 @@ struct TextLayoutKey {
     font_handle: FontHandle,
     text: String,
 
-    // Note: Quantized width so float hashing is not needed.
-    max_width_px: u32,
+    max_width_bits: u32,
 }
 
 /// Represents a paragraphs's layout
@@ -219,6 +218,7 @@ pub struct TextLayoutOptions {
 /// with HarfBuzz and load glyphs/fonts with
 /// FreeType.
 pub struct TextRenderer {
+    pub color: crate::graphics::Color,
     font_manager: FontManager,
 
     /// Provided possible fallback fonts
@@ -226,6 +226,7 @@ pub struct TextRenderer {
     /// fallback font discovery such as
     /// DirectWrite or fontconfig.
     fallback_fonts: Vec<FontHandle>,
+    fallback_sources: Vec<std::path::PathBuf>,
 
     /// Cached atlas locations (uv, atlas layer) of glyphs
     glyph_locations: HashMap<GlyphKey, AtlasGlyph>,
@@ -248,8 +249,10 @@ impl TextRenderer {
         let font_manager = FontManager::new()?;
 
         Ok(Self {
+            color: crate::graphics::Color::rgba(0.0, 0.0, 0.0, 1.0),
             font_manager,
             fallback_fonts: Vec::new(),
+            fallback_sources: Vec::new(),
 
             glyph_locations: HashMap::new(),
 
@@ -433,15 +436,25 @@ impl TextRenderer {
             return Ok(cached);
         }
 
-        for i in 0..self.fallback_fonts.len() {
-            let fallback = self.fallback_fonts[i];
-
-            if fallback == original_font {
+        let size = self.font_manager.requested_size(original_font)?;
+        for i in 0..self.fallback_fonts.len() + self.fallback_sources.len() {
+            let fallback = if i < self.fallback_fonts.len() {
+                self.font_manager.at_size(self.fallback_fonts[i], size)?
+            } else {
+                self.font_manager.load_font(
+                    &self.fallback_sources[i - self.fallback_fonts.len()],
+                    size,
+                    0,
+                )?
+            };
+            if fallback == original_font
+                || !self
+                    .font_manager
+                    .supports_text(fallback, text, bidi_lvl, script)?
+            {
                 continue;
             }
-
             let glyphs = self.shape_cached(text, bidi_lvl, script, fallback)?;
-
             if glyphs.iter().all(|g| g.glyph_idx != 0) {
                 self.fallback_choice_cache.push(key, Some(fallback));
                 return Ok(Some(fallback));
@@ -719,65 +732,68 @@ impl TextRenderer {
         gpu: &mut G,
         ui: &mut UIRenderer,
     ) -> anyhow::Result<()> {
-        // Uses UIRenderer to allocate a region
-        // for the glyph in the texture array
-        let (layer, x, y, atlas_w, atlas_h) =
-            ui.allocate_image_rect(glyph.width, glyph.height, 1)?;
-
-        ui.upload_pixels_to_atlas([x, y, glyph.width, glyph.height], layer, &glyph.pixels, gpu)?;
-
-        // Avoid inserting zero-sized glyphs
         if glyph.width == 0 || glyph.height == 0 {
             self.glyph_locations.insert(
                 key,
                 AtlasGlyph {
                     atlas_layer: 0,
-                    uv_min: [0.0, 0.0],
-                    uv_max: [0.0, 0.0],
-                    size: [0, 0],
+                    uv_min: [0.0; 2],
+                    uv_max: [0.0; 2],
+                    size: [0; 2],
                     bearing: [glyph.bearing_x, glyph.bearing_y],
                 },
             );
-
             return Ok(());
         }
 
+        let width = glyph
+            .width
+            .checked_add(2)
+            .ok_or_else(|| anyhow::anyhow!("glyph width overflow"))?;
+        let height = glyph
+            .height
+            .checked_add(2)
+            .ok_or_else(|| anyhow::anyhow!("glyph height overflow"))?;
+        let (layer, x, y, atlas_w, atlas_h) = ui.allocate_image_rect(width, height, 0)?;
+        let pixels = bordered_glyph(&glyph)?;
+        ui.upload_pixels_to_atlas([x, y, width, height], layer, &pixels, gpu)?;
         self.glyph_locations.insert(
             key,
             AtlasGlyph {
                 size: [glyph.width, glyph.height],
                 atlas_layer: layer,
                 bearing: [glyph.bearing_x, glyph.bearing_y],
-                uv_min: [x as f32 / atlas_w as f32, y as f32 / atlas_h as f32],
+                uv_min: [
+                    (x + 1) as f32 / atlas_w as f32,
+                    (y + 1) as f32 / atlas_h as f32,
+                ],
                 uv_max: [
-                    (x + glyph.width) as f32 / atlas_w as f32,
-                    (y + glyph.height) as f32 / atlas_h as f32,
+                    (x + width - 1) as f32 / atlas_w as f32,
+                    (y + height - 1) as f32 / atlas_h as f32,
                 ],
             },
         );
-
-        if glyph.width == 0 || glyph.height == 0 {
-            self.glyph_locations.insert(
-                key,
-                AtlasGlyph {
-                    atlas_layer: 0,
-                    uv_min: [0.0, 0.0],
-                    uv_max: [0.0, 0.0],
-                    size: [0, 0],
-                    bearing: [glyph.bearing_x, glyph.bearing_y],
-                },
-            );
-
-            return Ok(());
-        }
-
         Ok(())
     }
 
-    /// Loads a given font path and returns the FontHandle
-    /// for it.
-    /// Clears the text engine's font-run-, fallback-,
-    /// and font-support-caches.
+    pub fn set_fallback_fonts(&mut self, paths: Vec<std::path::PathBuf>) {
+        self.fallback_sources = paths;
+        self.fallback_choice_cache.clear();
+        self.font_run_cache.clear();
+        self.token_range_cache.clear();
+        self.layout_cache.clear();
+    }
+
+    pub fn load_primary_font(
+        &mut self,
+        path: &std::path::Path,
+        size: u32,
+    ) -> anyhow::Result<FontHandle> {
+        self.font_manager.load_font(path, size, 0)
+    }
+
+    /// Registers a lazy fallback face.
+    #[allow(dead_code)]
     pub fn load_font(
         &mut self,
         path: impl AsRef<std::path::Path>,
@@ -785,10 +801,13 @@ impl TextRenderer {
     ) -> anyhow::Result<FontHandle> {
         let font = self.font_manager.load_font(path, size, 0)?;
 
-        self.fallback_fonts.push(font);
-        self.fallback_choice_cache.clear();
-        self.layout_cache.clear();
-        self.font_run_cache.clear();
+        if !self.fallback_fonts.contains(&font) {
+            self.fallback_fonts.push(font);
+            self.fallback_choice_cache.clear();
+            self.layout_cache.clear();
+            self.font_run_cache.clear();
+            self.token_range_cache.clear();
+        }
 
         Ok(font)
     }
@@ -819,7 +838,7 @@ impl TextRenderer {
         let color = if is_colored {
             crate::graphics::Color::rgba(1.0, 1.0, 1.0, 1.0)
         } else {
-            crate::graphics::Color::rgba(0.0, 0.0, 0.0, 1.0)
+            self.color
         };
 
         let mut pen_x = run_x;
@@ -857,7 +876,7 @@ impl TextRenderer {
                 let h = atlas_glyph.size[1] as f32 * font_render_scale;
 
                 ui.raw_quad_atlas(
-                    [render_x, render_y, w, h],
+                    [render_x.round(), render_y.round(), w, h],
                     [
                         atlas_glyph.uv_min[0],
                         atlas_glyph.uv_min[1],
@@ -900,7 +919,7 @@ impl TextRenderer {
         let color = if is_colored {
             crate::graphics::Color::rgba(1.0, 1.0, 1.0, 1.0)
         } else {
-            crate::graphics::Color::rgba(0.0, 0.0, 0.0, 1.0)
+            self.color
         };
 
         let mut pen_x = run_x;
@@ -937,7 +956,7 @@ impl TextRenderer {
                 let h = atlas_glyph.size[1] as f32 * font_render_scale;
 
                 ui.raw_quad_atlas(
-                    [render_x, render_y, w, h],
+                    [render_x.round(), render_y.round(), w, h],
                     [
                         atlas_glyph.uv_min[0],
                         atlas_glyph.uv_min[1],
@@ -997,6 +1016,41 @@ impl TextRenderer {
         }
 
         Ok(())
+    }
+
+    /// Visual caret coordinate in the same unwrapped shaping used by render().
+    /// Unlike paragraph measurement, this preserves leading/trailing spaces and
+    /// never reshapes a prefix independently of its following characters.
+    pub fn caret_x(&mut self, text: &str, font: FontHandle, byte: usize) -> anyhow::Result<f32> {
+        anyhow::ensure!(
+            byte <= text.len() && text.is_char_boundary(byte),
+            "invalid caret byte offset"
+        );
+        let runs = self.build_shaped_runs_cached(font, text)?;
+        let mut x = 0.0;
+        for run in runs.iter() {
+            for group in run.cluster_groups.iter() {
+                if byte >= group.byte_start_abs && byte <= group.byte_end_abs {
+                    let cluster = &text[group.byte_start_abs..group.byte_end_abs];
+                    let count = cluster.graphemes(true).count().max(1);
+                    let before = cluster
+                        .grapheme_indices(true)
+                        .filter(|(i, _)| group.byte_start_abs + i < byte)
+                        .count();
+                    // A ligature is one shaping cluster containing multiple
+                    // editable graphemes. Distribute its internal caret stops.
+                    let fraction = before as f32 / count as f32;
+                    let fraction = if run.bidi_lvl.is_rtl() {
+                        1.0 - fraction
+                    } else {
+                        fraction
+                    };
+                    return Ok(x + group.x_advance * fraction);
+                }
+                x += group.x_advance;
+            }
+        }
+        Ok(x)
     }
 
     fn measure_byte_range_from_runs(
@@ -1339,7 +1393,7 @@ impl TextRenderer {
         let key = TextLayoutKey {
             font_handle,
             text: text.to_owned(),
-            max_width_px: options.max_width.ceil() as u32,
+            max_width_bits: options.max_width.to_bits(),
         };
 
         if let Some(layout) = self.layout_cache.get(&key) {
@@ -1440,6 +1494,7 @@ impl TextRenderer {
 
     /// Draw wrapped text only on complete lines inside the vertical viewport.
     /// The layout origin may lie above the viewport when showing recent history.
+    #[allow(dead_code)]
     pub fn render_viewport<G: GraphicsDevice>(
         &mut self,
         viewport: ([f32; 2], [f32; 2], f32),
@@ -1469,6 +1524,55 @@ impl TextRenderer {
         Ok(())
     }
 
+    #[allow(dead_code)]
+    pub fn render_centered<G: GraphicsDevice>(
+        &mut self,
+        xy: [f32; 2],
+        value: &str,
+        font: FontHandle,
+        width: f32,
+        gpu: &mut G,
+        ui: &mut UIRenderer,
+    ) -> anyhow::Result<()> {
+        let layout = self.layout_cached(value, font, TextLayoutOptions { max_width: width })?;
+        self.render_layout(xy, &layout, width, true, gpu, ui)
+    }
+
+    pub fn render_layout<G: GraphicsDevice>(
+        &mut self,
+        xy: [f32; 2],
+        layout: &TextLayout,
+        width: f32,
+        centered: bool,
+        gpu: &mut G,
+        ui: &mut UIRenderer,
+    ) -> anyhow::Result<()> {
+        let mut baseline = xy[1] + layout.ascender;
+        for line in &layout.lines {
+            let offset = if centered {
+                (width - line.width) * 0.5
+            } else if line.is_rtl {
+                width - line.width
+            } else {
+                0.0
+            };
+            let mut x = xy[0] + offset;
+            for slice in &line.slices {
+                self.render_run_slice(
+                    x,
+                    baseline,
+                    &layout.paragraph_runs[slice.run_index],
+                    slice,
+                    gpu,
+                    ui,
+                )?;
+                x += slice.x_advance;
+            }
+            baseline += layout.line_height;
+        }
+        Ok(())
+    }
+
     /// Renders text with word wrapping.
     ///
     /// Lays out the text into wrapped lines using
@@ -1486,26 +1590,38 @@ impl TextRenderer {
     ) -> anyhow::Result<Arc<TextLayout>> {
         let layout = self.layout_cached(text, font_handle, TextLayoutOptions { max_width })?;
 
-        let mut baseline_y = xy[1] + layout.ascender;
-
-        for line in &layout.lines {
-            let mut cursor_x = if line.is_rtl {
-                xy[0] + (max_width - line.width)
-            } else {
-                xy[0]
-            };
-
-            for slice in &line.slices {
-                let run = &layout.paragraph_runs[slice.run_index];
-
-                self.render_run_slice(cursor_x, baseline_y, run, slice, gpu, ui)?;
-
-                cursor_x += slice.x_advance;
-            }
-
-            baseline_y += layout.line_height;
-        }
+        self.render_layout(xy, &layout, max_width, false, gpu, ui)?;
 
         Ok(layout)
     }
+}
+
+fn bordered_glyph(glyph: &Glyph) -> anyhow::Result<Vec<u8>> {
+    let w = glyph.width as usize;
+    let h = glyph.height as usize;
+    anyhow::ensure!(
+        w > 0 && h > 0 && glyph.pixels.len() == w * h * 4,
+        "invalid RGBA glyph bitmap"
+    );
+    let stride = (w + 2) * 4;
+    let mut pixels = vec![0; stride * (h + 2)];
+    for row in 0..h {
+        let start = (row + 1) * stride + 4;
+        pixels[start..start + w * 4].copy_from_slice(&glyph.pixels[row * w * 4..(row + 1) * w * 4]);
+        for (column, source) in [(0, row * w * 4), (w + 1, ((row + 1) * w - 1) * 4)] {
+            let target = (row + 1) * stride + column * 4;
+            pixels[target..target + 3].copy_from_slice(&glyph.pixels[source..source + 3]);
+        }
+    }
+
+    for column in 0..w + 2 {
+        let source_x = column.saturating_sub(1).min(w - 1);
+        for (row, source_y) in [(0, 0), (h + 1, h - 1)] {
+            let source = (source_y * w + source_x) * 4;
+            let target = row * stride + column * 4;
+            pixels[target..target + 3].copy_from_slice(&glyph.pixels[source..source + 3]);
+        }
+    }
+
+    Ok(pixels)
 }

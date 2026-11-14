@@ -1,6 +1,10 @@
 use freetype::{self as ft, bitmap};
 use std::{
+    cell::{OnceCell, RefCell},
     collections::HashMap,
+    fs::File,
+    io::Read,
+    os::unix::fs::FileExt,
     path::{Path, PathBuf},
 };
 use unicode_bidi::Level;
@@ -25,8 +29,17 @@ pub struct GlyphKey {
 /// loaded fonts and rasterized glyph cache.
 pub struct FontManager {
     lib_handle: ft::Library,
-    fonts: Vec<Font>,
+    fonts: Vec<FontSlot>,
+    font_handles: HashMap<(PathBuf, u32, isize), FontHandle>,
+    sources: RefCell<HashMap<(PathBuf, isize), harfbuzz_rs::Shared<harfbuzz_rs::Face<'static>>>>,
     glyph_cache: HashMap<GlyphKey, Glyph>,
+}
+
+struct FontSlot {
+    path: PathBuf,
+    size: u32,
+    face_idx: isize,
+    loaded: OnceCell<Result<Font, String>>,
 }
 
 /// Represents one rasterized glyph bitmap
@@ -92,6 +105,8 @@ impl FontManager {
         Ok(Self {
             lib_handle,
             fonts: Vec::new(),
+            font_handles: HashMap::new(),
+            sources: RefCell::new(HashMap::new()),
             glyph_cache: HashMap::new(),
         })
     }
@@ -339,24 +354,30 @@ impl FontManager {
         Ok(Some(raster_size))
     }
 
-    /// Loads a font from disk and stores it in
-    /// the font manager.
-    ///
-    /// Selects the best bitmap strike when the
-    /// font has fixed-size strikes, otherwise
-    /// configures the face for scalable rendering.
+    /// Registers a size; the face opens on first use.
     pub fn load_font(
         &mut self,
         path: impl AsRef<Path>,
         size: u32,
         face_idx: isize,
     ) -> anyhow::Result<FontHandle> {
-        let path = path.as_ref();
-
-        if size == 0 {
-            anyhow::bail!("font size must be greater than zero");
+        anyhow::ensure!(size > 0 && face_idx >= 0, "invalid font size or face index");
+        let key = (path.as_ref().to_path_buf(), size, face_idx);
+        if let Some(handle) = self.font_handles.get(&key) {
+            return Ok(*handle);
         }
+        let handle = FontHandle(self.fonts.len() as u32);
+        self.fonts.push(FontSlot {
+            path: key.0.clone(),
+            size,
+            face_idx,
+            loaded: OnceCell::new(),
+        });
+        self.font_handles.insert(key, handle);
+        Ok(handle)
+    }
 
+    fn open_font(&self, path: &Path, size: u32, face_idx: isize) -> anyhow::Result<Font> {
         let face = self.lib_handle.new_face(path, face_idx)?;
 
         let mut raster_size = size;
@@ -373,15 +394,13 @@ impl FontManager {
             face.set_pixel_sizes(0, size)?;
         }
 
-        let hb_face = harfbuzz_rs::Face::from_file(path, face_idx as u32)?;
+        let hb_face = self.source(path, face_idx)?;
         let mut hb_font = harfbuzz_rs::Font::new(hb_face);
 
         // HarfBuzz needs * 64
         hb_font.set_scale((raster_size as i32) * 64, (raster_size as i32) * 64);
 
-        let handle = FontHandle(self.fonts.len() as u32);
-
-        self.fonts.push(Font {
+        Ok(Font {
             size,
             raster_size,
             scale: size as f32 / raster_size as f32,
@@ -389,15 +408,79 @@ impl FontManager {
             path: path.to_path_buf(),
             face,
             hb_font,
-        });
+        })
+    }
 
-        Ok(handle)
+    fn source(
+        &self,
+        path: &Path,
+        face_idx: isize,
+    ) -> anyhow::Result<harfbuzz_rs::Shared<harfbuzz_rs::Face<'static>>> {
+        let key = (path.to_path_buf(), face_idx);
+        if let Some(source) = self.sources.borrow().get(&key) {
+            return Ok(source.clone());
+        }
+        let source = table_face(path, face_idx as u32)?;
+        self.sources.borrow_mut().insert(key, source.clone());
+        Ok(source)
     }
 
     fn get_font(&self, handle: FontHandle) -> anyhow::Result<&Font> {
-        self.fonts
+        let slot = self
+            .fonts
             .get(handle.0 as usize)
-            .ok_or_else(|| anyhow::anyhow!("invalid texture handle: {:?}", handle))
+            .ok_or_else(|| anyhow::anyhow!("invalid font handle"))?;
+        slot.loaded
+            .get_or_init(|| {
+                self.open_font(&slot.path, slot.size, slot.face_idx)
+                    .map_err(|error| format!("{}: {error}", slot.path.display()))
+            })
+            .as_ref()
+            .map_err(|error| anyhow::anyhow!(error.clone()))
+    }
+
+    pub fn requested_size(&self, handle: FontHandle) -> anyhow::Result<u32> {
+        Ok(self
+            .fonts
+            .get(handle.0 as usize)
+            .ok_or_else(|| anyhow::anyhow!("invalid font handle"))?
+            .size)
+    }
+
+    pub fn at_size(&mut self, handle: FontHandle, size: u32) -> anyhow::Result<FontHandle> {
+        let slot = self
+            .fonts
+            .get(handle.0 as usize)
+            .ok_or_else(|| anyhow::anyhow!("invalid font handle"))?;
+        self.load_font(slot.path.clone(), size, slot.face_idx)
+    }
+
+    pub fn supports_text(
+        &self,
+        handle: FontHandle,
+        text: &str,
+        bidi_lvl: Level,
+        script: Script,
+    ) -> anyhow::Result<bool> {
+        let slot = self
+            .fonts
+            .get(handle.0 as usize)
+            .ok_or_else(|| anyhow::anyhow!("invalid font handle"))?;
+        let face = self.source(&slot.path, slot.face_idx)?;
+        let mut font = harfbuzz_rs::Font::new(face);
+        font.set_scale((slot.size as i32) * 64, (slot.size as i32) * 64);
+        let buffer = UnicodeBuffer::new()
+            .add_str(text)
+            .set_direction(if bidi_lvl.is_rtl() {
+                harfbuzz_rs::Direction::Rtl
+            } else {
+                harfbuzz_rs::Direction::Ltr
+            })
+            .set_script(self.hb_script_tag_from_unicode_script(script));
+        Ok(shape(&font, buffer, &[])
+            .get_glyph_infos()
+            .iter()
+            .all(|glyph| glyph.codepoint != 0))
     }
 
     /// Returns the font ascender in pixels.
@@ -548,4 +631,52 @@ impl FontManager {
 
         Ok(shaped)
     }
+}
+
+fn table_face(
+    path: &Path,
+    face_idx: u32,
+) -> anyhow::Result<harfbuzz_rs::Shared<harfbuzz_rs::Face<'static>>> {
+    let mut file = File::open(path)?;
+    let length = file.metadata()?.len();
+    let mut header = [0; 12];
+    file.read_exact(&mut header)?;
+    let mut directory = 0_u64;
+    if &header[..4] == b"ttcf" {
+        let count = u32::from_be_bytes(header[8..12].try_into()?);
+        anyhow::ensure!(face_idx < count, "font collection index out of bounds");
+        let mut offset = [0; 4];
+        file.read_exact_at(&mut offset, 12 + u64::from(face_idx) * 4)?;
+        directory = u64::from(u32::from_be_bytes(offset));
+        file.read_exact_at(&mut header, directory)?;
+    } else {
+        anyhow::ensure!(face_idx == 0, "font face index out of bounds");
+    }
+    if !matches!(&header[..4], b"\0\x01\0\0" | b"OTTO" | b"true" | b"typ1") {
+        return Ok(harfbuzz_rs::Face::from_file(path, face_idx)?.to_shared());
+    }
+    let count = usize::from(u16::from_be_bytes(header[4..6].try_into()?));
+    let mut records = vec![0; count * 16];
+    file.read_exact_at(&mut records, directory + 12)?;
+    let mut tables = HashMap::with_capacity(count);
+    for record in records.as_chunks::<16>().0 {
+        let tag = u32::from_be_bytes(record[..4].try_into()?);
+        let offset = u64::from(u32::from_be_bytes(record[8..12].try_into()?));
+        let size = u32::from_be_bytes(record[12..16].try_into()?) as usize;
+        anyhow::ensure!(offset + size as u64 <= length, "font table outside file");
+        tables.insert(tag, (offset, size));
+    }
+    let mut cache: HashMap<u32, harfbuzz_rs::Shared<harfbuzz_rs::Blob<'static>>> = HashMap::new();
+    let face = harfbuzz_rs::Face::from_table_func(move |tag| {
+        if let Some(blob) = cache.get(&tag.0) {
+            return Some(blob.clone());
+        }
+        let &(offset, size) = tables.get(&tag.0)?;
+        let mut bytes = vec![0; size];
+        file.read_exact_at(&mut bytes, offset).ok()?;
+        let blob = bytes.into();
+        cache.insert(tag.0, blob);
+        cache.get(&tag.0).cloned()
+    });
+    Ok(face.to_shared())
 }

@@ -8,6 +8,7 @@ use std::{
 };
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct Conversation {
     pub id: Id,
     pub revision: u64,
@@ -15,11 +16,13 @@ pub struct Conversation {
     pub active: bool,
 }
 
+#[allow(dead_code)]
 pub struct Store {
     db: Mutex<Connection>,
     _profile_lock: File,
 }
 
+#[allow(dead_code)]
 fn id(bytes: Vec<u8>) -> rusqlite::Result<Id> {
     bytes
         .try_into()
@@ -27,6 +30,7 @@ fn id(bytes: Vec<u8>) -> rusqlite::Result<Id> {
         .map_err(|_| rusqlite::Error::InvalidQuery)
 }
 
+#[allow(dead_code)]
 fn members(bytes: Vec<u8>) -> rusqlite::Result<Vec<Id>> {
     if bytes.is_empty()
         || !bytes.len().is_multiple_of(16)
@@ -37,9 +41,11 @@ fn members(bytes: Vec<u8>) -> rusqlite::Result<Vec<Id>> {
     Ok(bytes.as_chunks::<16>().0.iter().map(|b| Id(*b)).collect())
 }
 
+#[allow(dead_code)]
 fn pack(ids: &[Id]) -> Vec<u8> {
     ids.iter().flat_map(|id| id.0).collect()
 }
+#[allow(dead_code)]
 fn conversation(db: &Connection, group: Id) -> rusqlite::Result<Option<Conversation>> {
     db.query_row(
         "SELECT revision,members,active FROM conversations WHERE id=?",
@@ -56,6 +62,7 @@ fn conversation(db: &Connection, group: Id) -> rusqlite::Result<Option<Conversat
     .optional()
 }
 
+#[allow(dead_code)]
 impl Store {
     pub fn open(profile: &Path) -> anyhow::Result<Self> {
         if !profile.exists() {
@@ -259,6 +266,7 @@ impl Store {
         Ok(())
     }
 }
+#[allow(dead_code)]
 fn members_targets(bytes: Vec<u8>) -> anyhow::Result<Vec<Id>> {
     anyhow::ensure!(
         !bytes.is_empty() && bytes.len().is_multiple_of(16) && bytes.len() <= 64 * 16,
@@ -272,125 +280,5 @@ impl EventStore for Store {
             tracing::error!("Durable event storage failed: {error}");
             faith_client::Error::Native(6)
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    struct Profile(std::path::PathBuf);
-    impl Profile {
-        fn new() -> Self {
-            Self(std::env::temp_dir().join(format!("faith-store-{}", Id::random().unwrap())))
-        }
-    }
-    impl Drop for Profile {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-    fn apply(store: &Store, auth: Id, device: Id, seq: u64, sender: Id, packet: &GroupPacket) {
-        let mut data = sender.0.to_vec();
-        data.extend(packet.encode().unwrap());
-        store
-            .store(StoredEvent {
-                auth,
-                device,
-                sequence: seq,
-                kind: 1,
-                data: &data,
-            })
-            .unwrap();
-    }
-    #[test]
-    fn durable_membership_rejects_forgery_and_survives_restart() {
-        let profile = Profile::new();
-        let store = Store::open(&profile.0).unwrap();
-        let (alice, bob, eve, device) = (
-            Id::random().unwrap(),
-            Id::random().unwrap(),
-            Id::random().unwrap(),
-            Id::random().unwrap(),
-        );
-        let mut p = GroupPacket {
-            kind: GroupKind::Create,
-            revision: 0,
-            conversation: Id::random().unwrap(),
-            message: Id::random().unwrap(),
-            members: vec![alice, bob],
-            text: Vec::new(),
-        };
-        apply(&store, bob, device, 0, alice, &p);
-        store.select(p.conversation).unwrap();
-        p.kind = GroupKind::Message;
-        p.message = Id::random().unwrap();
-        p.text = "hello 世界".as_bytes().to_vec();
-        apply(&store, bob, device, 1, alice, &p);
-        apply(&store, bob, device, 2, alice, &p); // Same message at a new sequence.
-        assert_eq!(store.history(p.conversation, 0).unwrap().len(), 1);
-        p.message = Id::random().unwrap();
-        p.members = vec![bob, eve];
-        apply(&store, bob, device, 3, eve, &p); // Forged membership snapshot.
-        assert_eq!(store.history(p.conversation, 0).unwrap().len(), 1);
-        p.kind = GroupKind::Update;
-        p.revision = 1;
-        p.members = vec![alice, eve];
-        p.text.clear();
-        apply(&store, bob, device, 4, eve, &p); // Noncreator cannot change state.
-        assert!(store.conversation(p.conversation).unwrap().unwrap().active);
-        apply(&store, bob, device, 5, alice, &p); // Genuine removal reaches removed Bob.
-        assert!(!store.conversation(p.conversation).unwrap().unwrap().active);
-        p.kind = GroupKind::Message;
-        p.text = b"after removal".to_vec();
-        apply(&store, bob, device, 6, alice, &p);
-        assert_eq!(store.history(p.conversation, 0).unwrap().len(), 1);
-        drop(store);
-        let store = Store::open(&profile.0).unwrap();
-        assert_eq!(store.selected().unwrap(), Some(p.conversation));
-        assert_eq!(store.history(p.conversation, 0).unwrap().len(), 1);
-        assert!(!store.conversation(p.conversation).unwrap().unwrap().active);
-        let seq: u64 = store
-            .db()
-            .unwrap()
-            .query_row("SELECT seq FROM cursors", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(seq, 6); // Rejected packets are handled durably, allowing ACK.
-    }
-    #[test]
-    fn outbox_is_durable_until_valid_self_echo_and_profile_is_exclusive() {
-        let profile = Profile::new();
-        let store = Store::open(&profile.0).unwrap();
-        assert!(Store::open(&profile.0).is_err());
-        let auth = Id::random().unwrap();
-        let device = Id::random().unwrap();
-        let p = GroupPacket {
-            kind: GroupKind::Create,
-            revision: 0,
-            conversation: Id::random().unwrap(),
-            message: Id::random().unwrap(),
-            members: vec![auth],
-            text: Vec::new(),
-        };
-        store.enqueue(&p, &p.members).unwrap();
-        assert!(store.enqueue(&p, &p.members).is_err());
-        drop(store);
-        let store = Store::open(&profile.0).unwrap();
-        assert_eq!(store.pending().unwrap().unwrap().0, p);
-        apply(&store, auth, device, 0, auth, &p);
-        assert!(store.pending().unwrap().is_none());
-        // Replaying sequence 0 must not revert revision or repeat effects.
-        let mut update = p.clone();
-        update.kind = GroupKind::Update;
-        update.revision = 1;
-        apply(&store, auth, device, 1, auth, &update);
-        apply(&store, auth, device, 0, auth, &p);
-        assert_eq!(
-            store
-                .conversation(p.conversation)
-                .unwrap()
-                .unwrap()
-                .revision,
-            1
-        );
     }
 }

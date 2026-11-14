@@ -1,5 +1,5 @@
 use crate::{
-    graphics::{Color, FontHandle, GraphicsDevice},
+    graphics::{FontHandle, GraphicsDevice},
     platform::event::{Key, WindowEvent},
     ui::{TextRenderer, UIRenderer},
 };
@@ -19,24 +19,38 @@ pub struct InputResponse {
     pub submitted: Option<String>,
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct InputOptions {
+    pub max_chars: Option<usize>,
+    pub filter: Option<fn(char) -> bool>,
+}
+
 /// A single-line, UTF-8 input widget. Editing is grapheme-aware; platform text
 /// commits are distinct from navigation keys. No timer or rendering loop lives
 /// here. The caller redraws its bounds only when a response reports a change.
 pub struct InputField {
+    options: InputOptions,
     text: String,
     cursor: usize,
     focused: bool,
     max_bytes: usize,
+    scroll_x: f32,
 }
 impl InputField {
     pub fn new(max_bytes: usize) -> Self {
         Self {
+            options: InputOptions::default(),
             text: String::new(),
             cursor: 0,
             focused: true,
             max_bytes,
+            scroll_x: 0.0,
         }
     }
+    pub fn set_options(&mut self, options: InputOptions) {
+        self.options = options;
+    }
+
     fn previous(&self) -> usize {
         self.text[..self.cursor]
             .grapheme_indices(true)
@@ -57,7 +71,16 @@ impl InputField {
                 self.focused = *focused;
             }
             WindowEvent::TextInput(text) if self.focused => {
-                let text: String = text.chars().filter(|c| !c.is_control()).collect();
+                let remaining = self.options.max_chars.map_or(usize::MAX, |max| {
+                    max.saturating_sub(self.text.chars().count())
+                });
+                let text: String = text
+                    .chars()
+                    .filter(|c| {
+                        !c.is_control() && self.options.filter.is_none_or(|filter| filter(*c))
+                    })
+                    .take(remaining)
+                    .collect();
                 if !text.is_empty() && self.text.len() + text.len() <= self.max_bytes {
                     self.text.insert_str(self.cursor, &text);
                     self.cursor += text.len();
@@ -137,73 +160,56 @@ impl InputField {
         }
         response
     }
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+    pub fn set_focused(&mut self, focused: bool) {
+        self.focused = focused;
+    }
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.text.clear();
         self.cursor = 0;
+        self.scroll_x = 0.0;
     }
     pub fn render<G: GraphicsDevice>(
-        &self,
+        &mut self,
         bounds: Bounds,
+        style: super::super::framework::Style,
         font: FontHandle,
         text: &mut TextRenderer,
         gpu: &mut G,
         ui: &mut UIRenderer,
     ) -> anyhow::Result<()> {
-        ui.quad(
-            [bounds.x, bounds.y, bounds.width, bounds.height],
-            Color::rgba(0.88, 0.91, 0.95, 1.0),
-        )?;
-
-        let available = (bounds.width - 24.0).max(1.0);
-
-        let mut boundaries: Vec<usize> = self.text.grapheme_indices(true).map(|(i, _)| i).collect();
-
-        boundaries.push(self.text.len());
-        let cursor = boundaries.binary_search(&self.cursor).unwrap_or(0);
-        let mut lo = 0;
-        let mut hi = cursor;
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            if text
-                .measure(&self.text[boundaries[mid]..self.cursor], font)?
-                .width
-                > available - 3.0
-            {
-                lo = mid + 1;
-            } else {
-                hi = mid;
+        let available = (bounds.width - style.padding * 2.0).max(0.0);
+        let caret_width = 1.5_f32.min(available);
+        let caret = text.caret_x(&self.text, font, self.cursor)?;
+        self.scroll_x = scroll_to_caret(self.scroll_x, caret, (available - caret_width).max(0.0));
+        let x = bounds.x + style.padding;
+        let y = bounds.y + style.padding;
+        let height = (bounds.height - style.padding * 2.0).max(0.0);
+        ui.push_clip([x, y, available, height]);
+        let result = (|| -> anyhow::Result<()> {
+            text.render(x - self.scroll_x, y, &self.text, font, gpu, ui)?;
+            if self.focused {
+                ui.quad(
+                    [x + caret - self.scroll_x, y, caret_width, height],
+                    style.color,
+                )?;
             }
-        }
-        let start = boundaries[lo];
-        let mut lo = cursor;
-        let mut hi = boundaries.len() - 1;
-        while lo < hi {
-            let mid = (lo + hi).div_ceil(2);
-            if text
-                .measure(&self.text[start..boundaries[mid]], font)?
-                .width
-                <= available
-            {
-                lo = mid;
-            } else {
-                hi = mid - 1;
-            }
-        }
-        let shown = &self.text[start..boundaries[lo]];
-        let y = bounds.y + 10.0;
-        text.render(bounds.x + 10.0, y, shown, font, gpu, ui)?;
-        if self.focused {
-            let caret = text.measure(&self.text[start..self.cursor], font)?.width;
-            ui.quad(
-                [
-                    bounds.x + 10.0 + caret,
-                    y,
-                    1.5,
-                    (bounds.height - 20.0).max(1.0),
-                ],
-                Color::rgba(0.1, 0.15, 0.25, 1.0),
-            )?;
-        }
-        Ok(())
+            Ok(())
+        })();
+        ui.pop_clip();
+        result
+    }
+}
+
+fn scroll_to_caret(scroll: f32, caret: f32, viewport: f32) -> f32 {
+    if caret < scroll {
+        caret.max(0.0)
+    } else if caret > scroll + viewport {
+        (caret - viewport).max(0.0)
+    } else {
+        scroll
     }
 }

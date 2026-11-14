@@ -7,10 +7,11 @@ use nix::{
     sys::eventfd::{EfdFlags, EventFd},
 };
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     os::fd::AsFd,
+    path::PathBuf,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Receiver, SyncSender},
     },
@@ -19,10 +20,13 @@ use std::{
 use store::Store;
 
 #[derive(Clone, Default)]
+#[allow(dead_code)]
 pub struct Snapshot {
     pub auth: Option<Id>,
+    pub authorized: bool,
     pub status: String,
     pub selected: Option<Id>,
+    pub conversations: Vec<Id>,
     pub members: Vec<Id>,
     pub active: bool,
     pub messages: Vec<String>,
@@ -33,6 +37,7 @@ pub struct Snapshot {
 
 /// Network, filesystem and SQLite work stay on the worker/native reader threads.
 /// The UI only sends bounded commands and reads an immutable display snapshot.
+#[allow(dead_code)]
 pub struct Session {
     commands: SyncSender<(u64, String)>,
     next_submission: AtomicU64,
@@ -40,16 +45,26 @@ pub struct Session {
     stopping: Arc<AtomicBool>,
     snapshot: Arc<Mutex<Snapshot>>,
     worker: Option<JoinHandle<()>>,
+    profile: PathBuf,
 }
 
+#[allow(dead_code)]
 impl Session {
     pub fn start(mut config: Config, waker: PlatformWaker) -> anyhow::Result<Self> {
-        let profile = config
-            .identity_path
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("identity needs a profile directory"))?;
-        let store = Arc::new(Store::open(profile)?);
-        config.store = Some(store.clone());
+        let profile = std::path::absolute(
+            config
+                .identity_path
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("identity needs a profile directory"))?,
+        )?;
+        let previous = {
+            let mut retiring = retiring_sessions()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            retiring.retain(|_, worker| !worker.is_finished());
+            retiring.remove(&profile)
+        };
+        let thread_profile = profile.clone();
         let (commands, rx) = mpsc::sync_channel(32);
         let wake = Arc::new(EventFd::from_value_and_flags(
             0,
@@ -63,6 +78,16 @@ impl Session {
             .name("faith-session".into())
             .spawn(move || {
                 let result = (|| -> anyhow::Result<()> {
+                    if let Some(previous) = previous {
+                        let _ = previous.join();
+                    }
+
+                    if thread_stop.load(Ordering::Acquire) {
+                        return Ok(());
+                    }
+
+                    let store = Arc::new(Store::open(&thread_profile)?);
+                    config.store = Some(store.clone());
                     let client = Client::new(config)?;
                     let (auth, _) = client.identity()?;
                     let mut state = Worker {
@@ -84,11 +109,16 @@ impl Session {
                         .first()
                         .map(|c| c.id));
                     state.publish(&thread_snapshot, &waker)?;
+                    if thread_stop.load(Ordering::Acquire) {
+                        return Ok(());
+                    }
+
                     state.client.start()?;
                     state.run(rx, &thread_wake, &thread_stop, &thread_snapshot, &waker)
                 })();
                 if let Err(error) = result {
                     if let Ok(mut snapshot) = thread_snapshot.lock() {
+                        snapshot.authorized = false;
                         snapshot.status = format!("Client stopped: {error}");
                         snapshot.generation += 1;
                     }
@@ -102,6 +132,7 @@ impl Session {
             stopping,
             snapshot,
             worker: Some(worker),
+            profile,
         })
     }
     pub fn submit(&self, line: String) -> anyhow::Result<u64> {
@@ -128,16 +159,27 @@ impl Drop for Session {
         self.stopping.store(true, Ordering::Release);
         let _ = self.wake.write(1);
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            let mut retiring = retiring_sessions()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            retiring.retain(|_, worker| !worker.is_finished());
+            retiring.insert(self.profile.clone(), worker);
         }
     }
 }
 
+fn retiring_sessions() -> &'static Mutex<HashMap<PathBuf, JoinHandle<()>>> {
+    static RETIRING: OnceLock<Mutex<HashMap<PathBuf, JoinHandle<()>>>> = OnceLock::new();
+    RETIRING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[allow(dead_code)]
 struct Inflight {
     deadline: std::time::Instant,
     result: bool,
     echo: bool,
 }
+#[allow(dead_code)]
 struct Worker {
     client: Client,
     store: Arc<Store>,
@@ -151,6 +193,7 @@ struct Worker {
     generation: u64,
     submission: Option<(u64, bool)>,
 }
+#[allow(dead_code)]
 impl Worker {
     fn notice(&mut self, line: impl Into<String>) {
         self.notices.push_back(line.into());
@@ -167,8 +210,16 @@ impl Worker {
         self.generation += 1;
         let snapshot = Snapshot {
             auth: Some(self.auth),
+            authorized: self.authorized,
             status: self.status.clone(),
             selected: self.selected,
+            conversations: self
+                .store
+                .conversations()?
+                .into_iter()
+                .filter(|c| c.active)
+                .map(|c| c.id)
+                .collect(),
             active: conversation.as_ref().is_some_and(|c| c.active),
             members: conversation.map_or_else(Vec::new, |c| c.members),
             messages: self
@@ -393,7 +444,7 @@ impl Worker {
                     EventKind::CommandFailed | EventKind::Error => {
                         self.inflight = None;
                         self.notice(event.message);
-                        self.status = "Operation failed; pending deliveries can be retried".into();
+                        self.status = "Connection Failed.".into();
                     }
                     EventKind::DeviceAuthPending | EventKind::DeviceLinkRequest => self.notice(
                         format!("{:?}: {} — /approve or /deny", event.kind, event.message),

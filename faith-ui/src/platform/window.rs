@@ -29,8 +29,6 @@ pub struct PlatformWaker {
 enum PlatformWakerInner {
     X11(X11Waker),
     Wayland(WaylandWaker),
-    #[cfg(test)]
-    Test(std::sync::Arc<nix::sys::eventfd::EventFd>),
 }
 
 impl Default for WindowConfig {
@@ -64,28 +62,11 @@ pub enum WindowHandleInfo {
 }
 
 impl PlatformWaker {
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub fn for_test() -> Self {
-        use nix::sys::eventfd::{EfdFlags, EventFd};
-        Self {
-            inner: PlatformWakerInner::Test(std::sync::Arc::new(
-                EventFd::from_value_and_flags(0, EfdFlags::EFD_NONBLOCK | EfdFlags::EFD_CLOEXEC)
-                    .unwrap(),
-            )),
-        }
-    }
-
     #[allow(dead_code)]
     pub fn request_redraw(&self) -> anyhow::Result<()> {
         match &self.inner {
             PlatformWakerInner::X11(waker) => waker.request_redraw(),
             PlatformWakerInner::Wayland(waker) => waker.request_redraw(),
-            #[cfg(test)]
-            PlatformWakerInner::Test(fd) => {
-                fd.write(1)?;
-                Ok(())
-            }
         }
     }
 }

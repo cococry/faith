@@ -23,6 +23,7 @@ struct GlTexture {
     raw: glow::NativeTexture,
     width: u32,
     height: u32,
+    layers: u32,
     pub format: TextureFormat,
     kind: GlTextureKind,
 }
