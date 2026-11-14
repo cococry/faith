@@ -1,9 +1,9 @@
-use super::theme::Theme;
+use super::theme::{CornerRadii, Theme};
 use super::{
     TextRenderer, UIRenderer,
     text::TextLayoutOptions,
     widgets::{
-        button, dropdown,
+        button, checkbox, dropdown,
         input::{Bounds, InputField, InputOptions},
     },
 };
@@ -31,6 +31,7 @@ pub struct Style {
     pub border_color: Option<Color>,
     pub padding: f32,
     pub margin: f32,
+    pub radius: f32,
 }
 impl Default for Style {
     fn default() -> Self {
@@ -43,6 +44,7 @@ impl Default for Style {
             border_color: None,
             padding: 0.0,
             margin: 0.0,
+            radius: 0.0,
         }
     }
 }
@@ -75,7 +77,7 @@ struct OpenDiv {
     width: Option<f32>,
     height: Option<f32>,
     style: Style,
-    decorations: Vec<usize>,
+    decorations: Vec<super::renderer::BoxDecoration>,
 }
 #[derive(Clone, Copy)]
 struct Layout {
@@ -133,6 +135,7 @@ impl Layout {
 
 pub struct Framework {
     theme: Theme,
+    rounded_corners: bool,
     dropdowns: HashMap<String, dropdown::State>,
     dropdown_seen: HashSet<String>,
     active_dropdown: Option<String>,
@@ -164,6 +167,7 @@ impl Framework {
         let (w, h) = platform.size();
         let mut framework = Self {
             theme: Theme::LIGHT,
+            rounded_corners: false,
             dropdowns: HashMap::new(),
             dropdown_seen: HashSet::new(),
             active_dropdown: None,
@@ -192,6 +196,18 @@ impl Framework {
     }
     pub fn set_theme(&mut self, theme: Theme) {
         self.theme = theme;
+    }
+
+    pub fn set_rounded_corners(&mut self, enabled: bool) {
+        self.rounded_corners = enabled;
+    }
+
+    pub fn corner_radii(&self) -> CornerRadii {
+        if self.rounded_corners {
+            self.theme.radii
+        } else {
+            CornerRadii::SQUARE
+        }
     }
 
     pub fn theme(&self) -> &Theme {
@@ -267,11 +283,13 @@ impl Framework {
             self.active_dropdown = None;
         }
         if let Some(popup) = self.pending_popup.take() {
+            let radii = self.corner_radii();
             popup.render(
                 &mut self.text_renderer,
                 gpu,
                 &mut self.ui_renderer,
                 self.theme,
+                radii,
             )?;
         }
         self.ui_renderer.end(gpu)
@@ -349,19 +367,12 @@ impl Framework {
         self.paint_style(b, self.style())
     }
     fn paint_style(&mut self, b: Bounds, s: Style) -> anyhow::Result<()> {
-        if let Some(c) = s.background {
-            self.ui_renderer.quad([b.x, b.y, b.width, b.height], c)?;
-        }
-        if let Some(c) = s.border_color {
-            for r in [
-                [b.x, b.y, b.width, 1.0],
-                [b.x, b.y + b.height - 1.0, b.width, 1.0],
-                [b.x, b.y, 1.0, b.height],
-                [b.x + b.width - 1.0, b.y, 1.0, b.height],
-            ] {
-                self.ui_renderer.quad(r, c)?;
-            }
-        }
+        self.ui_renderer.rounded_box(
+            [b.x, b.y, b.width, b.height],
+            if self.rounded_corners { s.radius } else { 0.0 },
+            s.background,
+            s.border_color,
+        )?;
         Ok(())
     }
     pub fn div_begin(&mut self, options: DivOptions) -> anyhow::Result<()> {
@@ -382,13 +393,12 @@ impl Framework {
             ),
         };
         let mut decorations = Vec::new();
-        if let Some(color) = s.background {
-            decorations.push(self.ui_renderer.reserve_box(color)?);
-        }
-        if let Some(color) = s.border_color {
-            for _ in 0..4 {
-                decorations.push(self.ui_renderer.reserve_box(color)?);
-            }
+        if s.background.is_some() || s.border_color.is_some() {
+            decorations.push(self.ui_renderer.reserve_box(
+                s.background.unwrap_or(Color::rgba(0.0, 0.0, 0.0, 0.0)),
+                s.border_color,
+                if self.rounded_corners { s.radius } else { 0.0 },
+            )?);
         }
         self.divs.push(OpenDiv {
             bounds: b,
@@ -439,20 +449,8 @@ impl Framework {
             height: h,
             ..div.bounds
         };
-        let mut indices = div.decorations.into_iter();
-        if div.style.background.is_some() {
-            self.ui_renderer
-                .resolve_box(indices.next().unwrap(), [b.x, b.y, w, h]);
-        }
-        if div.style.border_color.is_some() {
-            for rect in [
-                [b.x, b.y, w, 1.0_f32.min(h)],
-                [b.x, b.y + (h - 1.0).max(0.0), w, 1.0_f32.min(h)],
-                [b.x, b.y, 1.0_f32.min(w), h],
-                [b.x + (w - 1.0).max(0.0), b.y, 1.0_f32.min(w), h],
-            ] {
-                self.ui_renderer.resolve_box(indices.next().unwrap(), rect);
-            }
+        for decoration in div.decorations {
+            self.ui_renderer.resolve_box(decoration, [b.x, b.y, w, h]);
         }
         let parent = self.layouts.last_mut().unwrap();
         if !parent.inline {
@@ -544,6 +542,50 @@ impl Framework {
         result?;
         Ok(())
     }
+    pub fn checkbox<G: GraphicsDevice>(
+        &mut self,
+        gpu: &mut G,
+        id: &str,
+        label: &str,
+        checked: bool,
+    ) -> anyhow::Result<Option<bool>> {
+        let font = self.font(Font::Regular)?;
+        let icons = self.font(Font::Icons)?;
+        let width = self.sizing.last().unwrap().0.unwrap_or(self.div_width());
+        let layout = self.text_renderer.measure_with_options(
+            label,
+            font,
+            TextLayoutOptions {
+                max_width: (width - 34.0).max(1.0),
+            },
+        )?;
+        let bounds = self.place(width, layout.height.max(20.0) + 12.0);
+        let occurrence = self.button_occurrences.entry(id.to_owned()).or_default();
+        let key = (id.to_owned(), *occurrence);
+        *occurrence += 1;
+        let response =
+            self.buttons
+                .entry(key)
+                .or_default()
+                .update(bounds, self.batch_pointer, &self.events);
+        let widget = checkbox::Checkbox {
+            bounds,
+            layout,
+            icons,
+            checked,
+            hovered: response.hovered,
+            pressed: response.pressed,
+            radius: self.corner_radii().checkbox,
+        };
+        widget.render(
+            &mut self.text_renderer,
+            gpu,
+            &mut self.ui_renderer,
+            self.theme,
+        )?;
+        Ok(response.clicked.then_some(!checked))
+    }
+
     pub fn dropdown<G: GraphicsDevice>(
         &mut self,
         gpu: &mut G,
@@ -744,8 +786,12 @@ impl Framework {
             if let (Some(value), Some((font, layout))) = (badge, badge_layout) {
                 let height = (layout.height + 6.0).min((b.height - 2.0 * s.padding).max(0.0));
                 let top = b.y + (b.height - height) * 0.5;
-                self.ui_renderer
-                    .quad([badge_x, top, badge_width, height], self.theme.primary)?;
+                self.ui_renderer.rounded_box(
+                    [badge_x, top, badge_width, height],
+                    self.corner_radii().badge,
+                    Some(self.theme.primary),
+                    None,
+                )?;
                 self.text_renderer.color = self.theme.primary_text;
                 self.text_renderer.render(
                     badge_x + 8.0,
