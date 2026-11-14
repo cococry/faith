@@ -219,6 +219,7 @@ pub struct TextLayoutOptions {
 /// with HarfBuzz and load glyphs/fonts with
 /// FreeType.
 pub struct TextRenderer {
+    pub color: crate::graphics::Color,
     font_manager: FontManager,
 
     /// Provided possible fallback fonts
@@ -248,6 +249,7 @@ impl TextRenderer {
         let font_manager = FontManager::new()?;
 
         Ok(Self {
+            color: crate::graphics::Color::rgba(0.0, 0.0, 0.0, 1.0),
             font_manager,
             fallback_fonts: Vec::new(),
 
@@ -819,7 +821,7 @@ impl TextRenderer {
         let color = if is_colored {
             crate::graphics::Color::rgba(1.0, 1.0, 1.0, 1.0)
         } else {
-            crate::graphics::Color::rgba(0.0, 0.0, 0.0, 1.0)
+            self.color
         };
 
         let mut pen_x = run_x;
@@ -900,7 +902,7 @@ impl TextRenderer {
         let color = if is_colored {
             crate::graphics::Color::rgba(1.0, 1.0, 1.0, 1.0)
         } else {
-            crate::graphics::Color::rgba(0.0, 0.0, 0.0, 1.0)
+            self.color
         };
 
         let mut pen_x = run_x;
@@ -1440,6 +1442,7 @@ impl TextRenderer {
 
     /// Draw wrapped text only on complete lines inside the vertical viewport.
     /// The layout origin may lie above the viewport when showing recent history.
+    #[allow(dead_code)]
     pub fn render_viewport<G: GraphicsDevice>(
         &mut self,
         viewport: ([f32; 2], [f32; 2], f32),

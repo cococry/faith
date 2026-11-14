@@ -19,6 +19,7 @@ use std::{
 use store::Store;
 
 #[derive(Clone, Default)]
+#[allow(dead_code)]
 pub struct Snapshot {
     pub auth: Option<Id>,
     pub status: String,
@@ -33,6 +34,7 @@ pub struct Snapshot {
 
 /// Network, filesystem and SQLite work stay on the worker/native reader threads.
 /// The UI only sends bounded commands and reads an immutable display snapshot.
+#[allow(dead_code)]
 pub struct Session {
     commands: SyncSender<(u64, String)>,
     next_submission: AtomicU64,
@@ -42,6 +44,7 @@ pub struct Session {
     worker: Option<JoinHandle<()>>,
 }
 
+#[allow(dead_code)]
 impl Session {
     pub fn start(mut config: Config, waker: PlatformWaker) -> anyhow::Result<Self> {
         let profile = config
@@ -133,11 +136,13 @@ impl Drop for Session {
     }
 }
 
+#[allow(dead_code)]
 struct Inflight {
     deadline: std::time::Instant,
     result: bool,
     echo: bool,
 }
+#[allow(dead_code)]
 struct Worker {
     client: Client,
     store: Arc<Store>,
@@ -151,6 +156,7 @@ struct Worker {
     generation: u64,
     submission: Option<(u64, bool)>,
 }
+#[allow(dead_code)]
 impl Worker {
     fn notice(&mut self, line: impl Into<String>) {
         self.notices.push_back(line.into());

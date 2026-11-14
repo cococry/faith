@@ -1,5 +1,5 @@
 use crate::{
-    graphics::{Color, FontHandle, GraphicsDevice},
+    graphics::{FontHandle, GraphicsDevice},
     platform::event::{Key, WindowEvent},
     ui::{TextRenderer, UIRenderer},
 };
@@ -137,6 +137,13 @@ impl InputField {
         }
         response
     }
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+    pub fn set_focused(&mut self, focused: bool) {
+        self.focused = focused;
+    }
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.text.clear();
         self.cursor = 0;
@@ -144,17 +151,13 @@ impl InputField {
     pub fn render<G: GraphicsDevice>(
         &self,
         bounds: Bounds,
+        style: super::super::framework::Style,
         font: FontHandle,
         text: &mut TextRenderer,
         gpu: &mut G,
         ui: &mut UIRenderer,
     ) -> anyhow::Result<()> {
-        ui.quad(
-            [bounds.x, bounds.y, bounds.width, bounds.height],
-            Color::rgba(0.88, 0.91, 0.95, 1.0),
-        )?;
-
-        let available = (bounds.width - 24.0).max(1.0);
+        let available = (bounds.width - style.padding * 2.0).max(1.0);
 
         let mut boundaries: Vec<usize> = self.text.grapheme_indices(true).map(|(i, _)| i).collect();
 
@@ -190,18 +193,18 @@ impl InputField {
             }
         }
         let shown = &self.text[start..boundaries[lo]];
-        let y = bounds.y + 10.0;
-        text.render(bounds.x + 10.0, y, shown, font, gpu, ui)?;
+        let y = bounds.y + style.padding;
+        text.render(bounds.x + style.padding, y, shown, font, gpu, ui)?;
         if self.focused {
             let caret = text.measure(&self.text[start..self.cursor], font)?.width;
             ui.quad(
                 [
-                    bounds.x + 10.0 + caret,
+                    bounds.x + style.padding + caret,
                     y,
                     1.5,
-                    (bounds.height - 20.0).max(1.0),
+                    (bounds.height - style.padding * 2.0).max(1.0),
                 ],
-                Color::rgba(0.1, 0.15, 0.25, 1.0),
+                style.color,
             )?;
         }
         Ok(())

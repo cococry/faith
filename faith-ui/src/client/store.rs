@@ -8,6 +8,7 @@ use std::{
 };
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct Conversation {
     pub id: Id,
     pub revision: u64,
@@ -15,11 +16,13 @@ pub struct Conversation {
     pub active: bool,
 }
 
+#[allow(dead_code)]
 pub struct Store {
     db: Mutex<Connection>,
     _profile_lock: File,
 }
 
+#[allow(dead_code)]
 fn id(bytes: Vec<u8>) -> rusqlite::Result<Id> {
     bytes
         .try_into()
@@ -27,6 +30,7 @@ fn id(bytes: Vec<u8>) -> rusqlite::Result<Id> {
         .map_err(|_| rusqlite::Error::InvalidQuery)
 }
 
+#[allow(dead_code)]
 fn members(bytes: Vec<u8>) -> rusqlite::Result<Vec<Id>> {
     if bytes.is_empty()
         || !bytes.len().is_multiple_of(16)
@@ -37,9 +41,11 @@ fn members(bytes: Vec<u8>) -> rusqlite::Result<Vec<Id>> {
     Ok(bytes.as_chunks::<16>().0.iter().map(|b| Id(*b)).collect())
 }
 
+#[allow(dead_code)]
 fn pack(ids: &[Id]) -> Vec<u8> {
     ids.iter().flat_map(|id| id.0).collect()
 }
+#[allow(dead_code)]
 fn conversation(db: &Connection, group: Id) -> rusqlite::Result<Option<Conversation>> {
     db.query_row(
         "SELECT revision,members,active FROM conversations WHERE id=?",
@@ -56,6 +62,7 @@ fn conversation(db: &Connection, group: Id) -> rusqlite::Result<Option<Conversat
     .optional()
 }
 
+#[allow(dead_code)]
 impl Store {
     pub fn open(profile: &Path) -> anyhow::Result<Self> {
         if !profile.exists() {
@@ -259,6 +266,7 @@ impl Store {
         Ok(())
     }
 }
+#[allow(dead_code)]
 fn members_targets(bytes: Vec<u8>) -> anyhow::Result<Vec<Id>> {
     anyhow::ensure!(
         !bytes.is_empty() && bytes.len().is_multiple_of(16) && bytes.len() <= 64 * 16,
