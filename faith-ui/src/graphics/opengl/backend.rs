@@ -180,8 +180,8 @@ impl OpenGLRenderer {
             .choose_first_config(egl_display, &attributes)?
             .ok_or_else(|| anyhow::anyhow!("unable to find an appropriate EGL configuration"))?;
 
-        let major = 4;
-        let minor = 0;
+        let major = 3;
+        let minor = 3;
         let context_attributes = [
             egl::CONTEXT_MAJOR_VERSION,
             major,

@@ -1,4 +1,4 @@
-use super::event::WindowEvent;
+use super::{event::WindowEvent, mouse::Mouse};
 use crate::{
     cli::PlatformBackend,
     platform::{wayland::WaylandWaker, x11::X11Waker},
@@ -140,9 +140,27 @@ impl Platform {
     /// Polls and collects pending window events
     /// from the active platform backend.
     pub fn poll_events(&mut self) -> anyhow::Result<Vec<WindowEvent>> {
+        let events = match self {
+            Self::X11(platform) => platform.poll_events()?,
+            Self::Wayland(platform) => platform.poll_events()?,
+        };
+        let mouse = match self {
+            Self::X11(platform) => &mut platform.mouse,
+            Self::Wayland(platform) => &mut platform.mouse,
+        };
+        mouse.begin_frame();
+        for event in &events {
+            mouse.handle(event);
+        }
+        Ok(events)
+    }
+
+    /// Pointer snapshot for the most recent poll_events() batch.
+    #[allow(dead_code)]
+    pub fn mouse(&self) -> &Mouse {
         match self {
-            Self::X11(platform) => platform.poll_events(),
-            Self::Wayland(platform) => platform.poll_events(),
+            Self::X11(platform) => &platform.mouse,
+            Self::Wayland(platform) => &platform.mouse,
         }
     }
 

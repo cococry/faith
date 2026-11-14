@@ -18,4 +18,4 @@ if [ -z "$port" ]; then
 fi
 exec cargo run --manifest-path faith-ui/Cargo.toml --locked -- \
     --profile "$root/.local/clients/$name" --host 127.0.0.1 --port "$port" \
-    --ca-file "$root/.local/system/cert.pem" --server-name localhost "$@" --graphics vulkan 
+    --ca-file "$root/.local/system/cert.pem" --server-name localhost "$@" 

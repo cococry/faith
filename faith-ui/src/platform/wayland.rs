@@ -4,6 +4,7 @@ use std::{ffi::c_void, os::fd::AsFd, sync::Arc};
 
 use super::event::WindowEvent;
 use super::keyboard::{KeyRepeat, Keyboard};
+use super::mouse::{CursorPosition, Mouse, MouseButton, ScrollDelta};
 use super::window::WindowConfig;
 use crate::platform::window::WindowHandleInfo;
 use std::io::Read;
@@ -16,7 +17,7 @@ use nix::{
 };
 use wayland_client::{
     Connection, Dispatch, EventQueue, Proxy, QueueHandle,
-    protocol::{wl_compositor, wl_keyboard, wl_registry, wl_seat, wl_surface},
+    protocol::{wl_compositor, wl_keyboard, wl_pointer, wl_registry, wl_seat, wl_surface},
 };
 
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
@@ -48,6 +49,8 @@ pub struct WaylandState {
     seat: Option<wl_seat::WlSeat>,
     seat_name: Option<u32>,
     keyboard_proxy: Option<wl_keyboard::WlKeyboard>,
+    pointer_proxy: Option<wl_pointer::WlPointer>,
+    pointer_scroll: PointerScroll,
     keyboard: Option<Keyboard>,
     repeat: KeyRepeat,
     focused: bool,
@@ -63,6 +66,7 @@ pub struct WaylandPlatform {
     conn: Connection,
     ev_queue: EventQueue<WaylandState>,
     state: WaylandState,
+    pub(crate) mouse: Mouse,
 
     // Eventfd used to wake the blocking Wayland
     // event poll from another thread.
@@ -104,6 +108,16 @@ impl WaylandWaker {
 }
 
 impl WaylandState {
+    fn remove_pointer(&mut self) {
+        if let Some(pointer) = self.pointer_proxy.take() {
+            if pointer.version() >= 3 {
+                pointer.release();
+            }
+            self.pointer_scroll = PointerScroll::default();
+            self.pending_events.push(WindowEvent::MouseCancelled);
+        }
+    }
+
     /// Called when the XDG surface is initialized.
     /// At this point, we can set the tile of the toplevel.
     fn init_xdg_surface(&mut self, qh: &QueueHandle<WaylandState>) {
@@ -203,6 +217,7 @@ impl Dispatch<wl_registry::WlRegistry, WaylandHandler> for WaylandState {
             {
                 keyboard.release();
             }
+            state.remove_pointer();
             if let Some(seat) = state.seat.take()
                 && seat.version() >= 5
             {
@@ -230,6 +245,13 @@ impl Dispatch<wl_seat::WlSeat, WaylandHandler> for WaylandState {
             capabilities: wayland_client::WEnum::Value(caps),
         } = event
         {
+            if caps.contains(wl_seat::Capability::Pointer) {
+                if state.pointer_proxy.is_none() {
+                    state.pointer_proxy = Some(seat.get_pointer(qh, WaylandHandler));
+                }
+            } else {
+                state.remove_pointer();
+            }
             if caps.contains(wl_seat::Capability::Keyboard) {
                 if state.keyboard_proxy.is_none() {
                     state.keyboard_proxy = Some(seat.get_keyboard(qh, WaylandHandler));
@@ -470,6 +492,8 @@ impl WaylandPlatform {
             seat: None,
             seat_name: None,
             keyboard_proxy: None,
+            pointer_proxy: None,
+            pointer_scroll: PointerScroll::default(),
             keyboard: None,
             repeat: KeyRepeat::default(),
             focused: false,
@@ -492,6 +516,7 @@ impl WaylandPlatform {
             conn,
             ev_queue,
             state,
+            mouse: Mouse::default(),
             wake_fd,
         })
     }
@@ -699,6 +724,134 @@ impl WaylandPlatform {
             tracing::info!("Created Vulkan Wayland surface successfully.");
 
             unsafe { Ok(wl_surface_inst.create_wayland_surface(&create_info, None)?) }
+        }
+    }
+}
+
+/// A wheel's Axis and AxisDiscrete describe the same scroll. Prefer discrete
+/// steps per axis at Frame, and retain continuous distances for touchpads.
+#[derive(Default)]
+struct PointerScroll {
+    pixels: [f64; 2],
+    lines: [Option<f64>; 2],
+}
+
+impl PointerScroll {
+    fn flush(&mut self, events: &mut Vec<WindowEvent>) {
+        for axis in 0..2 {
+            let delta = if let Some(value) = self.lines[axis] {
+                ScrollDelta::Lines {
+                    x: if axis == 0 { value } else { 0.0 },
+                    y: if axis == 1 { value } else { 0.0 },
+                }
+            } else {
+                let value = self.pixels[axis];
+                if value == 0.0 {
+                    continue;
+                }
+                ScrollDelta::Pixels {
+                    x: if axis == 0 { value } else { 0.0 },
+                    y: if axis == 1 { value } else { 0.0 },
+                }
+            };
+            events.push(WindowEvent::MouseScrolled { delta });
+        }
+        *self = Self::default();
+    }
+}
+
+impl Dispatch<wl_pointer::WlPointer, WaylandHandler> for WaylandState {
+    fn event(
+        state: &mut Self,
+        pointer: &wl_pointer::WlPointer,
+        event: wl_pointer::Event,
+        _: &WaylandHandler,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        use wayland_client::WEnum;
+        match event {
+            wl_pointer::Event::Enter {
+                surface,
+                surface_x,
+                surface_y,
+                ..
+            } if state.surface.as_ref() == Some(&surface) => {
+                state.pending_events.push(WindowEvent::MouseEntered {
+                    position: CursorPosition {
+                        x: surface_x,
+                        y: surface_y,
+                    },
+                });
+            }
+            wl_pointer::Event::Leave { .. } => {
+                state.pending_events.push(WindowEvent::MouseLeft);
+                // Wayland ends pointer focus only after the implicit grab ends.
+                state.pending_events.push(WindowEvent::MouseCancelled);
+                state.pointer_scroll = PointerScroll::default();
+            }
+            wl_pointer::Event::Motion {
+                surface_x,
+                surface_y,
+                ..
+            } => {
+                state.pending_events.push(WindowEvent::MouseMoved {
+                    position: CursorPosition {
+                        x: surface_x,
+                        y: surface_y,
+                    },
+                });
+            }
+            wl_pointer::Event::Button {
+                button,
+                state: WEnum::Value(button_state),
+                ..
+            } => {
+                // wl_pointer uses Linux input-event button codes.
+                let button = match button {
+                    0x110 => MouseButton::Left,
+                    0x111 => MouseButton::Right,
+                    0x112 => MouseButton::Middle,
+                    0x113 | 0x116 => MouseButton::Back,
+                    0x114 | 0x115 => MouseButton::Forward,
+                    other => MouseButton::Other(other),
+                };
+                state
+                    .pending_events
+                    .push(if button_state == wl_pointer::ButtonState::Pressed {
+                        WindowEvent::MouseButtonPressed { button }
+                    } else {
+                        WindowEvent::MouseButtonReleased { button }
+                    });
+            }
+            wl_pointer::Event::Axis {
+                axis: WEnum::Value(axis),
+                value,
+                ..
+            } => {
+                let index = match axis {
+                    wl_pointer::Axis::HorizontalScroll => 0,
+                    wl_pointer::Axis::VerticalScroll => 1,
+                    _ => return,
+                };
+                state.pointer_scroll.pixels[index] += value;
+                if pointer.version() < 5 {
+                    state.pointer_scroll.flush(&mut state.pending_events);
+                }
+            }
+            wl_pointer::Event::AxisDiscrete {
+                axis: WEnum::Value(axis),
+                discrete,
+            } => {
+                let index = match axis {
+                    wl_pointer::Axis::HorizontalScroll => 0,
+                    wl_pointer::Axis::VerticalScroll => 1,
+                    _ => return,
+                };
+                *state.pointer_scroll.lines[index].get_or_insert(0.0) += f64::from(discrete);
+            }
+            wl_pointer::Event::Frame => state.pointer_scroll.flush(&mut state.pending_events),
+            _ => {}
         }
     }
 }

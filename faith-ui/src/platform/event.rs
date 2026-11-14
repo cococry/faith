@@ -1,3 +1,5 @@
+use super::mouse::{CursorPosition, MouseButton, ScrollDelta};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
     Enter,
@@ -27,4 +29,22 @@ pub enum WindowEvent {
         control: bool,
     },
     FocusChanged(bool),
+    MouseEntered {
+        position: CursorPosition,
+    },
+    MouseLeft,
+    MouseMoved {
+        position: CursorPosition,
+    },
+    MouseButtonPressed {
+        button: MouseButton,
+    },
+    MouseButtonReleased {
+        button: MouseButton,
+    },
+    MouseScrolled {
+        delta: ScrollDelta,
+    },
+    /// Pointer device removed or pointer interaction cancelled.
+    MouseCancelled,
 }
