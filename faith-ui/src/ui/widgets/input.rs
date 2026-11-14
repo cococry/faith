@@ -27,6 +27,7 @@ pub struct InputField {
     cursor: usize,
     focused: bool,
     max_bytes: usize,
+    scroll_x: f32,
 }
 impl InputField {
     pub fn new(max_bytes: usize) -> Self {
@@ -35,6 +36,7 @@ impl InputField {
             cursor: 0,
             focused: true,
             max_bytes,
+            scroll_x: 0.0,
         }
     }
     fn previous(&self) -> usize {
@@ -147,9 +149,10 @@ impl InputField {
     pub fn clear(&mut self) {
         self.text.clear();
         self.cursor = 0;
+        self.scroll_x = 0.0;
     }
     pub fn render<G: GraphicsDevice>(
-        &self,
+        &mut self,
         bounds: Bounds,
         style: super::super::framework::Style,
         font: FontHandle,
@@ -157,56 +160,74 @@ impl InputField {
         gpu: &mut G,
         ui: &mut UIRenderer,
     ) -> anyhow::Result<()> {
-        let available = (bounds.width - style.padding * 2.0).max(1.0);
-
-        let mut boundaries: Vec<usize> = self.text.grapheme_indices(true).map(|(i, _)| i).collect();
-
-        boundaries.push(self.text.len());
-        let cursor = boundaries.binary_search(&self.cursor).unwrap_or(0);
-        let mut lo = 0;
-        let mut hi = cursor;
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            if text
-                .measure(&self.text[boundaries[mid]..self.cursor], font)?
-                .width
-                > available - 3.0
-            {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-        let start = boundaries[lo];
-        let mut lo = cursor;
-        let mut hi = boundaries.len() - 1;
-        while lo < hi {
-            let mid = (lo + hi).div_ceil(2);
-            if text
-                .measure(&self.text[start..boundaries[mid]], font)?
-                .width
-                <= available
-            {
-                lo = mid;
-            } else {
-                hi = mid - 1;
-            }
-        }
-        let shown = &self.text[start..boundaries[lo]];
+        let available = (bounds.width - style.padding * 2.0).max(0.0);
+        let caret_width = 1.5_f32.min(available);
+        let caret = text.caret_x(&self.text, font, self.cursor)?;
+        self.scroll_x = scroll_to_caret(self.scroll_x, caret, (available - caret_width).max(0.0));
+        let x = bounds.x + style.padding;
         let y = bounds.y + style.padding;
-        text.render(bounds.x + style.padding, y, shown, font, gpu, ui)?;
-        if self.focused {
-            let caret = text.measure(&self.text[start..self.cursor], font)?.width;
-            ui.quad(
-                [
-                    bounds.x + style.padding + caret,
-                    y,
-                    1.5,
-                    (bounds.height - style.padding * 2.0).max(1.0),
-                ],
-                style.color,
-            )?;
+        let height = (bounds.height - style.padding * 2.0).max(0.0);
+        ui.push_clip([x, y, available, height]);
+        let result = (|| -> anyhow::Result<()> {
+            text.render(x - self.scroll_x, y, &self.text, font, gpu, ui)?;
+            if self.focused {
+                ui.quad(
+                    [x + caret - self.scroll_x, y, caret_width, height],
+                    style.color,
+                )?;
+            }
+            Ok(())
+        })();
+        ui.pop_clip();
+        result
+    }
+}
+
+fn scroll_to_caret(scroll: f32, caret: f32, viewport: f32) -> f32 {
+    if caret < scroll {
+        caret.max(0.0)
+    } else if caret > scroll + viewport {
+        (caret - viewport).max(0.0)
+    } else {
+        scroll
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn overflowing_caret_stays_at_exact_right_edge_for_variable_width_insertions() {
+        let mut scroll = 0.0;
+        for caret in [101.0, 103.25, 115.75, 120.0, 137.5] {
+            scroll = scroll_to_caret(scroll, caret, 98.5);
+            assert_eq!(caret - scroll, 98.5);
         }
+        assert_eq!(scroll_to_caret(scroll, 0.0, 98.5), 0.0);
+    }
+    #[test]
+    fn navigation_keeps_scroll_until_caret_leaves_viewport() {
+        assert_eq!(scroll_to_caret(50.0, 75.0, 100.0), 50.0);
+        assert_eq!(scroll_to_caret(50.0, 40.0, 100.0), 40.0);
+        assert_eq!(scroll_to_caret(50.0, 160.0, 100.0), 60.0);
+    }
+    #[test]
+    fn ascii_caret_uses_shaped_advances_including_spaces() -> anyhow::Result<()> {
+        let mut text = TextRenderer::new()?;
+        let font = text.load_font(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/NotoSans-Regular.ttf"),
+            16,
+        )?;
+        let value = " WiWi  ";
+        let mut previous = 0.0;
+        for byte in 0..=value.len() {
+            let caret = text.caret_x(value, font, byte)?;
+            if byte > 0 {
+                assert!(caret > previous, "caret must advance at byte {byte}");
+            }
+            previous = caret;
+        }
+        assert_eq!(text.caret_x("", font, 0)?, 0.0);
         Ok(())
     }
 }

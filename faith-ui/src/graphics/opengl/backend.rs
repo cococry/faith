@@ -27,6 +27,7 @@ layout(location = 2) in vec4 i_rect;
 layout(location = 3) in vec4 i_color;
 layout(location = 4) in vec4 i_uv;
 layout(location = 5) in vec4 i_params;
+layout(location = 6) in vec4 i_clip;
 
 uniform vec2 u_screen_size;
 
@@ -39,7 +40,12 @@ flat out int v_layer;
 flat out int v_kind;
 
 void main() {
-    vec2 pixel_pos = i_rect.xy + a_local_pos * i_rect.zw;
+    // Trim geometry before rasterization. UVs remain relative to the original
+    // quad, so clipping never stretches glyphs or images. Empty quads degenerate.
+    vec2 clip_min = max(i_rect.xy, i_clip.xy);
+    vec2 clip_max = max(clip_min, min(i_rect.xy + i_rect.zw, i_clip.zw));
+    vec2 pixel_pos = mix(clip_min, clip_max, a_local_pos);
+    vec2 clipped_local = (pixel_pos - i_rect.xy) / max(i_rect.zw, vec2(0.000001));
 
     vec2 ndc = vec2(
         (pixel_pos.x / u_screen_size.x) * 2.0 - 1.0,
@@ -49,8 +55,8 @@ void main() {
     vec2 uv_min = i_uv.xy;
     vec2 uv_max = i_uv.zw;
 
-    v_local_pos = a_local_pos;
-    v_uv = mix(uv_min, uv_max, a_local_uv);
+    v_local_pos = clipped_local;
+    v_uv = mix(uv_min, uv_max, clipped_local);
     v_color = i_color;
     v_rect = i_rect;
     v_params = i_params;

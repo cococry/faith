@@ -1001,6 +1001,41 @@ impl TextRenderer {
         Ok(())
     }
 
+    /// Visual caret coordinate in the same unwrapped shaping used by render().
+    /// Unlike paragraph measurement, this preserves leading/trailing spaces and
+    /// never reshapes a prefix independently of its following characters.
+    pub fn caret_x(&mut self, text: &str, font: FontHandle, byte: usize) -> anyhow::Result<f32> {
+        anyhow::ensure!(
+            byte <= text.len() && text.is_char_boundary(byte),
+            "invalid caret byte offset"
+        );
+        let runs = self.build_shaped_runs_cached(font, text)?;
+        let mut x = 0.0;
+        for run in runs.iter() {
+            for group in run.cluster_groups.iter() {
+                if byte >= group.byte_start_abs && byte <= group.byte_end_abs {
+                    let cluster = &text[group.byte_start_abs..group.byte_end_abs];
+                    let count = cluster.graphemes(true).count().max(1);
+                    let before = cluster
+                        .grapheme_indices(true)
+                        .filter(|(i, _)| group.byte_start_abs + i < byte)
+                        .count();
+                    // A ligature is one shaping cluster containing multiple
+                    // editable graphemes. Distribute its internal caret stops.
+                    let fraction = before as f32 / count as f32;
+                    let fraction = if run.bidi_lvl.is_rtl() {
+                        1.0 - fraction
+                    } else {
+                        fraction
+                    };
+                    return Ok(x + group.x_advance * fraction);
+                }
+                x += group.x_advance;
+            }
+        }
+        Ok(x)
+    }
+
     fn measure_byte_range_from_runs(
         &mut self,
         paragraph_runs: &[ShapedTextRun],

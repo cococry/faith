@@ -30,6 +30,8 @@ pub struct QuadInstance {
     // Currently used for atlas layer and
     // QuadType information.
     pub params: [f32; 4],
+    /// Effective clip edges: left, top, right, bottom.
+    pub clip: [f32; 4],
 }
 
 impl QuadInstance {
@@ -42,6 +44,7 @@ impl QuadInstance {
             color: [tint.r, tint.g, tint.b, tint.a],
             uv,
             params,
+            clip: [0.0, 0.0, f32::MAX, f32::MAX],
         }
     }
 }

@@ -7,7 +7,7 @@ mod ui;
 use clap::Parser;
 use graphics::{Color, GraphicsDevice, Renderer};
 use platform::{Platform, WindowConfig, WindowEvent};
-use ui::framework::{Font, Fonts, Framework, Style};
+use ui::framework::{DivOptions, Font, Fonts, Framework, Style};
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().init();
@@ -69,7 +69,11 @@ fn main() -> anyhow::Result<()> {
             padding: 24.0,
             ..ui.style()
         });
-        ui.div_begin(width, 300.0, false)?;
+        ui.div_begin(DivOptions {
+            width: Some(width),
+            height: Some(300.0),
+            ..Default::default()
+        })?;
         ui.push_style(Style {
             font_size: 28,
             margin: 8.0,

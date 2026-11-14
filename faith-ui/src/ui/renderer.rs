@@ -90,6 +90,7 @@ pub struct DedicatedDraw {
 /// dedicated image draws and per-frame
 /// quad instance batching.
 pub struct UIRenderer {
+    clips: Vec<[f32; 4]>,
     screen_width: u32,
     screen_height: u32,
 
@@ -146,6 +147,44 @@ const MAX_INSTANCES: usize = 65_536;
 const MAX_INSTANCES_PER_FRAME: usize = 65_536 * 8;
 
 impl UIRenderer {
+    /// Reserve a solid decoration before its contents; resolve its bounds once
+    /// immediate container layout is complete. Keeps painter submission order.
+    pub(crate) fn reserve_box(&mut self, color: Color) -> anyhow::Result<usize> {
+        if self.atlas_instances.len() + self.dedicated_instances.len() >= self.max_instances {
+            anyhow::bail!("UI instance buffer overflow");
+        }
+        let index = self.atlas_instances.len();
+        let mut quad = QuadInstance::textured([0.0; 4], [0.0; 4], color, [0.0; 4]);
+        quad.clip = self.clip();
+        self.atlas_instances.push(quad);
+        Ok(index)
+    }
+    pub(crate) fn resolve_box(&mut self, index: usize, rect: [f32; 4]) {
+        self.atlas_instances[index].rect = rect;
+    }
+
+    /// Push a window-coordinate [x, y, width, height] clip, intersected with
+    /// its parent. Applies to subsequent quads, glyphs, and images without
+    /// splitting batches. begin() resets clipping to the window bounds.
+    pub fn push_clip(&mut self, rect: [f32; 4]) {
+        assert!(rect.iter().all(|v| v.is_finite()), "non-finite clip");
+        self.clips.push(intersect_clip(self.clip(), rect));
+    }
+
+    pub fn pop_clip(&mut self) {
+        assert!(self.clips.len() > 1, "cannot pop the window clip");
+        self.clips.pop();
+    }
+
+    fn clip(&self) -> [f32; 4] {
+        self.clips.last().copied().unwrap_or([
+            0.0,
+            0.0,
+            self.screen_width as f32,
+            self.screen_height as f32,
+        ])
+    }
+
     /// Creates a new UI renderer and initializes
     /// the GPU resources needed for rendering
     /// UI quads.
@@ -216,6 +255,11 @@ impl UIRenderer {
                     VertexAttribute {
                         location: 4,
                         offset: 32,
+                        format: VertexFormat::Float32x4,
+                    },
+                    VertexAttribute {
+                        location: 6,
+                        offset: 64,
                         format: VertexFormat::Float32x4,
                     },
                     // Params
@@ -298,6 +342,7 @@ impl UIRenderer {
             ui_texture_array,
             image_atlas_layers: Vec::new(),
             dedicated_draws: Vec::new(),
+            clips: Vec::new(),
         })
     }
 
@@ -306,6 +351,8 @@ impl UIRenderer {
     /// Updates the current screen size and clears
     /// all per-frame quad instance batches.
     pub fn begin(&mut self, width: u32, height: u32) {
+        self.clips.clear();
+        self.clips.push([0.0, 0.0, width as f32, height as f32]);
         self.screen_width = width;
         self.screen_height = height;
 
@@ -412,14 +459,15 @@ impl UIRenderer {
         color: Color,
         params: [f32; 4],
     ) -> anyhow::Result<()> {
-        let total_instances = self.atlas_instances.len() + self.dedicated_instances.len();
-
-        if total_instances >= self.max_instances {
+        let mut instance = QuadInstance::textured(rect, uv, color, params);
+        instance.clip = self.clip();
+        if outside(rect, instance.clip) {
+            return Ok(());
+        }
+        if self.atlas_instances.len() + self.dedicated_instances.len() >= self.max_instances {
             anyhow::bail!("UI instance buffer overflow");
         }
-
-        self.atlas_instances
-            .push(QuadInstance::textured(rect, uv, color, params));
+        self.atlas_instances.push(instance);
 
         Ok(())
     }
@@ -438,14 +486,16 @@ impl UIRenderer {
         color: Color,
         params: [f32; 4],
     ) -> anyhow::Result<()> {
-        if self.instances.len() >= self.max_instances {
+        let mut instance = QuadInstance::textured(rect, uv, color, params);
+        instance.clip = self.clip();
+        if outside(rect, instance.clip) {
+            return Ok(());
+        }
+        if self.atlas_instances.len() + self.dedicated_instances.len() >= self.max_instances {
             anyhow::bail!("UI instance buffer overflow");
         }
-
         let start = self.dedicated_instances.len() as u32;
-
-        self.dedicated_instances
-            .push(QuadInstance::textured(rect, uv, color, params));
+        self.dedicated_instances.push(instance);
 
         match self.dedicated_draws.last_mut() {
             Some(draw) if draw.texture_handle == texture_handle => {
@@ -686,5 +736,46 @@ impl UIRenderer {
                 size: [data.width, data.height],
             })
         }
+    }
+}
+
+fn intersect_clip(parent: [f32; 4], rect: [f32; 4]) -> [f32; 4] {
+    let left = parent[0].max(rect[0]);
+    let top = parent[1].max(rect[1]);
+    [
+        left,
+        top,
+        parent[2].min(rect[0] + rect[2].max(0.0)).max(left),
+        parent[3].min(rect[1] + rect[3].max(0.0)).max(top),
+    ]
+}
+fn outside(rect: [f32; 4], clip: [f32; 4]) -> bool {
+    rect[2] <= 0.0
+        || rect[3] <= 0.0
+        || clip[2] <= clip[0]
+        || clip[3] <= clip[1]
+        || rect[0] >= clip[2]
+        || rect[1] >= clip[3]
+        || rect[0] + rect[2] <= clip[0]
+        || rect[1] + rect[3] <= clip[1]
+}
+#[cfg(test)]
+mod clip_tests {
+    use super::*;
+    #[test]
+    fn nested_clips_intersect_and_empty_clips_cull() {
+        let clip = intersect_clip([0.0, 0.0, 100.0, 100.0], [10.0, 20.0, 100.0, 50.0]);
+        assert_eq!(clip, [10.0, 20.0, 100.0, 70.0]);
+        assert_eq!(intersect_clip(clip, [0.0, 0.0, 200.0, 200.0]), clip);
+        assert!(!outside([5.0, 10.0, 20.0, 20.0], clip));
+        assert!(outside([0.0, 0.0, 10.0, 20.0], clip));
+        assert!(outside(
+            [0.0, 0.0, 200.0, 200.0],
+            intersect_clip(clip, [120.0, 0.0, 10.0, 10.0])
+        ));
+        assert!(outside(
+            [10.0, 20.0, 1.0, 1.0],
+            intersect_clip(clip, [10.0, 20.0, -1.0, 10.0])
+        ));
     }
 }
