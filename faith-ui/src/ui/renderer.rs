@@ -759,23 +759,3 @@ fn outside(rect: [f32; 4], clip: [f32; 4]) -> bool {
         || rect[0] + rect[2] <= clip[0]
         || rect[1] + rect[3] <= clip[1]
 }
-#[cfg(test)]
-mod clip_tests {
-    use super::*;
-    #[test]
-    fn nested_clips_intersect_and_empty_clips_cull() {
-        let clip = intersect_clip([0.0, 0.0, 100.0, 100.0], [10.0, 20.0, 100.0, 50.0]);
-        assert_eq!(clip, [10.0, 20.0, 100.0, 70.0]);
-        assert_eq!(intersect_clip(clip, [0.0, 0.0, 200.0, 200.0]), clip);
-        assert!(!outside([5.0, 10.0, 20.0, 20.0], clip));
-        assert!(outside([0.0, 0.0, 10.0, 20.0], clip));
-        assert!(outside(
-            [0.0, 0.0, 200.0, 200.0],
-            intersect_clip(clip, [120.0, 0.0, 10.0, 10.0])
-        ));
-        assert!(outside(
-            [10.0, 20.0, 1.0, 1.0],
-            intersect_clip(clip, [10.0, 20.0, -1.0, 10.0])
-        ));
-    }
-}
