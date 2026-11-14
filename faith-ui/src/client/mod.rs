@@ -26,6 +26,7 @@ pub struct Snapshot {
     pub authorized: bool,
     pub status: String,
     pub selected: Option<Id>,
+    pub conversations: Vec<Id>,
     pub members: Vec<Id>,
     pub active: bool,
     pub messages: Vec<String>,
@@ -212,6 +213,13 @@ impl Worker {
             authorized: self.authorized,
             status: self.status.clone(),
             selected: self.selected,
+            conversations: self
+                .store
+                .conversations()?
+                .into_iter()
+                .filter(|c| c.active)
+                .map(|c| c.id)
+                .collect(),
             active: conversation.as_ref().is_some_and(|c| c.active),
             members: conversation.map_or_else(Vec::new, |c| c.members),
             messages: self
@@ -436,7 +444,7 @@ impl Worker {
                     EventKind::CommandFailed | EventKind::Error => {
                         self.inflight = None;
                         self.notice(event.message);
-                        self.status = "Operation failed; pending deliveries can be retried".into();
+                        self.status = "Connection Failed.".into();
                     }
                     EventKind::DeviceAuthPending | EventKind::DeviceLinkRequest => self.notice(
                         format!("{:?}: {} — /approve or /deny", event.kind, event.message),

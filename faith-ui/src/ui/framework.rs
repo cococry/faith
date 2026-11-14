@@ -1,3 +1,4 @@
+use super::theme::Theme;
 use super::{
     TextRenderer, UIRenderer,
     text::TextLayoutOptions,
@@ -32,7 +33,7 @@ impl Default for Style {
     fn default() -> Self {
         Self {
             font_size: 16,
-            color: Color::rgba(0.12, 0.14, 0.18, 1.0),
+            color: Theme::LIGHT.text,
             background: None,
             hover_color: None,
             click_color: None,
@@ -47,13 +48,16 @@ pub enum Font {
     #[default]
     Regular,
     Bold,
+    #[allow(dead_code)]
     Italic,
+    Icons,
 }
 pub struct Fonts {
     pub regular: PathBuf,
     pub bold: PathBuf,
     pub italic: Option<PathBuf>,
     pub fallbacks: Vec<PathBuf>,
+    pub icons: PathBuf,
 }
 /// Omitted dimensions fit contents. Explicit dimensions include padding.
 /// Scrolling is reserved for future support and defaults to false.
@@ -125,6 +129,7 @@ impl Layout {
 }
 
 pub struct Framework {
+    theme: Theme,
     text_renderer: TextRenderer,
     ui_renderer: UIRenderer,
     fonts: Fonts,
@@ -150,6 +155,7 @@ impl Framework {
     ) -> anyhow::Result<Self> {
         let (w, h) = platform.size();
         let mut framework = Self {
+            theme: Theme::LIGHT,
             text_renderer: TextRenderer::new()?,
             ui_renderer: UIRenderer::new(gpu, w, h)?,
             fonts,
@@ -166,11 +172,26 @@ impl Framework {
             buttons: HashMap::new(),
             button_occurrences: HashMap::new(),
         };
-        for font in [Font::Regular, Font::Bold, Font::Italic] {
-            framework.font(font)?;
-        }
+        framework
+            .text_renderer
+            .set_fallback_fonts(framework.fonts.fallbacks.clone());
         Ok(framework)
     }
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+    }
+
+    pub fn theme(&self) -> &Theme {
+        &self.theme
+    }
+
+    fn base_style(&self) -> Style {
+        Style {
+            color: self.theme.text,
+            ..Style::default()
+        }
+    }
+
     pub fn begin(&mut self, platform: &Platform, events: &[WindowEvent]) {
         let (w, h) = platform.size();
         self.ui_renderer.begin(w, h);
@@ -184,7 +205,7 @@ impl Framework {
             false,
         )];
         self.divs.clear();
-        self.styles = vec![Style::default()];
+        self.styles = vec![self.base_style()];
         self.sizing = vec![(None, None)];
         self.events = events.to_vec();
         self.button_occurrences.clear();
@@ -194,9 +215,7 @@ impl Framework {
                 WindowEvent::MouseEntered { position } | WindowEvent::MouseMoved { position } => {
                     self.pointer = Some(*position)
                 }
-                WindowEvent::MouseLeft
-                | WindowEvent::MouseCancelled
-                | WindowEvent::FocusChanged(false) => self.pointer = None,
+                WindowEvent::MouseLeft | WindowEvent::MouseCancelled => self.pointer = None,
                 _ => {}
             }
         }
@@ -241,6 +260,15 @@ impl Framework {
         l.y = l.bounds.y + y;
         l.row_y = l.y;
     }
+    pub fn space(&mut self, height: f32) {
+        let layout = self.layouts.last_mut().unwrap();
+        layout.inline = false;
+        layout.x = layout.bounds.x;
+        layout.y = layout.bottom + height.max(0.0);
+        layout.bottom = layout.y;
+        layout.row_y = layout.y;
+    }
+
     /// Keeps subsequent widgets on this row until next_line(), without wrapping.
     #[allow(dead_code)]
     pub fn same_line(&mut self) {
@@ -347,7 +375,7 @@ impl Framework {
         ]);
         self.styles.push(Style {
             font_size: s.font_size,
-            ..Style::default()
+            ..self.base_style()
         });
         self.sizing.push((None, None));
         Ok(())
@@ -388,7 +416,10 @@ impl Framework {
         self.sizing.pop();
     }
     fn font(&mut self, font: Font) -> anyhow::Result<FontHandle> {
-        let size = self.style().font_size.max(1);
+        self.font_at(font, self.style().font_size.max(1))
+    }
+
+    fn font_at(&mut self, font: Font, size: u32) -> anyhow::Result<FontHandle> {
         if let Some(f) = self.font_cache.get(&(font, size)) {
             return Ok(*f);
         }
@@ -396,11 +427,9 @@ impl Framework {
             Font::Regular => &self.fonts.regular,
             Font::Bold => &self.fonts.bold,
             Font::Italic => self.fonts.italic.as_ref().unwrap_or(&self.fonts.regular),
+            Font::Icons => &self.fonts.icons,
         };
-        let handle = self.text_renderer.load_font(path, size)?;
-        for path in &self.fonts.fallbacks {
-            self.text_renderer.load_font(path, size)?;
-        }
+        let handle = self.text_renderer.load_primary_font(path, size)?;
         self.font_cache.insert((font, size), handle);
         Ok(handle)
     }
@@ -410,35 +439,57 @@ impl Framework {
         value: &str,
         font: Option<Font>,
     ) -> anyhow::Result<()> {
+        self.text_aligned(gpu, value, font, false)
+    }
+
+    pub fn text_centered<G: GraphicsDevice>(
+        &mut self,
+        gpu: &mut G,
+        value: &str,
+        font: Option<Font>,
+    ) -> anyhow::Result<()> {
+        self.text_aligned(gpu, value, font, true)
+    }
+
+    fn text_aligned<G: GraphicsDevice>(
+        &mut self,
+        gpu: &mut G,
+        value: &str,
+        font: Option<Font>,
+        centered: bool,
+    ) -> anyhow::Result<()> {
         let font = self.font(font.unwrap_or_default())?;
         let s = self.style();
-        let width = self.sizing.last().unwrap().0.unwrap_or(self.div_width())
-            - 2.0 * (s.padding + s.margin);
+        let padding = s.padding.max(0.0);
+        let margin = s.margin.max(0.0);
+        let fixed_width = self.sizing.last().unwrap().0;
+        let parent = self.layouts.last().unwrap();
+        let available = (parent.bounds.x + parent.bounds.width - parent.x - 2.0 * margin).max(0.0);
+        let outer_width = fixed_width.unwrap_or(available).max(0.0);
+        let content_width = (outer_width - 2.0 * padding).max(1.0);
         let layout = self.text_renderer.measure_with_options(
             value,
             font,
             TextLayoutOptions {
-                max_width: width.max(1.0),
+                max_width: content_width,
             },
         )?;
-        let natural = self.divs.last().is_some_and(|div| div.width.is_none());
+        let natural =
+            fixed_width.is_none() && self.divs.last().is_some_and(|div| div.width.is_none());
         let text_width = if natural {
-            layout.width.min(width)
+            layout.width.min(content_width) + 2.0 * padding
         } else {
-            width
+            outer_width
         };
-        let b = self.place(
-            text_width + 2.0 * s.padding,
-            layout.height + 2.0 * s.padding,
-        );
+        let b = self.place(text_width, layout.height + 2.0 * padding);
         self.paint(b)?;
         self.text_renderer.color = s.color;
         self.ui_renderer.push_clip(content_clip(b, s));
-        let result = self.text_renderer.render_wrapped(
-            [b.x + s.padding, b.y + s.padding],
-            value,
-            font,
-            (b.width - 2.0 * s.padding).max(1.0),
+        let result = self.text_renderer.render_layout(
+            [b.x + padding, b.y + padding],
+            &layout,
+            (b.width - 2.0 * padding).max(1.0),
+            centered,
             gpu,
             &mut self.ui_renderer,
         );
@@ -446,6 +497,145 @@ impl Framework {
         result?;
         Ok(())
     }
+    pub fn load_image<G: GraphicsDevice>(
+        &mut self,
+        gpu: &mut G,
+        path: &std::path::Path,
+    ) -> anyhow::Result<super::renderer::Image> {
+        self.ui_renderer.load_image(gpu, path)
+    }
+
+    pub fn image(
+        &mut self,
+        image: super::renderer::Image,
+        width: f32,
+        height: f32,
+    ) -> anyhow::Result<()> {
+        let b = self.place(width, height);
+        self.ui_renderer.image(b.x, b.y, b.width, b.height, image)
+    }
+
+    pub fn icon_button<G: GraphicsDevice>(
+        &mut self,
+        gpu: &mut G,
+        id: &str,
+        icon: &str,
+    ) -> anyhow::Result<bool> {
+        self.icon_label_button(gpu, id, icon, "")
+    }
+
+    pub fn icon_label_button<G: GraphicsDevice>(
+        &mut self,
+        gpu: &mut G,
+        id: &str,
+        icon: &str,
+        label: &str,
+    ) -> anyhow::Result<bool> {
+        self.icon_label_badge_button(gpu, id, icon, label, None)
+    }
+
+    pub fn icon_label_badge_button<G: GraphicsDevice>(
+        &mut self,
+        gpu: &mut G,
+        id: &str,
+        icon: &str,
+        label: &str,
+        badge: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        let font = self.font(Font::Regular)?;
+        let icons = self.font(Font::Icons)?;
+        let s = self.style();
+        let im = self.text_renderer.measure(icon, icons)?;
+        let lm = self.text_renderer.measure(label, font)?;
+        let badge_layout = if let Some(value) = badge {
+            let font = self.font_at(Font::Regular, 11)?;
+            Some((font, self.text_renderer.measure(value, font)?))
+        } else {
+            None
+        };
+        let badge_width = badge_layout
+            .as_ref()
+            .map_or(0.0, |(_, layout)| layout.width + 16.0);
+        let gap = if label.is_empty() { 0.0 } else { 10.0 };
+        let b = self.place(
+            im.width
+                + gap
+                + lm.width
+                + s.padding * 2.0
+                + badge_width
+                + if badge.is_some() { 10.0 } else { 0.0 },
+            im.height.max(lm.height) + s.padding * 2.0,
+        );
+        let occurrence = self.button_occurrences.entry(id.to_owned()).or_default();
+        let key = (id.to_owned(), *occurrence);
+        *occurrence += 1;
+        let response =
+            self.buttons
+                .entry(key)
+                .or_default()
+                .update(b, self.batch_pointer, &self.events);
+        let s = button::appearance(s, response.hovered, response.pressed);
+        self.paint_style(b, s)?;
+        self.ui_renderer.push_clip(content_clip(b, s));
+        self.text_renderer.color = s.color;
+        let result = (|| -> anyhow::Result<()> {
+            let x = if label.is_empty() {
+                b.x + (b.width - im.width) * 0.5
+            } else {
+                b.x + s.padding
+            };
+            self.text_renderer.render(
+                x,
+                b.y + (b.height - im.height) * 0.5,
+                icon,
+                icons,
+                gpu,
+                &mut self.ui_renderer,
+            )?;
+            let badge_x = b.x + b.width - s.padding - badge_width;
+            if !label.is_empty() {
+                let label_x = b.x + s.padding + im.width + gap;
+                let right = if badge.is_some() {
+                    badge_x - 10.0
+                } else {
+                    b.x + b.width - s.padding
+                };
+                self.ui_renderer
+                    .push_clip([label_x, b.y, (right - label_x).max(0.0), b.height]);
+                let result = self.text_renderer.render(
+                    label_x,
+                    b.y + (b.height - lm.height) * 0.5,
+                    label,
+                    font,
+                    gpu,
+                    &mut self.ui_renderer,
+                );
+                self.ui_renderer.pop_clip();
+                result?;
+            }
+            if let (Some(value), Some((font, layout))) = (badge, badge_layout) {
+                let height = (layout.height + 6.0).min((b.height - 2.0 * s.padding).max(0.0));
+                let top = b.y + (b.height - height) * 0.5;
+                self.ui_renderer
+                    .quad([badge_x, top, badge_width, height], self.theme.primary)?;
+                self.text_renderer.color = self.theme.primary_text;
+                self.text_renderer.render(
+                    badge_x + 8.0,
+                    b.y + (b.height - layout.height) * 0.5,
+                    value,
+                    font,
+                    gpu,
+                    &mut self.ui_renderer,
+                )?;
+            }
+            Ok(())
+        })();
+        self.ui_renderer.pop_clip();
+        result?;
+        Ok(response.clicked)
+    }
+
+    #[allow(dead_code)]
     pub fn button<G: GraphicsDevice>(&mut self, gpu: &mut G, label: &str) -> anyhow::Result<bool> {
         let font = self.font(Font::Regular)?;
         let s = self.style();

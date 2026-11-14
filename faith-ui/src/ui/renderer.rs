@@ -1,4 +1,4 @@
-use crate::Color;
+use crate::graphics::Color;
 
 use crate::graphics::{
     BufferDesc, BufferHandle, BufferTarget, BufferUsage, BuiltinShaderPipeline, GraphicsDevice,
@@ -597,6 +597,20 @@ impl UIRenderer {
         height: u32,
         padding: u32,
     ) -> anyhow::Result<(u32, u32, u32, u32, u32)> {
+        let padded_width = width
+            .checked_add(padding)
+            .ok_or_else(|| anyhow::anyhow!("atlas width overflow"))?;
+        let padded_height = height
+            .checked_add(padding)
+            .ok_or_else(|| anyhow::anyhow!("atlas height overflow"))?;
+        anyhow::ensure!(
+            width > 0
+                && height > 0
+                && padded_width <= UI_ATLAS_WIDTH
+                && padded_height <= UI_ATLAS_HEIGHT,
+            "image does not fit in an atlas layer"
+        );
+
         // If no atlas layer exists yet, create the
         // first layer.
         if self.image_atlas_layers.is_empty() {

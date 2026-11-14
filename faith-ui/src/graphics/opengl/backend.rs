@@ -473,6 +473,7 @@ impl OpenGLRenderer {
                 width: desc.width,
                 height: desc.height,
                 format: desc.format,
+                layers: 1,
                 kind: super::GlTextureKind::Texture2D,
             }));
 
@@ -558,6 +559,7 @@ impl OpenGLRenderer {
                 width: desc.width,
                 height: desc.height,
                 format: desc.format,
+                layers: desc.layers,
                 kind: super::GlTextureKind::Texture2DArray,
             }));
 
@@ -572,8 +574,27 @@ impl OpenGLRenderer {
     ) -> anyhow::Result<()> {
         let tex = self.get_texture(write.texture)?;
 
-        if write.x + write.width > tex.width || write.y + write.height > tex.height {
-            anyhow::bail!("texture write out of bounds");
+        if !matches!(tex.kind, GlTextureKind::Texture2DArray)
+            || write.layer >= tex.layers
+            || write
+                .x
+                .checked_add(write.width)
+                .is_none_or(|end| end > tex.width)
+            || write
+                .y
+                .checked_add(write.height)
+                .is_none_or(|end| end > tex.height)
+        {
+            anyhow::bail!("texture array write out of bounds");
+        }
+
+        let expected = write.width as usize * write.height as usize * 4;
+        anyhow::ensure!(
+            pixels_rgba.len() == expected,
+            "invalid RGBA texture upload size"
+        );
+        if expected == 0 {
+            return Ok(());
         }
 
         let raw = tex.raw;

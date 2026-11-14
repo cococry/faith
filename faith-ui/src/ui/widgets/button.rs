@@ -4,6 +4,7 @@ use crate::{
     ui::{TextRenderer, UIRenderer, framework::Style},
 };
 
+#[allow(dead_code)]
 pub fn render<G: GraphicsDevice>(
     label: &str,
     bounds: Bounds,
@@ -124,10 +125,11 @@ impl State {
                     pointer = Some(*position)
                 }
                 WindowEvent::MouseLeft => pointer = None,
-                WindowEvent::MouseCancelled | WindowEvent::FocusChanged(false) => {
+                WindowEvent::MouseCancelled => {
                     self.held = false;
                     pointer = None;
                 }
+                WindowEvent::FocusChanged(false) => self.held = false,
                 WindowEvent::MouseButtonPressed {
                     button: MouseButton::Left,
                 } => self.held = inside(pointer),
