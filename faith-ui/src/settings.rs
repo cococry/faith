@@ -11,16 +11,22 @@ use std::{
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-use crate::{platform::window::PlatformWaker, ui::theme::ThemeName};
+use crate::{
+    platform::window::PlatformWaker,
+    ui::{animation::Curve, theme::ThemeName},
+};
 
 const VISIBLE: Duration = Duration::from_secs(2);
 const FADE: Duration = Duration::from_millis(250);
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Settings {
     pub theme: ThemeName,
     pub rounded_corners: bool,
+    #[serde(default = "animations_default")]
+    pub animations: bool,
+    pub animation_curve: Curve,
 }
 
 impl Settings {
@@ -81,38 +87,8 @@ impl Store {
         let worker = thread::Builder::new()
             .name("settings".into())
             .spawn(move || {
-                let mut animation: Option<Instant> = None;
-
                 loop {
-                    let command = match animation {
-                        Some(start) => {
-                            let now = Instant::now();
-                            let fade_start = start + VISIBLE - FADE;
-                            let end = start + VISIBLE;
-                            let next = if now < fade_start {
-                                fade_start
-                            } else {
-                                (now + waker.frame_interval()).min(end)
-                            };
-
-                            match receiver.recv_timeout(next.saturating_duration_since(now)) {
-                                Ok(command) => Some(command),
-                                Err(mpsc::RecvTimeoutError::Timeout) => {
-                                    let _ = waker.request_redraw();
-
-                                    if Instant::now() >= end {
-                                        animation = None;
-                                    }
-
-                                    continue;
-                                }
-
-                                Err(mpsc::RecvTimeoutError::Disconnected) => None,
-                            }
-                        }
-
-                        None => receiver.recv().ok(),
-                    };
+                    let command = receiver.recv().ok();
 
                     let Some(mut command) = command else {
                         break;
@@ -127,7 +103,6 @@ impl Store {
                         .save(&path)
                         .map(|()| Instant::now())
                         .map_err(|error| format!("Could not save settings: {error:#}"));
-                    animation = result.as_ref().ok().copied();
                     let _ = results.send(Saved {
                         revision: command.0,
                         result,
@@ -172,6 +147,43 @@ impl Drop for Store {
     }
 }
 
-pub fn confirmation_opacity(saved: Instant) -> f32 {
-    ((VISIBLE.as_secs_f32() - saved.elapsed().as_secs_f32()) / FADE.as_secs_f32()).clamp(0.0, 1.0)
+pub fn confirmation_opacity(saved: Instant, enabled: bool, curve: Curve) -> f32 {
+    let elapsed = saved.elapsed();
+
+    if !enabled {
+        return if elapsed < VISIBLE {
+            1.0
+        } else {
+            0.0
+        };
+    }
+
+    1.0 - curve.sample(elapsed.saturating_sub(VISIBLE - FADE).as_secs_f32() / FADE.as_secs_f32())
+}
+
+fn animations_default() -> bool {
+    true
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            theme: ThemeName::default(),
+            rounded_corners: false,
+            animations: true,
+            animation_curve: Curve::default(),
+        }
+    }
+}
+
+pub fn confirmation_deadline(saved: Instant, now: Instant, enabled: bool) -> Option<Instant> {
+    let end = saved + VISIBLE;
+
+    if now >= end {
+        None
+    } else if !enabled {
+        Some(end)
+    } else {
+        Some((saved + VISIBLE - FADE).max(now))
+    }
 }

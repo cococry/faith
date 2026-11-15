@@ -1,3 +1,4 @@
+use super::animation::{Curve, Scheduler, Transition};
 use super::theme::{CornerRadii, Theme};
 use super::{
     TextRenderer, UIRenderer,
@@ -7,6 +8,7 @@ use super::{
         input::{Bounds, InputField, InputOptions},
     },
 };
+use std::time::Instant;
 
 use crate::{
     graphics::{Color, FontHandle, GraphicsDevice},
@@ -150,6 +152,15 @@ impl Layout {
 
 pub struct Framework {
     theme: Theme,
+    theme_transition: Option<(Theme, Theme, Instant)>,
+    theme_animating: bool,
+    animations: bool,
+    curve: Curve,
+    transitions: HashMap<(String, usize), Transition>,
+    scheduler: Scheduler,
+    frame_time: Instant,
+    has_rendered: bool,
+    deadline: Option<Instant>,
     rounded_corners: bool,
     dropdowns: HashMap<String, dropdown::State>,
     dropdown_seen: HashSet<String>,
@@ -182,6 +193,15 @@ impl Framework {
         let (w, h) = platform.size();
         let mut framework = Self {
             theme: Theme::LIGHT,
+            theme_transition: None,
+            theme_animating: false,
+            animations: true,
+            curve: Curve::default(),
+            transitions: HashMap::new(),
+            scheduler: Scheduler::new(platform.waker())?,
+            frame_time: Instant::now(),
+            has_rendered: false,
+            deadline: None,
             rounded_corners: false,
             dropdowns: HashMap::new(),
             dropdown_seen: HashSet::new(),
@@ -211,8 +231,62 @@ impl Framework {
         Ok(framework)
     }
 
+    pub fn set_animations(&mut self, enabled: bool, curve: Curve) {
+        self.animations = enabled;
+        self.curve = curve;
+
+        if !enabled {
+            if let Some((_, target, _)) = self.theme_transition.take() {
+                self.theme = target;
+            }
+        }
+    }
+
+    pub fn animate_until(&mut self, at: Instant) {
+        let next = self.scheduler.next_frame(self.frame_time).max(at);
+        self.deadline = Some(self.deadline.map_or(next, |old| old.min(next)));
+    }
+
+    fn animate_style(&mut self, key: (String, usize), style: Style) -> Style {
+        let transition = self
+            .transitions
+            .entry(key)
+            .or_insert_with(|| Transition::new(style, self.frame_time));
+        let (style, active) = transition.update(
+            style,
+            self.frame_time,
+            self.curve,
+            self.animations && !self.theme_animating,
+        );
+
+        if active {
+            self.animate_until(self.frame_time);
+        }
+
+        style
+    }
+
+    pub fn update_animations(&mut self) {
+        self.theme_animating = self.theme_transition.is_some();
+
+        if let Some((from, target, start)) = self.theme_transition {
+            let t = start.elapsed().as_secs_f32() / super::animation::DURATION.as_secs_f32();
+            self.theme = from.interpolate(target, self.curve.sample(t));
+
+            if t >= 1.0 {
+                self.theme = target;
+                self.theme_transition = None;
+            }
+        }
+    }
+
     pub fn set_theme(&mut self, theme: Theme) {
-        self.theme = theme;
+        if self.animations && self.has_rendered {
+            self.theme_transition = Some((self.theme, theme, Instant::now()));
+        } else {
+            self.theme = theme;
+            self.theme_transition = None;
+        }
     }
 
     pub fn set_rounded_corners(&mut self, enabled: bool) {
@@ -239,6 +313,17 @@ impl Framework {
     }
 
     pub fn begin(&mut self, platform: &Platform, events: &[WindowEvent]) {
+        self.frame_time = Instant::now();
+        self.deadline = None;
+
+        if self.theme_transition.is_some() {
+            self.animate_until(self.frame_time);
+        }
+
+        for transition in self.transitions.values_mut() {
+            transition.seen = false;
+        }
+
         let (w, h) = platform.size();
         self.ui_renderer.begin(w, h);
         self.layouts = vec![Layout::new(
@@ -319,6 +404,9 @@ impl Framework {
             )?;
         }
 
+        self.has_rendered = true;
+        self.transitions.retain(|_, transition| transition.seen);
+        self.scheduler.schedule(self.deadline);
         self.ui_renderer.end(gpu)
     }
 
@@ -643,18 +731,36 @@ impl Framework {
         let occurrence = self.button_occurrences.entry(id.to_owned()).or_default();
         let key = (id.to_owned(), *occurrence);
         *occurrence += 1;
-        let response =
-            self.buttons
-                .entry(key)
-                .or_default()
-                .update(bounds, self.batch_pointer, &self.events);
+        let response = self.buttons.entry(key.clone()).or_default().update(
+            bounds,
+            self.batch_pointer,
+            &self.events,
+        );
+        let style = button::appearance(
+            Style {
+                background: Some(if checked {
+                    self.theme.primary
+                } else {
+                    self.theme.input
+                }),
+                color: if checked {
+                    self.theme.primary_text
+                } else {
+                    self.theme.text
+                },
+                border_color: (!checked).then_some(self.theme.border),
+                ..Style::default()
+            },
+            response.hovered,
+            response.pressed,
+        );
+        let style = self.animate_style(key, style);
         let widget = checkbox::Checkbox {
             bounds,
             layout,
             icons,
             checked,
-            hovered: response.hovered,
-            pressed: response.pressed,
+            style,
             radius: self.corner_radii().checkbox,
         };
 
@@ -702,11 +808,23 @@ impl Framework {
 
         if open {
             self.active_dropdown = Some(id.to_owned());
+            let mut row_styles = Vec::with_capacity(options.len());
+
+            for index in 0..options.len() {
+                let style = Style {
+                    color: self.theme.text,
+                    background: (response.hovered_row == Some(index) || selected == index)
+                        .then_some(self.theme.button),
+                    ..Style::default()
+                };
+                row_styles.push(self.animate_style((format!("popup:{id}"), index), style));
+            }
+
             self.pending_popup = Some(dropdown::Popup {
+                row_styles,
                 bounds: popup,
                 options: options.iter().map(|value| (*value).to_owned()).collect(),
                 selected,
-                hovered: response.hovered_row,
                 font,
                 icons,
             });
@@ -715,6 +833,7 @@ impl Framework {
         }
 
         let style = button::appearance(style, response.hovered, response.pressed);
+        let style = self.animate_style((format!("dropdown:{id}"), 0), style);
         self.paint_style(bounds, style)?;
         self.ui_renderer.push_clip(content_clip(bounds, style));
         self.text_renderer.color = style.color;
@@ -841,12 +960,13 @@ impl Framework {
         let occurrence = self.button_occurrences.entry(id.to_owned()).or_default();
         let key = (id.to_owned(), *occurrence);
         *occurrence += 1;
-        let response =
-            self.buttons
-                .entry(key)
-                .or_default()
-                .update(b, self.batch_pointer, &self.events);
+        let response = self.buttons.entry(key.clone()).or_default().update(
+            b,
+            self.batch_pointer,
+            &self.events,
+        );
         let s = button::appearance(s, response.hovered, response.pressed);
+        let s = self.animate_style(key, s);
         self.paint_style(b, s)?;
         self.ui_renderer.push_clip(content_clip(b, s));
         self.text_renderer.color = s.color;
@@ -928,9 +1048,10 @@ impl Framework {
         let occurrence = self.button_occurrences.entry(label.into()).or_default();
         let key = (label.to_owned(), *occurrence);
         *occurrence += 1;
-        let state = self.buttons.entry(key).or_default();
+        let state = self.buttons.entry(key.clone()).or_default();
         let response = state.update(b, self.batch_pointer, &self.events);
         let s = button::appearance(s, response.hovered, response.pressed);
+        let s = self.animate_style(key, s);
         self.paint_style(b, s)?;
         self.ui_renderer.push_clip(content_clip(b, s));
         let result = button::render(
@@ -976,7 +1097,8 @@ impl Framework {
             },
             s.font_size as f32 * 1.5 + 2.0 * s.padding,
         );
-        self.paint(b)?;
+        let s = self.animate_style((format!("input:{id}"), 0), s);
+        self.paint_style(b, s)?;
         let field = self
             .inputs
             .entry(id.into())

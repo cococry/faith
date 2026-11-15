@@ -149,8 +149,8 @@ impl State {
 pub struct Popup {
     pub bounds: Bounds,
     pub options: Vec<String>,
+    pub row_styles: Vec<crate::ui::framework::Style>,
     pub selected: usize,
-    pub hovered: Option<usize>,
     pub font: FontHandle,
     pub icons: FontHandle,
 }
@@ -181,11 +181,11 @@ impl Popup {
             for (index, value) in self.options.iter().enumerate() {
                 let row = row_bounds(b, index);
 
-                if self.hovered == Some(index) || self.selected == index {
+                if let Some(background) = self.row_styles[index].background {
                     ui.rounded_box(
                         [row.x, row.y, row.width, row.height],
                         radii.row,
-                        Some(theme.button),
+                        Some(background),
                         None,
                     )?;
                 }
