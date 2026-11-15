@@ -1577,6 +1577,9 @@ fn main() -> anyhow::Result<()> {
         renderer.end_frame()?;
 
         if first_frame {
+            if let Some(path) = &cli.ready_file {
+                std::fs::write(path, b"ready\n")?;
+            }
             tracing::info!("First UI frame rendered");
         }
 
