@@ -18,7 +18,9 @@ use nix::{
 
 use wayland_client::{
     Connection, Dispatch, EventQueue, Proxy, QueueHandle,
-    protocol::{wl_compositor, wl_keyboard, wl_pointer, wl_registry, wl_seat, wl_surface},
+    protocol::{
+        wl_compositor, wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat, wl_surface,
+    },
 };
 
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
@@ -31,6 +33,9 @@ use nix::unistd::read;
 /// as well as pending events to be collected by
 /// Wayland protocol handler callbacks.
 pub struct WaylandState {
+    frame_timing: super::window::FrameTiming,
+    outputs: Vec<(u32, wl_output::WlOutput, u64)>,
+    entered_outputs: Vec<wl_output::WlOutput>,
     width: u32,
     height: u32,
     title: String,
@@ -109,6 +114,19 @@ impl WaylandWaker {
 }
 
 impl WaylandState {
+    fn update_frame_timing(&self) {
+        if let Some(refresh) = self
+            .outputs
+            .iter()
+            .filter(|(_, output, _)| self.entered_outputs.contains(output))
+            .map(|(_, _, refresh)| *refresh)
+            .filter(|refresh| *refresh > 0)
+            .max()
+        {
+            self.frame_timing.set_refresh_millihz(refresh);
+        }
+    }
+
     fn remove_pointer(&mut self) {
         if let Some(pointer) = self.pointer_proxy.take() {
             if pointer.version() >= 3 {
@@ -171,6 +189,16 @@ impl Dispatch<wl_registry::WlRegistry, WaylandHandler> for WaylandState {
         } = event
         {
             match interface.as_str() {
+                "wl_output" => {
+                    let output = registry.bind::<wl_output::WlOutput, _, _>(
+                        name,
+                        version.min(4),
+                        qh,
+                        WaylandHandler,
+                    );
+                    state.outputs.push((name, output, 0));
+                }
+
                 "wl_seat" if state.seat.is_none() => {
                     state.seat = Some(registry.bind::<wl_seat::WlSeat, _, _>(
                         name,
@@ -212,6 +240,23 @@ impl Dispatch<wl_registry::WlRegistry, WaylandHandler> for WaylandState {
 
                 _ => {}
             }
+        } else if let wl_registry::Event::GlobalRemove { name } = event
+            && state.seat_name != Some(name)
+        {
+            state.outputs.retain(|(id, output, _)| {
+                if *id == name {
+                    state.entered_outputs.retain(|entered| entered != output);
+
+                    if output.version() >= 3 {
+                        output.release();
+                    }
+
+                    false
+                } else {
+                    true
+                }
+            });
+            state.update_frame_timing();
         } else if let wl_registry::Event::GlobalRemove { name } = event
             && state.seat_name == Some(name)
         {
@@ -405,16 +450,57 @@ impl Dispatch<wl_compositor::WlCompositor, WaylandHandler> for WaylandState {
     }
 }
 
-/// Not needed
-impl Dispatch<wl_surface::WlSurface, WaylandHandler> for WaylandState {
+impl Dispatch<wl_output::WlOutput, WaylandHandler> for WaylandState {
     fn event(
-        _: &mut Self,
-        _: &wl_surface::WlSurface,
-        _: wl_surface::Event,
+        state: &mut Self,
+        output: &wl_output::WlOutput,
+        event: wl_output::Event,
         _: &WaylandHandler,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        if let wl_output::Event::Mode { flags, refresh, .. } = event
+            && let wayland_client::WEnum::Value(flags) = flags
+            && flags.contains(wl_output::Mode::Current)
+            && refresh > 0
+        {
+            if let Some((_, _, rate)) = state
+                .outputs
+                .iter_mut()
+                .find(|(_, proxy, _)| proxy == output)
+            {
+                *rate = refresh as u64;
+            }
+
+            state.update_frame_timing();
+        }
+    }
+}
+
+impl Dispatch<wl_surface::WlSurface, WaylandHandler> for WaylandState {
+    fn event(
+        state: &mut Self,
+        _: &wl_surface::WlSurface,
+        event: wl_surface::Event,
+        _: &WaylandHandler,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_surface::Event::Enter { output } => {
+                if !state.entered_outputs.contains(&output) {
+                    state.entered_outputs.push(output);
+                }
+            }
+
+            wl_surface::Event::Leave { output } => {
+                state.entered_outputs.retain(|entered| entered != &output);
+            }
+
+            _ => return,
+        }
+
+        state.update_frame_timing();
     }
 }
 
@@ -490,12 +576,19 @@ impl Dispatch<xdg_toplevel::XdgToplevel, WaylandHandler> for WaylandState {
 }
 
 impl WaylandPlatform {
+    pub(crate) fn frame_timing(&self) -> &super::window::FrameTiming {
+        &self.state.frame_timing
+    }
+
     pub fn new(config: &WindowConfig) -> anyhow::Result<Self> {
         let conn = Connection::connect_to_env()?;
         let mut ev_queue = conn.new_event_queue::<WaylandState>();
         let handle = ev_queue.handle();
 
         let mut state = WaylandState {
+            frame_timing: super::window::FrameTiming::default(),
+            outputs: Vec::new(),
+            entered_outputs: Vec::new(),
             width: config.width,
             height: config.height,
             title: config.title.clone(),

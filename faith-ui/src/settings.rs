@@ -92,7 +92,7 @@ impl Store {
                             let next = if now < fade_start {
                                 fade_start
                             } else {
-                                (now + Duration::from_millis(33)).min(end)
+                                (now + waker.frame_interval()).min(end)
                             };
 
                             match receiver.recv_timeout(next.saturating_duration_since(now)) {
