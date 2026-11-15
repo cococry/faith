@@ -19,9 +19,12 @@ use ui::{
 
 // Icons are kept separate from the normal text fonts.
 const MENU: &str = "\u{eb94}";
-const ACCOUNTS: &str = "\u{eb99}";
-const CHATS: &str = "\u{eac7}";
-const SETTINGS: &str = "\u{eb51}";
+const ACCOUNTS: &str = "\u{f0b55}";
+const ACCOUNTS_SELECTED: &str = "\u{f0009}";
+const CHATS: &str = "\u{f0ede}";
+const CHATS_SELECTED: &str = "\u{f0b79}";
+const SETTINGS: &str = "\u{f08bb}";
+const SETTINGS_SELECTED: &str = "\u{f0493}";
 const THEME: &str = "\u{eac6}";
 const MORE: &str = "\u{ea7c}";
 const ADD: &str = "\u{ea60}";
@@ -307,6 +310,12 @@ fn row_button(
     selected: bool,
     primary: bool,
 ) -> anyhow::Result<bool> {
+    let glyph = if selected && glyph == ACCOUNTS {
+        ACCOUNTS_SELECTED
+    } else {
+        glyph
+    };
+
     ui.push_style(Style {
         font_size: 16,
         padding: 14.0,
@@ -334,7 +343,7 @@ fn row_button(
         id,
         glyph,
         value,
-        (selected && glyph == ACCOUNTS).then_some("Selected"),
+        (selected && glyph == ACCOUNTS_SELECTED).then_some("Selected"),
     );
     ui.pop_sizing();
     ui.pop_style();
@@ -356,20 +365,37 @@ fn navigation(
     }
 
     ui.set_position(16.0, 88.0);
+    let accounts_selected = matches!(app.page, Page::Accounts | Page::Create);
 
     if icon(
         ui,
         gpu,
         "nav-accounts",
-        ACCOUNTS,
-        matches!(app.page, Page::Accounts | Page::Create),
+        if accounts_selected {
+            ACCOUNTS_SELECTED
+        } else {
+            ACCOUNTS
+        },
+        accounts_selected,
     )? {
         action = Action::Choose;
     }
 
     ui.set_position(16.0, 144.0);
 
-    if icon(ui, gpu, "nav-chats", CHATS, app.page == Page::Conversations)? {
+    let chats_selected = app.page == Page::Conversations;
+
+    if icon(
+        ui,
+        gpu,
+        "nav-chats",
+        if chats_selected {
+            CHATS_SELECTED
+        } else {
+            CHATS
+        },
+        chats_selected,
+    )? {
         action = Action::Chats;
     }
 
@@ -380,7 +406,11 @@ fn navigation(
         ui,
         gpu,
         "nav-settings",
-        SETTINGS,
+        if app.page == Page::Settings {
+            SETTINGS_SELECTED
+        } else {
+            SETTINGS
+        },
         app.page == Page::Settings,
     )? {
         action = Action::Settings;
@@ -395,9 +425,14 @@ fn list_header(
     gpu: &mut Renderer,
     app: &App,
     title: &str,
-) -> anyhow::Result<Action> {
+) -> anyhow::Result<(Action, f32)> {
     let mut action = Action::None;
     let width = ui.div_width();
+    ui.set_position(0.0, 0.0);
+    ui.div_begin(DivOptions {
+        width: Some(width),
+        ..Default::default()
+    })?;
 
     // Keep the menu toggle available when the rail is hidden.
     if app.collapsed {
@@ -432,7 +467,9 @@ fn list_header(
     ui.pop_sizing();
     ui.set_position(width - 52.0, 16.0);
     let _ = icon(ui, gpu, "list-more", MORE, false)?;
-    Ok(action)
+    ui.div_end();
+    ui.space(38.0);
+    Ok((action, ui.position().1))
 }
 
 // The available settings sections.
@@ -442,14 +479,14 @@ fn settings_list(
     app: &App,
     height: f32,
 ) -> anyhow::Result<Action> {
-    let mut action = list_header(ui, gpu, app, "Settings")?;
+    let (mut action, list_top) = list_header(ui, gpu, app, "Settings")?;
     let width = ui.div_width();
     panel(
         ui,
         16.0,
-        94.0,
+        list_top,
         width - 32.0,
-        (height - 110.0).max(48.0),
+        (height - list_top - 16.0).max(0.0),
         true,
     )?;
 
@@ -491,7 +528,7 @@ fn item_list(
     snapshot: &client::Snapshot,
     height: f32,
 ) -> anyhow::Result<Action> {
-    let mut action = list_header(
+    let (mut action, list_top) = list_header(
         ui,
         gpu,
         app,
@@ -511,22 +548,26 @@ fn item_list(
     };
 
     // Fit as many rows as the current window height allows.
-    let per_page = ((height - 250.0) / 58.0).floor().max(1.0) as usize;
+    let per_page = ((height - list_top - 156.0) / 58.0).floor().max(1.0) as usize;
     let offset = app
         .list_offset
         .min(count.saturating_sub(1) / per_page * per_page);
     panel(
         ui,
         16.0,
-        94.0,
+        list_top,
         width - 32.0,
-        (height - 226.0).max(60.0),
+        (height - list_top - 132.0).max(0.0),
         true,
     )?;
 
     // An empty list still gets a heading and a short explanation.
     if count == 0 {
         ui.set_position(8.0, 14.0);
+        ui.div_begin(DivOptions {
+            width: Some((ui.div_width() - 16.0).max(1.0)),
+            ..Default::default()
+        })?;
         label(
             ui,
             gpu,
@@ -540,8 +581,7 @@ fn item_list(
             false,
             false,
         )?;
-        ui.set_position(8.0, 48.0);
-        ui.push_sizing(Some((width - 64.0).max(1.0)), None);
+        ui.space(12.0);
         label(
             ui,
             gpu,
@@ -555,7 +595,7 @@ fn item_list(
             true,
             false,
         )?;
-        ui.pop_sizing();
+        ui.div_end();
     } else {
         // Render one row for each visible profile or conversation.
         for index in offset..(offset + per_page).min(count) {
@@ -569,7 +609,11 @@ fn item_list(
                     ui,
                     gpu,
                     &format!("conversation-{id}"),
-                    CHATS,
+                    if app.conversation == Some(id) {
+                        CHATS_SELECTED
+                    } else {
+                        CHATS
+                    },
                     &title,
                     app.conversation == Some(id),
                     false,
@@ -817,7 +861,11 @@ fn logged_in_page(
     snapshot: &client::Snapshot,
 ) -> anyhow::Result<Action> {
     let width = ui.div_width();
-    panel(ui, 28.0, 24.0, width - 56.0, 160.0, false)?;
+    ui.set_position(28.0, 24.0);
+    ui.div_begin(DivOptions {
+        width: Some((width - 56.0).max(1.0)),
+        ..Default::default()
+    })?;
     label(
         ui,
         gpu,
@@ -854,10 +902,13 @@ fn logged_in_page(
         label(ui, gpu, notice, 12, false, true, false)?;
     }
 
-    end_panel(ui);
+    ui.div_end();
+    let header_bottom = ui.position().1;
 
     // Center the empty conversation view in its own column.
-    let top = (ui.div_height() * 0.5 - 38.0).max(200.0);
+    let top = (ui.div_height() * 0.5 - 38.0)
+        .max(200.0)
+        .max(header_bottom + 16.0);
     ui.set_position(24.0, top);
     ui.div_begin(DivOptions {
         width: Some((width - 48.0).max(1.0)),
@@ -907,7 +958,9 @@ fn logged_in_page(
         panel(
             ui,
             (width - button_width) / 2.0,
-            (ui.div_height() - 90.0).max(280.0),
+            (ui.div_height() - 90.0)
+                .max(280.0)
+                .max(ui.position().1 + 16.0),
             button_width,
             52.0,
             false,
@@ -1039,9 +1092,29 @@ fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyh
         72.0
     };
 
+    // Reserve enough room for the full heading and its controls.
+    let title = match app.page {
+        Page::Settings => "Settings",
+        Page::Conversations => "Conversations",
+        Page::Accounts | Page::Create => "Profiles",
+    };
+    ui.push_style(Style {
+        font_size: 20,
+        ..ui.style()
+    });
+
+    let title_size = ui.text_size(title, Some(Font::Bold));
+    ui.pop_style();
+    let header_width = title_size?.0.ceil()
+        + if app.collapsed {
+            118.0
+        } else {
+            80.0
+        };
+
     let remaining = (width - rail).max(1.0);
     let list = (remaining / 4.0)
-        .clamp(220.0, 400.0)
+        .clamp(220.0f32.max(header_width), 400.0f32.max(header_width))
         .min((remaining - 200.0).max(100.0));
     let content = (remaining - list).max(1.0);
 

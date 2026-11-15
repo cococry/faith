@@ -354,6 +354,11 @@ impl Framework {
         self.layouts.last().unwrap().bounds.height
     }
 
+    pub fn position(&self) -> (f32, f32) {
+        let layout = self.layouts.last().unwrap();
+        (layout.x - layout.bounds.x, layout.y - layout.bounds.y)
+    }
+
     pub fn set_position(&mut self, x: f32, y: f32) {
         let l = self.layouts.last_mut().unwrap();
         l.x = l.bounds.x + x;
@@ -542,6 +547,12 @@ impl Framework {
         let handle = self.text_renderer.load_primary_font(path, size)?;
         self.font_cache.insert((font, size), handle);
         Ok(handle)
+    }
+
+    pub fn text_size(&mut self, value: &str, font: Option<Font>) -> anyhow::Result<(f32, f32)> {
+        let font = self.font(font.unwrap_or_default())?;
+        let layout = self.text_renderer.measure(value, font)?;
+        Ok((layout.width, layout.height))
     }
 
     pub fn text<G: GraphicsDevice>(
