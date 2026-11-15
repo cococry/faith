@@ -1,4 +1,5 @@
 use super::animation::{Curve, Scheduler, Transition};
+use super::scroll::{self, Areas, PrepareOptions, View};
 use super::theme::{CornerRadii, Theme};
 use super::{
     TextRenderer, UIRenderer,
@@ -8,6 +9,7 @@ use super::{
         input::{Bounds, InputField, InputOptions},
     },
 };
+use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
 use crate::{
@@ -75,7 +77,7 @@ pub struct Fonts {
     pub icons: PathBuf,
 }
 /// Omitted dimensions fit contents. Explicit dimensions include padding.
-/// Scrolling is reserved for future support and defaults to false.
+/// Scrolling applies to constrained axes and defaults to false.
 #[derive(Clone, Copy, Default)]
 pub struct DivOptions {
     pub width: Option<f32>,
@@ -89,6 +91,8 @@ struct OpenDiv {
     height: Option<f32>,
     style: Style,
     decorations: Vec<super::renderer::BoxDecoration>,
+    scroll_id: Option<u64>,
+    outer_clip: Bounds,
 }
 
 #[derive(Clone, Copy)]
@@ -101,11 +105,12 @@ struct Layout {
     right: f32,
     extent_right: f32,
     inline: bool,
-    scrollable: bool,
+    id: u64,
+    children: usize,
 }
 
 impl Layout {
-    fn new(bounds: Bounds, scrollable: bool) -> Self {
+    fn new(bounds: Bounds) -> Self {
         Self {
             bounds,
             x: bounds.x,
@@ -115,7 +120,8 @@ impl Layout {
             right: bounds.x,
             extent_right: bounds.x,
             inline: false,
-            scrollable,
+            id: 0,
+            children: 0,
         }
     }
 
@@ -167,6 +173,11 @@ pub struct Framework {
     active_dropdown: Option<String>,
     dropdown_events: Vec<WindowEvent>,
     pending_popup: Option<dropdown::Popup>,
+    dropdown_selection: Option<(String, usize)>,
+    scrolls: Areas,
+    scrollbars: Vec<(View, Bounds)>,
+    smooth_scrolling: bool,
+    overlay: bool,
     text_renderer: TextRenderer,
     ui_renderer: UIRenderer,
     fonts: Fonts,
@@ -208,6 +219,11 @@ impl Framework {
             active_dropdown: None,
             dropdown_events: Vec::new(),
             pending_popup: None,
+            dropdown_selection: None,
+            scrolls: Areas::default(),
+            scrollbars: Vec::new(),
+            smooth_scrolling: true,
+            overlay: false,
             text_renderer: TextRenderer::new()?,
             ui_renderer: UIRenderer::new(gpu, w, h)?,
             fonts,
@@ -229,6 +245,29 @@ impl Framework {
             .text_renderer
             .set_fallback_fonts(framework.fonts.fallbacks.clone());
         Ok(framework)
+    }
+
+    pub fn set_smooth_scrolling(&mut self, enabled: bool) {
+        self.smooth_scrolling = enabled;
+    }
+
+    fn clip_bounds(&self) -> Bounds {
+        let [x, y, right, bottom] = self.ui_renderer.clip();
+        Bounds {
+            x,
+            y,
+            width: (right - x).max(0.0),
+            height: (bottom - y).max(0.0),
+        }
+    }
+
+    fn hit_bounds(&self, bounds: Bounds) -> Bounds {
+        scroll::intersect(bounds, self.clip_bounds())
+    }
+
+    fn visible(&self, bounds: Bounds) -> bool {
+        self.ui_renderer
+            .visible([bounds.x, bounds.y, bounds.width, bounds.height])
     }
 
     pub fn set_animations(&mut self, enabled: bool, curve: Curve) {
@@ -324,25 +363,29 @@ impl Framework {
 
         let (w, h) = platform.size();
         self.ui_renderer.begin(w, h);
-        self.layouts = vec![Layout::new(
-            Bounds {
-                x: 0.0,
-                y: 0.0,
-                width: w as f32,
-                height: h as f32,
-            },
-            false,
-        )];
+        self.layouts = vec![Layout::new(Bounds {
+            x: 0.0,
+            y: 0.0,
+            width: w as f32,
+            height: h as f32,
+        })];
         self.divs.clear();
         self.styles = vec![self.base_style()];
         self.sizing = vec![(None, None)];
-        self.events = events.to_vec();
-        self.dropdown_events.clear();
+        self.events = self.scrolls.begin(
+            events,
+            self.pointer,
+            self.frame_time,
+            self.smooth_scrolling,
+            self.curve,
+            self.active_dropdown.is_some(),
+        );
+        self.dropdown_events.clone_from(&self.events);
+        self.scrollbars.clear();
         self.dropdown_seen.clear();
         self.pending_popup = None;
 
         if self.active_dropdown.is_some() {
-            self.dropdown_events.extend_from_slice(events);
             self.events.retain(|event| {
                 !matches!(
                     event,
@@ -374,11 +417,6 @@ impl Framework {
 
     pub fn end<G: GraphicsDevice>(&mut self, gpu: &mut G) -> anyhow::Result<()> {
         anyhow::ensure!(self.layouts.len() == 1, "unclosed div");
-        self.buttons.retain(|(label, occurrence), _| {
-            self.button_occurrences
-                .get(label)
-                .is_some_and(|count| occurrence < count)
-        });
 
         self.dropdowns
             .retain(|id, _| self.dropdown_seen.contains(id));
@@ -391,16 +429,18 @@ impl Framework {
             self.active_dropdown = None;
         }
 
+        self.render_scrollbars()?;
+
         if let Some(popup) = self.pending_popup.take() {
-            let radii = self.corner_radii();
-            popup.render(
-                &mut self.text_renderer,
-                gpu,
-                &mut self.ui_renderer,
-                self.theme,
-                radii,
-            )?;
+            self.render_dropdown_popup(gpu, popup)?;
+            self.render_scrollbars()?;
         }
+
+        self.buttons.retain(|(label, occurrence), _| {
+            self.button_occurrences
+                .get(label)
+                .is_some_and(|count| occurrence < count)
+        });
 
         self.has_rendered = true;
         self.transitions.retain(|_, transition| transition.seen);
@@ -438,6 +478,30 @@ impl Framework {
 
     pub fn div_height(&self) -> f32 {
         self.layouts.last().unwrap().bounds.height
+    }
+
+    #[allow(dead_code)]
+    pub fn scroll_offset(&self) -> [f32; 2] {
+        let Some(div) = self.divs.last().filter(|div| div.scroll_id.is_some()) else {
+            return [0.0; 2];
+        };
+        let layout = self.layouts.last().unwrap();
+        let p = div.style.padding.max(0.0);
+        [
+            div.bounds.x + p - layout.bounds.x,
+            div.bounds.y + p - layout.bounds.y,
+        ]
+    }
+
+    /* fixed-height lists can skip hidden rows without measuring their text */
+    pub fn visible_rows(&self, row_height: f32, count: usize) -> std::ops::Range<usize> {
+        let origin = self.layouts.last().unwrap().bounds.y;
+        let clip = self.clip_bounds();
+        let height = row_height.max(1.0);
+        let first = (((clip.y - origin) / height).floor().max(0.0) as usize).min(count);
+        let end =
+            ((((clip.y + clip.height) - origin) / height).ceil().max(0.0) as usize).min(count);
+        first..end.max(first)
     }
 
     pub fn position(&self) -> (f32, f32) {
@@ -514,11 +578,32 @@ impl Framework {
     }
 
     pub fn div_begin(&mut self, options: DivOptions) -> anyhow::Result<()> {
+        self.div_begin_impl(None, options)
+    }
+
+    /* names keep scroll positions stable when surrounding containers change */
+    pub fn div_begin_id(&mut self, id: &str, options: DivOptions) -> anyhow::Result<()> {
+        self.div_begin_impl(Some(id), options)
+    }
+
+    fn div_begin_impl(&mut self, name: Option<&str>, options: DivOptions) -> anyhow::Result<()> {
         let s = self.style();
         let sizing = *self.sizing.last().unwrap();
         let width = options.width.or(sizing.0).map(|v| v.max(0.0));
         let height = options.height.or(sizing.1).map(|v| v.max(0.0));
-        let parent = *self.layouts.last().unwrap();
+        let parent = self.layouts.last_mut().unwrap();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        parent.id.hash(&mut hasher);
+
+        if let Some(name) = name {
+            name.hash(&mut hasher);
+        } else {
+            parent.children.hash(&mut hasher);
+        }
+
+        parent.children += 1;
+        let id = hasher.finish();
+        let parent = *parent;
         let margin = s.margin.max(0.0);
         let b = Bounds {
             x: parent.x + margin,
@@ -533,7 +618,7 @@ impl Framework {
 
         let mut decorations = Vec::new();
 
-        if s.background.is_some() || s.border_color.is_some() {
+        if self.visible(b) && (s.background.is_some() || s.border_color.is_some()) {
             decorations.push(self.ui_renderer.reserve_box(
                 s.background.unwrap_or(Color::rgba(0.0, 0.0, 0.0, 0.0)),
                 s.border_color,
@@ -545,12 +630,15 @@ impl Framework {
             )?);
         }
 
+        let outer_clip = self.clip_bounds();
         self.divs.push(OpenDiv {
             bounds: b,
             width,
             height,
             style: s,
             decorations,
+            scroll_id: options.scrollable.then_some(id),
+            outer_clip,
         });
 
         let p = s.padding.max(0.0);
@@ -561,18 +649,47 @@ impl Framework {
             height: (b.height - 2.0 * p).max(0.0),
         };
 
-        self.layouts.push(Layout::new(content, options.scrollable));
+        let (viewport, offset) = if options.scrollable {
+            let (view, active) = self.scrolls.prepare(
+                id,
+                content,
+                PrepareOptions {
+                    axes: [width.is_some(), height.is_some()],
+                    clip: outer_clip,
+                    modal: self.overlay,
+                    now: self.frame_time,
+                    smooth: self.smooth_scrolling,
+                    animations: self.animations,
+                    curve: self.curve,
+                },
+            );
+
+            if active && self.visible(content) {
+                self.animate_until(self.frame_time);
+            }
+
+            (view.viewport, view.offset)
+        } else {
+            (content, [0.0; 2])
+        };
+        let mut layout = Layout::new(Bounds {
+            x: viewport.x - offset[0],
+            y: viewport.y - offset[1],
+            ..viewport
+        });
+        layout.id = id;
+        self.layouts.push(layout);
         // Auto axes are unconstrained until their contents have been measured.
         self.ui_renderer.push_clip([
-            content.x,
-            content.y,
+            viewport.x,
+            viewport.y,
             if width.is_some() {
-                content.width
+                viewport.width
             } else {
                 f32::MAX
             },
             if height.is_some() {
-                content.height
+                viewport.height
             } else {
                 f32::MAX
             },
@@ -590,14 +707,51 @@ impl Framework {
         assert!(self.layouts.len() > 1);
         self.ui_renderer.pop_clip();
         let layout = self.layouts.pop().unwrap();
-        let _scrollable = layout.scrollable;
         let div = self.divs.pop().unwrap();
-        let (w, h) = layout.fitted_size(div.width, div.height, div.style.padding);
-        let b = Bounds {
+        let (mut w, mut h) = layout.fitted_size(div.width, div.height, div.style.padding);
+        let mut b = Bounds {
             width: w,
             height: h,
             ..div.bounds
         };
+
+        if let Some(id) = div.scroll_id {
+            let p = div.style.padding.max(0.0);
+            let bounds = Bounds {
+                x: b.x + p,
+                y: b.y + p,
+                width: (w - 2.0 * p).max(0.0),
+                height: (h - 2.0 * p).max(0.0),
+            };
+            let extent = [
+                (layout.extent_right - layout.bounds.x).max(0.0),
+                (layout.bottom - layout.bounds.y).max(0.0),
+            ];
+            let (view, changed) = self.scrolls.finish(
+                id,
+                bounds,
+                extent,
+                [div.width.is_some(), div.height.is_some()],
+            );
+
+            if div.width.is_none() {
+                w = view.bounds.width + 2.0 * p;
+                b.width = w;
+            }
+
+            if div.height.is_none() {
+                h = view.bounds.height + 2.0 * p;
+                b.height = h;
+            }
+
+            if changed {
+                self.animate_until(self.frame_time);
+            }
+
+            if view.maximum.iter().any(|value| *value > 0.0) {
+                self.scrollbars.push((view, div.outer_clip));
+            }
+        }
 
         for decoration in div.decorations {
             self.ui_renderer.resolve_box(decoration, [b.x, b.y, w, h]);
@@ -692,6 +846,11 @@ impl Framework {
         };
 
         let b = self.place(text_width, layout.height + 2.0 * padding);
+
+        if !self.visible(b) {
+            return Ok(());
+        }
+
         self.paint(b)?;
         self.text_renderer.color = s.color;
         self.ui_renderer.push_clip(content_clip(b, s));
@@ -729,11 +888,16 @@ impl Framework {
         let occurrence = self.button_occurrences.entry(id.to_owned()).or_default();
         let key = (id.to_owned(), *occurrence);
         *occurrence += 1;
+        let hit = self.hit_bounds(bounds);
         let response = self.buttons.entry(key.clone()).or_default().update(
-            bounds,
+            hit,
             self.batch_pointer,
             &self.events,
         );
+        if !self.visible(bounds) {
+            return Ok(None);
+        }
+
         let style = button::appearance(
             Style {
                 background: Some(if checked {
@@ -800,46 +964,46 @@ impl Framework {
             &self.events
         };
 
+        let hit = self.hit_bounds(bounds);
+        let visible = self.visible(bounds);
         let state = self.dropdowns.entry(id.to_owned()).or_default();
-        let response = state.update(
-            bounds,
-            popup,
-            options.len(),
-            selected,
-            self.batch_pointer,
-            events,
-        );
+        let response = state.update(hit, popup, self.batch_pointer, events);
+
+        if !visible {
+            state.open = false;
+        }
         let open = state.open;
 
         if open {
             self.active_dropdown = Some(id.to_owned());
-            let mut row_styles = Vec::with_capacity(response.visible);
-
-            for index in response.first..response.first + response.visible {
-                let style = Style {
-                    color: self.theme.text,
-                    background: (response.hovered_row == Some(index) || selected == index)
-                        .then_some(self.theme.button),
-                    ..Style::default()
-                };
-                row_styles.push(self.animate_style((format!("popup:{id}"), index), style));
-            }
-
             self.pending_popup = Some(dropdown::Popup {
-                row_styles,
+                id: id.to_owned(),
                 bounds: popup,
-                options: options[response.first..response.first + response.visible]
-                    .iter()
-                    .map(|value| (*value).to_owned())
-                    .collect(),
-                first: response.first,
-                total: options.len(),
+                options: state.options(options),
                 selected,
                 font,
                 icons,
+                font_size: style.font_size,
             });
         } else if self.active_dropdown.as_deref() == Some(id) {
             self.active_dropdown = None;
+        }
+
+        let choice = if self
+            .dropdown_selection
+            .as_ref()
+            .is_some_and(|(key, _)| key == id)
+        {
+            self.dropdown_selection
+                .take()
+                .map(|(_, index)| index)
+                .filter(|index| *index < options.len())
+        } else {
+            None
+        };
+
+        if !visible {
+            return Ok(choice);
         }
 
         let style = button::appearance(style, response.hovered, response.pressed);
@@ -883,7 +1047,149 @@ impl Framework {
         })();
         self.ui_renderer.pop_clip();
         result?;
-        Ok(response.selected)
+        Ok(choice)
+    }
+
+    fn render_scrollbars(&mut self) -> anyhow::Result<()> {
+        for (view, clip) in self.scrollbars.drain(..) {
+            self.ui_renderer
+                .push_clip([clip.x, clip.y, clip.width, clip.height]);
+            let result = (|| -> anyhow::Result<()> {
+                for axis in 0..2 {
+                    if let (Some(track), Some(thumb)) = (view.track(axis), view.thumb(axis)) {
+                        self.ui_renderer.rounded_box(
+                            [track.x, track.y, track.width, track.height],
+                            0.0,
+                            Some(self.theme.surface),
+                            None,
+                        )?;
+                        self.ui_renderer.rounded_box(
+                            [thumb.x, thumb.y, thumb.width, thumb.height],
+                            if self.rounded_corners {
+                                3.0
+                            } else {
+                                0.0
+                            },
+                            Some(self.theme.muted),
+                            None,
+                        )?;
+                    }
+                }
+
+                Ok(())
+            })();
+            self.ui_renderer.pop_clip();
+            result?;
+        }
+
+        Ok(())
+    }
+
+    fn render_dropdown_popup<G: GraphicsDevice>(
+        &mut self,
+        gpu: &mut G,
+        popup: dropdown::Popup,
+    ) -> anyhow::Result<()> {
+        let events = std::mem::replace(&mut self.events, self.dropdown_events.clone());
+        let window = self.layouts[0].bounds;
+        self.layouts.push(Layout::new(window));
+        self.overlay = true;
+        self.set_position(popup.bounds.x, popup.bounds.y);
+        self.push_style(Style {
+            padding: 4.0,
+            background: Some(self.theme.surface),
+            border_color: Some(self.theme.border),
+            radius: self.corner_radii().popup,
+            font_size: popup.font_size,
+            ..self.base_style()
+        });
+        self.sizing.push((None, None));
+        let result = (|| -> anyhow::Result<()> {
+            self.div_begin_id(
+                &format!("dropdown:{}", popup.id),
+                DivOptions {
+                    width: Some(popup.bounds.width),
+                    height: Some(popup.bounds.height),
+                    scrollable: true,
+                },
+            )?;
+
+            let rows = self.visible_rows(dropdown::ROW_HEIGHT, popup.options.len());
+            let end = rows.end;
+            self.space(rows.start as f32 * dropdown::ROW_HEIGHT);
+
+            for index in rows {
+                let value = &popup.options[index];
+                let b = self.place(self.div_width(), dropdown::ROW_HEIGHT);
+
+                if !self.visible(b) {
+                    continue;
+                }
+
+                let label = format!("popup:{}:{index}", popup.id);
+                self.button_occurrences.insert(label.clone(), 1);
+                let key = (label, 0);
+                let hit = self.hit_bounds(b);
+                let response = self.buttons.entry(key.clone()).or_default().update(
+                    hit,
+                    self.batch_pointer,
+                    &self.events,
+                );
+                let style = Style {
+                    color: self.theme.text,
+                    background: (response.hovered || index == popup.selected)
+                        .then_some(self.theme.button),
+                    radius: self.corner_radii().row,
+                    ..self.base_style()
+                };
+                let style = self.animate_style(key, style);
+                self.paint_style(b, style)?;
+                self.ui_renderer
+                    .push_clip([b.x, b.y, (b.width - 36.0).max(0.0), b.height]);
+                let metrics = self.text_renderer.measure(value, popup.font)?;
+                self.text_renderer.color = style.color;
+                let result = self.text_renderer.render(
+                    b.x + 10.0,
+                    b.y + (b.height - metrics.height) * 0.5,
+                    value,
+                    popup.font,
+                    gpu,
+                    &mut self.ui_renderer,
+                );
+                self.ui_renderer.pop_clip();
+                result?;
+
+                if index == popup.selected {
+                    let metrics = self.text_renderer.measure(dropdown::CHECK, popup.icons)?;
+                    self.text_renderer.color = self.theme.selected_icon;
+                    self.text_renderer.render(
+                        b.x + b.width - 26.0,
+                        b.y + (b.height - metrics.height) * 0.5,
+                        dropdown::CHECK,
+                        popup.icons,
+                        gpu,
+                        &mut self.ui_renderer,
+                    )?;
+                }
+
+                if response.clicked {
+                    self.dropdown_selection = Some((popup.id.clone(), index));
+                    self.dropdowns.get_mut(&popup.id).unwrap().open = false;
+                    self.active_dropdown = None;
+                    self.animate_until(self.frame_time);
+                }
+            }
+
+            self.space((popup.options.len() - end) as f32 * dropdown::ROW_HEIGHT);
+            self.div_end();
+            Ok(())
+        })();
+        self.sizing.pop();
+        self.pop_style();
+        self.layouts.pop();
+        self.overlay = false;
+        self.events = events;
+        result
     }
 
     pub fn load_image<G: GraphicsDevice>(
@@ -970,11 +1276,16 @@ impl Framework {
         let occurrence = self.button_occurrences.entry(id.to_owned()).or_default();
         let key = (id.to_owned(), *occurrence);
         *occurrence += 1;
+        let hit = self.hit_bounds(b);
         let response = self.buttons.entry(key.clone()).or_default().update(
-            b,
+            hit,
             self.batch_pointer,
             &self.events,
         );
+        if !self.visible(b) {
+            return Ok(response.clicked);
+        }
+
         let s = button::appearance(s, response.hovered, response.pressed);
         let s = self.animate_style(key, s);
         self.paint_style(b, s)?;
@@ -1058,8 +1369,13 @@ impl Framework {
         let occurrence = self.button_occurrences.entry(label.into()).or_default();
         let key = (label.to_owned(), *occurrence);
         *occurrence += 1;
+        let hit = self.hit_bounds(b);
         let state = self.buttons.entry(key.clone()).or_default();
-        let response = state.update(b, self.batch_pointer, &self.events);
+        let response = state.update(hit, self.batch_pointer, &self.events);
+        if !self.visible(b) {
+            return Ok(response.clicked);
+        }
+
         let s = button::appearance(s, response.hovered, response.pressed);
         let s = self.animate_style(key, s);
         self.paint_style(b, s)?;
@@ -1108,7 +1424,8 @@ impl Framework {
             s.font_size as f32 * 1.5 + 2.0 * s.padding,
         );
         let s = self.animate_style((format!("input:{id}"), 0), s);
-        self.paint_style(b, s)?;
+        let hit = self.hit_bounds(b);
+        let visible = self.visible(b);
         let field = self
             .inputs
             .entry(id.into())
@@ -1118,10 +1435,24 @@ impl Framework {
             field,
             &mut self.focused,
             id,
-            b,
+            hit,
             &self.events,
             self.batch_pointer,
         );
+        if !visible {
+            return Ok(field.text().to_owned());
+        }
+
+        self.ui_renderer.rounded_box(
+            [b.x, b.y, b.width, b.height],
+            if self.rounded_corners {
+                s.radius
+            } else {
+                0.0
+            },
+            s.background,
+            s.border_color,
+        )?;
         self.text_renderer.color = s.color;
         self.ui_renderer.push_clip(content_clip(b, s));
         let result = field.render(

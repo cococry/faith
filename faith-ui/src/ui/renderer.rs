@@ -509,7 +509,11 @@ impl UIRenderer {
         self.clips.pop();
     }
 
-    fn clip(&self) -> [f32; 4] {
+    pub(crate) fn visible(&self, rect: [f32; 4]) -> bool {
+        !outside(rect, self.clip())
+    }
+
+    pub(crate) fn clip(&self) -> [f32; 4] {
         self.clips.last().copied().unwrap_or([
             0.0,
             0.0,
