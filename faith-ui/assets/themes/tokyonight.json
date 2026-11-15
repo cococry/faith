@@ -1,0 +1,18 @@
+{
+  "name": "Tokyo Night",
+  "background": "#1a1b26",
+  "surface": "#1f2336",
+  "selected_icon": "#7aa2f7",
+  "separator": "#32333e",
+  "text": "#c0caf5",
+  "muted": "#8e95b7",
+  "border": "#353b45",
+  "input": "#24283b",
+  "button": "#414868",
+  "button_text": "#c0caf5",
+  "primary": "#7aa2f7",
+  "primary_text": "#1a1b26",
+  "success": "#9ece6a",
+  "warning": "#e0af68",
+  "error": "#f7768e"
+}

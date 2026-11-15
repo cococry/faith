@@ -13,16 +13,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     platform::window::PlatformWaker,
-    ui::{animation::Curve, theme::ThemeName},
+    ui::{animation::Curve, theme::DEFAULT_ID},
 };
 
 const VISIBLE: Duration = Duration::from_secs(2);
 const FADE: Duration = Duration::from_millis(250);
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Settings {
-    pub theme: ThemeName,
+    pub theme: String,
     pub rounded_corners: bool,
     #[serde(default = "animations_default")]
     pub animations: bool,
@@ -168,7 +168,7 @@ fn animations_default() -> bool {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            theme: ThemeName::default(),
+            theme: DEFAULT_ID.to_owned(),
             rounded_corners: false,
             animations: true,
             animation_curve: Curve::default(),

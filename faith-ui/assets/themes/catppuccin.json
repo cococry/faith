@@ -1,0 +1,18 @@
+{
+  "name": "Catppuccin",
+  "background": "#1e1d2d",
+  "surface": "#252434",
+  "selected_icon": "#89b4fa",
+  "separator": "#383747",
+  "text": "#d9e0ee",
+  "muted": "#a1a6b4",
+  "border": "#3e3d4d",
+  "input": "#2d2c3c",
+  "button": "#363545",
+  "button_text": "#d9e0ee",
+  "primary": "#89b4fa",
+  "primary_text": "#1e1d2d",
+  "success": "#abe9b3",
+  "warning": "#fae3b0",
+  "error": "#f38ba8"
+}

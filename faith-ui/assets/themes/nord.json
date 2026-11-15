@@ -1,0 +1,18 @@
+{
+  "name": "Nord",
+  "background": "#2e3440",
+  "surface": "#343a46",
+  "selected_icon": "#7797b7",
+  "separator": "#414753",
+  "text": "#abb2bf",
+  "muted": "#858c99",
+  "border": "#494f5b",
+  "input": "#373d49",
+  "button": "#464c58",
+  "button_text": "#abb2bf",
+  "primary": "#7797b7",
+  "primary_text": "#2e3440",
+  "success": "#a3be8c",
+  "warning": "#ebcb8b",
+  "error": "#bf616a"
+}

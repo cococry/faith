@@ -370,10 +370,13 @@ impl X11Platform {
 
             Event::ConfigureNotify(e) => {
                 let _ = self.update_frame_timing();
-                self.width = e.width as u32;
-                self.height = e.height as u32;
+                let size = (u32::from(e.width), u32::from(e.height));
 
-                *latest_resize = Some((self.width, self.height));
+                /* moving the window also sends this, so only resize when the size changes */
+                if size != (self.width, self.height) {
+                    (self.width, self.height) = size;
+                    *latest_resize = Some(size);
+                }
             }
 
             Event::EnterNotify(e) => {

@@ -1,0 +1,18 @@
+{
+  "name": "Ayu (Light)",
+  "background": "#fafafa",
+  "surface": "#efefef",
+  "selected_icon": "#399ee6",
+  "separator": "#e1e1e1",
+  "text": "#26292f",
+  "muted": "#66686c",
+  "border": "#d7d7d7",
+  "input": "#ebebeb",
+  "button": "#e1e1e1",
+  "button_text": "#26292f",
+  "primary": "#399ee6",
+  "primary_text": "#26292f",
+  "success": "#6cbf43",
+  "warning": "#e6ba7e",
+  "error": "#e65050"
+}

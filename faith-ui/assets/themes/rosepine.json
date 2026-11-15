@@ -1,0 +1,18 @@
+{
+  "name": "Rosé Pine",
+  "background": "#191724",
+  "surface": "#1f1d2a",
+  "selected_icon": "#8bbec7",
+  "separator": "#2e2c39",
+  "text": "#e0def4",
+  "muted": "#a4a2b6",
+  "border": "#353340",
+  "input": "#262431",
+  "button": "#2d2b38",
+  "button_text": "#e0def4",
+  "primary": "#8bbec7",
+  "primary_text": "#191724",
+  "success": "#abe9b3",
+  "warning": "#f6c177",
+  "error": "#eb6f92"
+}
