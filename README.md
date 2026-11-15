@@ -19,6 +19,8 @@ and shaped glyphs.
 The user interface is rendered through an optimized rendering backend abstraction over Vulkan and OpenGL. 
 Windowing is handled by the implemented backends, which currently include **X11** and **Wayland**.
 
+Faith uses a **custom immediate-mode UI framework** whose rendering is event-driven to limit power consumption.
+
 
 The ***faith*** [<ins>server</ins>](https://github.com/cococry/faith/tree/main/faith-server) is designed around security & low latency. It is written from scratch in C,
 supports concurrent networking, implements a custom binary protocol and uses TLS for wire security.
