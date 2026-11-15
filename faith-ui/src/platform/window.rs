@@ -195,6 +195,21 @@ impl Platform {
         }
     }
 
+    pub fn scale_factor(&self) -> f32 {
+        match self {
+            Self::X11(platform) => platform.scale_factor(),
+            Self::Wayland(platform) => platform.scale_factor(),
+        }
+    }
+
+    /// Converts native pointer coordinates to framebuffer pixels.
+    pub fn pointer_scale(&self) -> f32 {
+        match self {
+            Self::X11(_) => 1.0,
+            Self::Wayland(_) => self.scale_factor(),
+        }
+    }
+
     /// Gets the size of the active platform window
     pub fn size(&self) -> (u32, u32) {
         match self {

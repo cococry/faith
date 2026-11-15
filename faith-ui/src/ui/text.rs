@@ -219,6 +219,7 @@ pub struct TextLayoutOptions {
 /// with HarfBuzz and load glyphs/fonts with
 /// FreeType.
 pub struct TextRenderer {
+    scale: f32,
     pub color: crate::graphics::Color,
     font_manager: FontManager,
 
@@ -241,6 +242,10 @@ pub struct TextRenderer {
 }
 
 impl TextRenderer {
+    pub fn set_scale(&mut self, scale: f32) {
+        self.scale = scale;
+    }
+
     /// Creates a new text renderer with empty
     /// glyph-, fallback-font-, and text-shaping caches.
     ///
@@ -257,6 +262,7 @@ impl TextRenderer {
 
             glyph_locations: HashMap::new(),
 
+            scale: 1.0,
             shaped_cache: LruCache::new(NonZeroUsize::new(8192).unwrap()),
             font_run_cache: LruCache::new(NonZeroUsize::new(2048).unwrap()),
             token_range_cache: LruCache::new(NonZeroUsize::new(2048).unwrap()),
@@ -845,7 +851,11 @@ impl TextRenderer {
         };
 
         let font_scale = self.font_manager.scale(run_font)?;
-        let font_render_scale = self.font_manager.render_scale(run_font)?;
+        let size = self.font_manager.requested_size(run_font)?;
+        let raster_size = (size as f32 * self.scale).round().max(1.0) as u32;
+        let raster_font = self.font_manager.at_size(run_font, raster_size)?;
+        let font_render_scale =
+            self.font_manager.render_scale(raster_font)? * size as f32 / raster_size as f32;
         let margin = self.font_manager.line_height(run_font)? as f32 * font_scale * 2.0;
         let clip = ui.clip();
 
@@ -869,7 +879,7 @@ impl TextRenderer {
             }
 
             let key = GlyphKey {
-                font_handle: run_font,
+                font_handle: raster_font,
                 glyph_idx: shaped.glyph_idx,
             };
 
@@ -877,7 +887,7 @@ impl TextRenderer {
                 let glyph = {
                     let glyph_ref = self
                         .font_manager
-                        .get_or_load_glyph(run_font, shaped.glyph_idx)?;
+                        .get_or_load_glyph(raster_font, shaped.glyph_idx)?;
                     glyph_ref.clone()
                 };
 
@@ -937,7 +947,11 @@ impl TextRenderer {
         };
 
         let font_scale = self.font_manager.scale(run_font)?;
-        let font_render_scale = self.font_manager.render_scale(run_font)?;
+        let size = self.font_manager.requested_size(run_font)?;
+        let raster_size = (size as f32 * self.scale).round().max(1.0) as u32;
+        let raster_font = self.font_manager.at_size(run_font, raster_size)?;
+        let font_render_scale =
+            self.font_manager.render_scale(raster_font)? * size as f32 / raster_size as f32;
         let margin = self.font_manager.line_height(run_font)? as f32 * font_scale * 2.0;
         let clip = ui.clip();
 
@@ -960,7 +974,7 @@ impl TextRenderer {
             }
 
             let key = GlyphKey {
-                font_handle: run_font,
+                font_handle: raster_font,
                 glyph_idx: shaped.glyph_idx,
             };
 
@@ -968,7 +982,7 @@ impl TextRenderer {
                 let glyph = {
                     let glyph_ref = self
                         .font_manager
-                        .get_or_load_glyph(run_font, shaped.glyph_idx)?;
+                        .get_or_load_glyph(raster_font, shaped.glyph_idx)?;
                     glyph_ref.clone()
                 };
 

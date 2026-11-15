@@ -157,6 +157,11 @@ impl Layout {
 }
 
 pub struct Framework {
+    zoom: f32,
+    zoom_indicator: super::scale::Indicator,
+    zoom_indicator_pending: bool,
+    scale: f32,
+    pointer_factor: f32,
     theme: Theme,
     theme_transition: Option<(Theme, Theme, Instant)>,
     theme_animating: bool,
@@ -203,6 +208,11 @@ impl Framework {
     ) -> anyhow::Result<Self> {
         let (w, h) = platform.size();
         let mut framework = Self {
+            zoom: 1.0,
+            zoom_indicator: super::scale::Indicator::default(),
+            zoom_indicator_pending: false,
+            scale: platform.scale_factor(),
+            pointer_factor: platform.pointer_scale() / platform.scale_factor(),
             theme: Theme::default(),
             theme_transition: None,
             theme_animating: false,
@@ -361,13 +371,59 @@ impl Framework {
             transition.seen = false;
         }
 
+        let previous_scale = self.scale;
+        for event in events {
+            if let WindowEvent::Zoom(steps) = event {
+                self.zoom = super::scale::zoom(self.zoom, *steps);
+                if steps.is_finite() && *steps != 0.0 {
+                    self.zoom_indicator_pending = true;
+                }
+            }
+        }
+        self.scale = platform.scale_factor() * self.zoom;
+        let pointer_factor = platform.pointer_scale() / self.scale;
+        if let Some(pointer) = &mut self.pointer {
+            pointer.x *= (pointer_factor / self.pointer_factor) as f64;
+            pointer.y *= (pointer_factor / self.pointer_factor) as f64;
+        }
+        self.pointer_factor = pointer_factor;
+        if previous_scale != self.scale {
+            self.scrolls.invalidate_layout();
+        }
+        let events: Vec<_> = events
+            .iter()
+            .filter_map(|event| {
+                let mut event = event.clone();
+                match &mut event {
+                    WindowEvent::Zoom(_) => return None,
+                    WindowEvent::MouseEntered { position }
+                    | WindowEvent::MouseMoved { position } => {
+                        let factor = (platform.pointer_scale() / self.scale) as f64;
+                        position.x *= factor;
+                        position.y *= factor;
+                    }
+                    WindowEvent::MouseScrolled {
+                        delta: crate::platform::mouse::ScrollDelta::Pixels { x, y },
+                    } => {
+                        let factor = (platform.pointer_scale() / self.scale) as f64;
+                        *x *= factor;
+                        *y *= factor;
+                    }
+                    _ => {}
+                }
+                Some(event)
+            })
+            .collect();
+        let events = events.as_slice();
+        self.text_renderer.set_scale(self.scale);
         let (w, h) = platform.size();
+        let (w, h) = (w as f32 / self.scale, h as f32 / self.scale);
         self.ui_renderer.begin(w, h);
         self.layouts = vec![Layout::new(Bounds {
             x: 0.0,
             y: 0.0,
-            width: w as f32,
-            height: h as f32,
+            width: w,
+            height: h,
         })];
         self.divs.clear();
         self.styles = vec![self.base_style()];
@@ -443,6 +499,7 @@ impl Framework {
         });
 
         self.has_rendered = true;
+        self.render_zoom_indicator(gpu)?;
         self.transitions.retain(|_, transition| transition.seen);
         self.scheduler.schedule(self.deadline);
         self.ui_renderer.end(gpu)
@@ -1048,6 +1105,33 @@ impl Framework {
         self.ui_renderer.pop_clip();
         result?;
         Ok(choice)
+    }
+
+    fn render_zoom_indicator<G: GraphicsDevice>(&mut self, gpu: &mut G) -> anyhow::Result<()> {
+        // Start the hold after layout and glyph uploads so a costly zoom frame
+        // does not consume the indicator's visible time before presentation.
+        let now = Instant::now();
+        if std::mem::take(&mut self.zoom_indicator_pending) {
+            self.zoom_indicator.show(now);
+        }
+        let Some((opacity, next)) = self.zoom_indicator.sample(now, self.animations, self.curve)
+        else {
+            return Ok(());
+        };
+        self.animate_until(next);
+
+        let label = format!("{:.0}%", self.zoom * 100.0);
+        let font = self.font_at(Font::Regular, 12)?;
+        let metrics = self.text_renderer.measure(&label, font)?;
+        let window = self.layouts[0].bounds;
+        let x = (window.width - metrics.width - 28.0).max(0.0);
+        let y = (window.height - metrics.height - 24.0).max(0.0);
+        self.text_renderer.color = Color {
+            a: self.theme.muted.a * opacity,
+            ..self.theme.muted
+        };
+        self.text_renderer
+            .render(x, y, &label, font, gpu, &mut self.ui_renderer)
     }
 
     fn render_scrollbars(&mut self) -> anyhow::Result<()> {

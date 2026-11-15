@@ -291,6 +291,23 @@ impl X11Platform {
         Ok(platform)
     }
 
+    pub fn scale_factor(&self) -> f32 {
+        // Xft.dpi is the desktop's configured logical DPI, including fractional scaling.
+        let value = unsafe {
+            x11::xlib::XGetDefault(self.xdisplay.as_ptr(), c"Xft".as_ptr(), c"dpi".as_ptr())
+        };
+        if !value.is_null() {
+            let dpi = unsafe { std::ffi::CStr::from_ptr(value) }.to_string_lossy();
+            if let Ok(dpi) = dpi.parse::<f32>()
+                && dpi.is_finite()
+                && dpi > 0.0
+            {
+                return (dpi / 96.0).clamp(0.5, 4.0);
+            }
+        }
+        1.0
+    }
+
     fn update_frame_timing(&self) -> anyhow::Result<()> {
         let geometry = self.xcb_conn.get_geometry(self.window)?.reply()?;
         let position = self
@@ -399,7 +416,18 @@ impl X11Platform {
             }
 
             Event::ButtonPress(e) => {
-                self.pending_input.push(x11_button_event(e.detail, true));
+                if e.state
+                    .contains(x11rb::protocol::xproto::KeyButMask::CONTROL)
+                    && matches!(e.detail, 4 | 5)
+                {
+                    self.pending_input.push(WindowEvent::Zoom(if e.detail == 4 {
+                        1.0
+                    } else {
+                        -1.0
+                    }));
+                } else {
+                    self.pending_input.push(x11_button_event(e.detail, true));
+                }
             }
 
             Event::ButtonRelease(e) if !(4..=7).contains(&e.detail) => {

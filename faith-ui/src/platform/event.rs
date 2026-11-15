@@ -17,6 +17,8 @@ pub enum Key {
 #[derive(Debug, Clone, PartialEq)]
 pub enum WindowEvent {
     CloseRequested,
+    /// Proportional UI zoom steps; positive values zoom in.
+    Zoom(f64),
     RedrawRequested,
     Resized {
         width: u32,
