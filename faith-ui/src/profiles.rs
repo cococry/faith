@@ -47,11 +47,13 @@ pub fn discover(root: &Path) -> anyhow::Result<Vec<Profile>> {
         "profiles directory must be owned by the current user"
     );
     let mut profiles = Vec::new();
+
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         let Some(alias) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
+
         if entry.file_type()?.is_dir()
             && !alias.is_empty()
             && alias
@@ -85,6 +87,7 @@ pub fn create(root: &Path, alias: &str) -> anyhow::Result<Profile> {
                 e.into()
             }
         })?;
+
     Ok(Profile {
         alias: alias.to_owned(),
         path,

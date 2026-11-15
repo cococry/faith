@@ -7,6 +7,7 @@ use super::{
         input::{Bounds, InputField, InputOptions},
     },
 };
+
 use crate::{
     graphics::{Color, FontHandle, GraphicsDevice},
     platform::{
@@ -14,6 +15,7 @@ use crate::{
         mouse::{CursorPosition, MouseButton},
     },
 };
+
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
@@ -30,9 +32,12 @@ pub struct Style {
     pub click_color: Option<Color>,
     pub border_color: Option<Color>,
     pub padding: f32,
+    /// Centers an icon button's icon and label together within its bounds.
+    pub center_button_content: bool,
     pub margin: f32,
     pub radius: f32,
 }
+
 impl Default for Style {
     fn default() -> Self {
         Self {
@@ -43,11 +48,13 @@ impl Default for Style {
             click_color: None,
             border_color: None,
             padding: 0.0,
+            center_button_content: false,
             margin: 0.0,
             radius: 0.0,
         }
     }
 }
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Font {
     #[default]
@@ -57,6 +64,7 @@ pub enum Font {
     Italic,
     Icons,
 }
+
 pub struct Fonts {
     pub regular: PathBuf,
     pub bold: PathBuf,
@@ -72,6 +80,7 @@ pub struct DivOptions {
     pub height: Option<f32>,
     pub scrollable: bool,
 }
+
 struct OpenDiv {
     bounds: Bounds,
     width: Option<f32>,
@@ -79,6 +88,7 @@ struct OpenDiv {
     style: Style,
     decorations: Vec<super::renderer::BoxDecoration>,
 }
+
 #[derive(Clone, Copy)]
 struct Layout {
     bounds: Bounds,
@@ -106,6 +116,7 @@ impl Layout {
             scrollable,
         }
     }
+
     fn fitted_size(&self, width: Option<f32>, height: Option<f32>, padding: f32) -> (f32, f32) {
         let inset = 2.0 * padding.max(0.0);
         (
@@ -113,6 +124,7 @@ impl Layout {
             height.unwrap_or((self.bottom - self.bounds.y).max(0.0) + inset),
         )
     }
+
     fn place(&mut self, w: f32, h: f32, margin: f32) -> Bounds {
         let b = Bounds {
             x: self.x + margin,
@@ -120,15 +132,18 @@ impl Layout {
             width: w,
             height: h,
         };
+
         self.right = b.x + w + margin;
         self.extent_right = self.extent_right.max(self.right);
         self.bottom = self.bottom.max(b.y + h + margin);
+
         if self.inline {
             self.x = self.right;
         } else {
             self.x = self.bounds.x;
             self.y = self.bottom;
         }
+
         b
     }
 }
@@ -189,11 +204,13 @@ impl Framework {
             buttons: HashMap::new(),
             button_occurrences: HashMap::new(),
         };
+
         framework
             .text_renderer
             .set_fallback_fonts(framework.fonts.fallbacks.clone());
         Ok(framework)
     }
+
     pub fn set_theme(&mut self, theme: Theme) {
         self.theme = theme;
     }
@@ -240,6 +257,7 @@ impl Framework {
         self.dropdown_events.clear();
         self.dropdown_seen.clear();
         self.pending_popup = None;
+
         if self.active_dropdown.is_some() {
             self.dropdown_events.extend_from_slice(events);
             self.events.retain(|event| {
@@ -252,20 +270,25 @@ impl Framework {
                         | WindowEvent::KeyPressed { .. }
                 )
             });
+
             self.events.push(WindowEvent::MouseCancelled);
         }
+
         self.button_occurrences.clear();
         self.batch_pointer = self.pointer;
+
         for event in events {
             match event {
                 WindowEvent::MouseEntered { position } | WindowEvent::MouseMoved { position } => {
                     self.pointer = Some(*position)
                 }
+
                 WindowEvent::MouseLeft | WindowEvent::MouseCancelled => self.pointer = None,
                 _ => {}
             }
         }
     }
+
     pub fn end<G: GraphicsDevice>(&mut self, gpu: &mut G) -> anyhow::Result<()> {
         anyhow::ensure!(self.layouts.len() == 1, "unclosed div");
         self.buttons.retain(|(label, occurrence), _| {
@@ -273,8 +296,10 @@ impl Framework {
                 .get(label)
                 .is_some_and(|count| occurrence < count)
         });
+
         self.dropdowns
             .retain(|id, _| self.dropdown_seen.contains(id));
+
         if self
             .active_dropdown
             .as_ref()
@@ -282,6 +307,7 @@ impl Framework {
         {
             self.active_dropdown = None;
         }
+
         if let Some(popup) = self.pending_popup.take() {
             let radii = self.corner_radii();
             popup.render(
@@ -292,39 +318,49 @@ impl Framework {
                 radii,
             )?;
         }
+
         self.ui_renderer.end(gpu)
     }
+
     pub fn style(&self) -> Style {
         *self.styles.last().unwrap()
     }
+
     pub fn push_style(&mut self, style: Style) {
         self.styles.push(style);
     }
+
     pub fn pop_style(&mut self) {
         assert!(self.styles.len() > 1);
         self.styles.pop();
     }
+
     #[allow(dead_code)]
     pub fn push_sizing(&mut self, width: Option<f32>, height: Option<f32>) {
         self.sizing.push((width, height));
     }
+
     #[allow(dead_code)]
     pub fn pop_sizing(&mut self) {
         assert!(self.sizing.len() > 1);
         self.sizing.pop();
     }
+
     pub fn div_width(&self) -> f32 {
         self.layouts.last().unwrap().bounds.width
     }
+
     pub fn div_height(&self) -> f32 {
         self.layouts.last().unwrap().bounds.height
     }
+
     pub fn set_position(&mut self, x: f32, y: f32) {
         let l = self.layouts.last_mut().unwrap();
         l.x = l.bounds.x + x;
         l.y = l.bounds.y + y;
         l.row_y = l.y;
     }
+
     pub fn space(&mut self, height: f32) {
         let layout = self.layouts.last_mut().unwrap();
         layout.inline = false;
@@ -342,6 +378,7 @@ impl Framework {
         l.x = l.right;
         l.y = l.row_y;
     }
+
     #[allow(dead_code)]
     pub fn next_line(&mut self) {
         let l = self.layouts.last_mut().unwrap();
@@ -350,31 +387,41 @@ impl Framework {
         l.y = l.bottom;
         l.row_y = l.y;
     }
+
     fn place(&mut self, w: f32, h: f32) -> Bounds {
         let s = self.style();
         let (sw, sh) = *self.sizing.last().unwrap();
         let l = self.layouts.last_mut().unwrap();
+
         if !l.inline {
             l.row_y = l.y;
         }
+
         l.place(
             sw.unwrap_or(w).max(0.0),
             sh.unwrap_or(h).max(0.0),
             s.margin.max(0.0),
         )
     }
+
     fn paint(&mut self, b: Bounds) -> anyhow::Result<()> {
         self.paint_style(b, self.style())
     }
+
     fn paint_style(&mut self, b: Bounds, s: Style) -> anyhow::Result<()> {
         self.ui_renderer.rounded_box(
             [b.x, b.y, b.width, b.height],
-            if self.rounded_corners { s.radius } else { 0.0 },
+            if self.rounded_corners {
+                s.radius
+            } else {
+                0.0
+            },
             s.background,
             s.border_color,
         )?;
         Ok(())
     }
+
     pub fn div_begin(&mut self, options: DivOptions) -> anyhow::Result<()> {
         let s = self.style();
         let sizing = *self.sizing.last().unwrap();
@@ -392,14 +439,21 @@ impl Framework {
                 (parent.bounds.y + parent.bounds.height - parent.y - 2.0 * margin).max(0.0),
             ),
         };
+
         let mut decorations = Vec::new();
+
         if s.background.is_some() || s.border_color.is_some() {
             decorations.push(self.ui_renderer.reserve_box(
                 s.background.unwrap_or(Color::rgba(0.0, 0.0, 0.0, 0.0)),
                 s.border_color,
-                if self.rounded_corners { s.radius } else { 0.0 },
+                if self.rounded_corners {
+                    s.radius
+                } else {
+                    0.0
+                },
             )?);
         }
+
         self.divs.push(OpenDiv {
             bounds: b,
             width,
@@ -407,6 +461,7 @@ impl Framework {
             style: s,
             decorations,
         });
+
         let p = s.padding.max(0.0);
         let content = Bounds {
             x: b.x + p,
@@ -414,6 +469,7 @@ impl Framework {
             width: (b.width - 2.0 * p).max(0.0),
             height: (b.height - 2.0 * p).max(0.0),
         };
+
         self.layouts.push(Layout::new(content, options.scrollable));
         // Auto axes are unconstrained until their contents have been measured.
         self.ui_renderer.push_clip([
@@ -434,9 +490,11 @@ impl Framework {
             font_size: s.font_size,
             ..self.base_style()
         });
+
         self.sizing.push((None, None));
         Ok(())
     }
+
     pub fn div_end(&mut self) {
         assert!(self.layouts.len() > 1);
         self.ui_renderer.pop_clip();
@@ -449,17 +507,22 @@ impl Framework {
             height: h,
             ..div.bounds
         };
+
         for decoration in div.decorations {
             self.ui_renderer.resolve_box(decoration, [b.x, b.y, w, h]);
         }
+
         let parent = self.layouts.last_mut().unwrap();
+
         if !parent.inline {
             parent.row_y = parent.y;
         }
+
         parent.place(w, h, div.style.margin.max(0.0));
         self.styles.pop();
         self.sizing.pop();
     }
+
     fn font(&mut self, font: Font) -> anyhow::Result<FontHandle> {
         self.font_at(font, self.style().font_size.max(1))
     }
@@ -468,16 +531,19 @@ impl Framework {
         if let Some(f) = self.font_cache.get(&(font, size)) {
             return Ok(*f);
         }
+
         let path = match font {
             Font::Regular => &self.fonts.regular,
             Font::Bold => &self.fonts.bold,
             Font::Italic => self.fonts.italic.as_ref().unwrap_or(&self.fonts.regular),
             Font::Icons => &self.fonts.icons,
         };
+
         let handle = self.text_renderer.load_primary_font(path, size)?;
         self.font_cache.insert((font, size), handle);
         Ok(handle)
     }
+
     pub fn text<G: GraphicsDevice>(
         &mut self,
         gpu: &mut G,
@@ -521,11 +587,13 @@ impl Framework {
         )?;
         let natural =
             fixed_width.is_none() && self.divs.last().is_some_and(|div| div.width.is_none());
+
         let text_width = if natural {
             layout.width.min(content_width) + 2.0 * padding
         } else {
             outer_width
         };
+
         let b = self.place(text_width, layout.height + 2.0 * padding);
         self.paint(b)?;
         self.text_renderer.color = s.color;
@@ -542,6 +610,7 @@ impl Framework {
         result?;
         Ok(())
     }
+
     pub fn checkbox<G: GraphicsDevice>(
         &mut self,
         gpu: &mut G,
@@ -577,6 +646,7 @@ impl Framework {
             pressed: response.pressed,
             radius: self.corner_radii().checkbox,
         };
+
         widget.render(
             &mut self.text_renderer,
             gpu,
@@ -608,14 +678,17 @@ impl Framework {
         );
         let window = self.layouts.first().unwrap().bounds;
         let popup = dropdown::popup_bounds(bounds, options.len(), [window.width, window.height]);
+
         let events = if self.active_dropdown.as_deref() == Some(id) {
             &self.dropdown_events
         } else {
             &self.events
         };
+
         let state = self.dropdowns.entry(id.to_owned()).or_default();
         let response = state.update(bounds, popup, options.len(), self.batch_pointer, events);
         let open = state.open;
+
         if open {
             self.active_dropdown = Some(id.to_owned());
             self.pending_popup = Some(dropdown::Popup {
@@ -629,12 +702,18 @@ impl Framework {
         } else if self.active_dropdown.as_deref() == Some(id) {
             self.active_dropdown = None;
         }
+
         let style = button::appearance(style, response.hovered, response.pressed);
         self.paint_style(bounds, style)?;
         self.ui_renderer.push_clip(content_clip(bounds, style));
         self.text_renderer.color = style.color;
         let result = (|| -> anyhow::Result<()> {
-            let glyph = if open { dropdown::UP } else { dropdown::DOWN };
+            let glyph = if open {
+                dropdown::UP
+            } else {
+                dropdown::DOWN
+            };
+
             let gm = self.text_renderer.measure(glyph, icons)?;
             let right = bounds.x + bounds.width - style.padding - gm.width;
             self.ui_renderer.push_clip([
@@ -717,23 +796,35 @@ impl Framework {
         let s = self.style();
         let im = self.text_renderer.measure(icon, icons)?;
         let lm = self.text_renderer.measure(label, font)?;
+
         let badge_layout = if let Some(value) = badge {
             let font = self.font_at(Font::Regular, 11)?;
             Some((font, self.text_renderer.measure(value, font)?))
         } else {
             None
         };
+
         let badge_width = badge_layout
             .as_ref()
             .map_or(0.0, |(_, layout)| layout.width + 16.0);
-        let gap = if label.is_empty() { 0.0 } else { 10.0 };
+
+        let gap = if label.is_empty() {
+            0.0
+        } else {
+            10.0
+        };
+
         let b = self.place(
             im.width
                 + gap
                 + lm.width
                 + s.padding * 2.0
                 + badge_width
-                + if badge.is_some() { 10.0 } else { 0.0 },
+                + if badge.is_some() {
+                    10.0
+                } else {
+                    0.0
+                },
             im.height.max(lm.height) + s.padding * 2.0,
         );
         let occurrence = self.button_occurrences.entry(id.to_owned()).or_default();
@@ -751,9 +842,12 @@ impl Framework {
         let result = (|| -> anyhow::Result<()> {
             let x = if label.is_empty() {
                 b.x + (b.width - im.width) * 0.5
+            } else if s.center_button_content && badge.is_none() {
+                b.x + ((b.width - im.width - gap - lm.width) * 0.5).max(s.padding)
             } else {
                 b.x + s.padding
             };
+
             self.text_renderer.render(
                 x,
                 b.y + (b.height - im.height) * 0.5,
@@ -763,13 +857,16 @@ impl Framework {
                 &mut self.ui_renderer,
             )?;
             let badge_x = b.x + b.width - s.padding - badge_width;
+
             if !label.is_empty() {
-                let label_x = b.x + s.padding + im.width + gap;
+                let label_x = x + im.width + gap;
+
                 let right = if badge.is_some() {
                     badge_x - 10.0
                 } else {
                     b.x + b.width - s.padding
                 };
+
                 self.ui_renderer
                     .push_clip([label_x, b.y, (right - label_x).max(0.0), b.height]);
                 let result = self.text_renderer.render(
@@ -783,6 +880,7 @@ impl Framework {
                 self.ui_renderer.pop_clip();
                 result?;
             }
+
             if let (Some(value), Some((font, layout))) = (badge, badge_layout) {
                 let height = (layout.height + 6.0).min((b.height - 2.0 * s.padding).max(0.0));
                 let top = b.y + (b.height - height) * 0.5;
@@ -802,6 +900,7 @@ impl Framework {
                     &mut self.ui_renderer,
                 )?;
             }
+
             Ok(())
         })();
         self.ui_renderer.pop_clip();
@@ -836,6 +935,7 @@ impl Framework {
         result?;
         Ok(response.clicked)
     }
+
     #[allow(dead_code)]
     pub fn input<G: GraphicsDevice>(&mut self, gpu: &mut G, id: &str) -> anyhow::Result<String> {
         self.input_with_options(gpu, id, InputOptions::default())
@@ -843,6 +943,7 @@ impl Framework {
 
     pub fn clear_input(&mut self, id: &str) {
         self.inputs.remove(id);
+
         if self.focused.as_deref() == Some(id) {
             self.focused = None;
         }
@@ -893,6 +994,7 @@ impl Framework {
         Ok(field.text().to_owned())
     }
 }
+
 fn dispatch_input(
     field: &mut InputField,
     focused: &mut Option<String>,
@@ -902,11 +1004,13 @@ fn dispatch_input(
     mut pointer: Option<CursorPosition>,
 ) {
     field.set_focused(focused.as_deref() == Some(id));
+
     for event in events {
         match event {
             WindowEvent::MouseEntered { position } | WindowEvent::MouseMoved { position } => {
                 pointer = Some(*position)
             }
+
             WindowEvent::MouseLeft | WindowEvent::MouseCancelled => pointer = None,
             WindowEvent::MouseButtonPressed {
                 button: MouseButton::Left,
@@ -916,10 +1020,13 @@ fn dispatch_input(
                 } else if focused.as_deref() == Some(id) {
                     *focused = None;
                 }
+
                 field.set_focused(focused.as_deref() == Some(id));
             }
+
             _ => {}
         }
+
         if !matches!(event, WindowEvent::FocusChanged(true)) {
             field.handle(event);
         }
@@ -935,6 +1042,7 @@ fn content_clip(b: Bounds, style: Style) -> [f32; 4] {
         (b.height - 2.0 * p).max(0.0),
     ]
 }
+
 fn contains(b: Bounds, p: CursorPosition) -> bool {
     p.x >= b.x as f64
         && p.y >= b.y as f64

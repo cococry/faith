@@ -11,6 +11,7 @@ use crate::{
     },
     ui::{UIRenderer, renderer::QuadType},
 };
+
 use unicode_bidi::{BidiInfo, Level};
 use unicode_script::{Script, UnicodeScript};
 
@@ -297,6 +298,7 @@ impl TextRenderer {
                 None => {
                     crnt_script = Some(script);
                 }
+
                 Some(old_script) if script != old_script && !self.is_neutral_script(script) => {
                     if run_off < idx {
                         // If the script changed and is not a neutral
@@ -310,6 +312,7 @@ impl TextRenderer {
                             script: old_script,
                         });
                     }
+
                     run_off = idx;
                     crnt_script = Some(script);
                 }
@@ -344,6 +347,7 @@ impl TextRenderer {
         let bidi = BidiInfo::new(text, None);
 
         let mut runs = Vec::new();
+
         for paragraph in &bidi.paragraphs {
             let range = paragraph.range.clone();
 
@@ -353,6 +357,7 @@ impl TextRenderer {
                 if run.is_empty() {
                     continue;
                 }
+
                 let run_text = &text[run.clone()];
                 let lvl = bidi.levels[run.start];
 
@@ -369,6 +374,7 @@ impl TextRenderer {
                 if lvl.is_rtl() {
                     split.reverse();
                 }
+
                 runs.extend(split);
             }
         }
@@ -386,6 +392,7 @@ impl TextRenderer {
                 return start..end;
             }
         }
+
         0..0
     }
 
@@ -437,6 +444,7 @@ impl TextRenderer {
         }
 
         let size = self.font_manager.requested_size(original_font)?;
+
         for i in 0..self.fallback_fonts.len() + self.fallback_sources.len() {
             let fallback = if i < self.fallback_fonts.len() {
                 self.font_manager.at_size(self.fallback_fonts[i], size)?
@@ -447,6 +455,7 @@ impl TextRenderer {
                     0,
                 )?
             };
+
             if fallback == original_font
                 || !self
                     .font_manager
@@ -454,7 +463,9 @@ impl TextRenderer {
             {
                 continue;
             }
+
             let glyphs = self.shape_cached(text, bidi_lvl, script, fallback)?;
+
             if glyphs.iter().all(|g| g.glyph_idx != 0) {
                 self.fallback_choice_cache.push(key, Some(fallback));
                 return Ok(Some(fallback));
@@ -671,6 +682,7 @@ impl TextRenderer {
             if all_glyphs_support && glyph.glyph_idx == 0 {
                 all_glyphs_support = false
             }
+
             x_adv += glyph.x_adv;
             y_adv += glyph.y_adv;
         }
@@ -1012,6 +1024,7 @@ impl TextRenderer {
                 let font_scale = self.font_manager.scale(run.font_handle)?;
                 cursor_x += run.x_adv * font_scale;
             }
+
             baseline_y += line_height;
         }
 
@@ -1028,6 +1041,7 @@ impl TextRenderer {
         );
         let runs = self.build_shaped_runs_cached(font, text)?;
         let mut x = 0.0;
+
         for run in runs.iter() {
             for group in run.cluster_groups.iter() {
                 if byte >= group.byte_start_abs && byte <= group.byte_end_abs {
@@ -1040,16 +1054,20 @@ impl TextRenderer {
                     // A ligature is one shaping cluster containing multiple
                     // editable graphemes. Distribute its internal caret stops.
                     let fraction = before as f32 / count as f32;
+
                     let fraction = if run.bidi_lvl.is_rtl() {
                         1.0 - fraction
                     } else {
                         fraction
                     };
+
                     return Ok(x + group.x_advance * fraction);
                 }
+
                 x += group.x_advance;
             }
         }
+
         Ok(x)
     }
 
@@ -1097,6 +1115,7 @@ impl TextRenderer {
                 prev.byte_end = byte_end;
                 continue;
             }
+
             tokens.push(TokenRange {
                 byte_start,
                 byte_end,
@@ -1282,6 +1301,7 @@ impl TextRenderer {
                 if let Some(slice) = current.take() {
                     slices.push(slice);
                 }
+
                 continue;
             }
 
@@ -1290,6 +1310,7 @@ impl TextRenderer {
                     slice.glyph_range.end = group.glyph_range.end;
                     slice.x_advance += group.x_advance;
                 }
+
                 Some(_) => {
                     slices.push(current.take().unwrap());
 
@@ -1299,6 +1320,7 @@ impl TextRenderer {
                         x_advance: group.x_advance,
                     });
                 }
+
                 None => {
                     current = Some(RunSlice {
                         run_index,
@@ -1506,6 +1528,7 @@ impl TextRenderer {
         let (origin, clip_y, width) = viewport;
         let layout = self.layout_cached(content, font, TextLayoutOptions { max_width: width })?;
         let mut y = origin[1];
+
         for line in &layout.lines {
             if y >= clip_y[0] && y + layout.line_height <= clip_y[1] {
                 let mut x = if line.is_rtl {
@@ -1513,14 +1536,17 @@ impl TextRenderer {
                 } else {
                     origin[0]
                 };
+
                 for slice in &line.slices {
                     let run = &layout.paragraph_runs[slice.run_index];
                     self.render_run_slice(x, y + layout.ascender, run, slice, gpu, ui)?;
                     x += slice.x_advance;
                 }
             }
+
             y += layout.line_height;
         }
+
         Ok(())
     }
 
@@ -1548,6 +1574,7 @@ impl TextRenderer {
         ui: &mut UIRenderer,
     ) -> anyhow::Result<()> {
         let mut baseline = xy[1] + layout.ascender;
+
         for line in &layout.lines {
             let offset = if centered {
                 (width - line.width) * 0.5
@@ -1556,7 +1583,9 @@ impl TextRenderer {
             } else {
                 0.0
             };
+
             let mut x = xy[0] + offset;
+
             for slice in &line.slices {
                 self.render_run_slice(
                     x,
@@ -1568,8 +1597,10 @@ impl TextRenderer {
                 )?;
                 x += slice.x_advance;
             }
+
             baseline += layout.line_height;
         }
+
         Ok(())
     }
 
@@ -1605,9 +1636,11 @@ fn bordered_glyph(glyph: &Glyph) -> anyhow::Result<Vec<u8>> {
     );
     let stride = (w + 2) * 4;
     let mut pixels = vec![0; stride * (h + 2)];
+
     for row in 0..h {
         let start = (row + 1) * stride + 4;
         pixels[start..start + w * 4].copy_from_slice(&glyph.pixels[row * w * 4..(row + 1) * w * 4]);
+
         for (column, source) in [(0, row * w * 4), (w + 1, ((row + 1) * w - 1) * 4)] {
             let target = (row + 1) * stride + column * 4;
             pixels[target..target + 3].copy_from_slice(&glyph.pixels[source..source + 3]);
@@ -1616,6 +1649,7 @@ fn bordered_glyph(glyph: &Glyph) -> anyhow::Result<Vec<u8>> {
 
     for column in 0..w + 2 {
         let source_x = column.saturating_sub(1).min(w - 1);
+
         for (row, source_y) in [(0, 0), (h + 1, h - 1)] {
             let source = (source_y * w + source_x) * 4;
             let target = row * stride + column * 4;

@@ -3,6 +3,7 @@ use crate::{
     graphics::{FontHandle, GraphicsDevice},
     ui::{TextRenderer, UIRenderer, framework::Style, text::TextLayout, theme::Theme},
 };
+
 use std::sync::Arc;
 
 pub struct Checkbox {
@@ -48,6 +49,7 @@ impl Checkbox {
             style.background,
             (!self.checked).then_some(theme.border),
         )?;
+
         if self.checked {
             let metrics = text.measure("\u{eab2}", self.icons)?;
             text.color = style.color;
@@ -60,6 +62,7 @@ impl Checkbox {
                 ui,
             )?;
         }
+
         text.color = theme.text;
         text.render_layout(
             [b.x + 34.0, b.y + 6.0],

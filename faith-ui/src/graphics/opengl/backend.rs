@@ -12,6 +12,7 @@ use crate::graphics::{
     GraphicsDevice, PipelineDesc, PipelineHandle, TextureArrayWrite, TextureDesc, TextureFormat,
     TextureHandle, VertexStepMode,
 };
+
 use crate::platform::Platform;
 use crate::platform::window::WindowHandleInfo;
 
@@ -162,6 +163,7 @@ impl OpenGLRenderer {
         tracing::info!("Using OpenGL rendering backend");
 
         let handle = platform.native_handle();
+
         let native_display = match handle {
             WindowHandleInfo::X11 { display, .. } => display,
             WindowHandleInfo::Wayland { display, .. } => display,
@@ -304,6 +306,7 @@ impl OpenGLRenderer {
                 .viewport(0, 0, self.width as i32, self.height as i32);
             self.gl.clear(glow::COLOR_BUFFER_BIT);
         }
+
         Ok(())
     }
 
@@ -395,6 +398,7 @@ impl OpenGLRenderer {
 
             if !self.gl.get_program_link_status(program) {
                 let log = self.gl.get_program_info_log(program);
+
                 for &shader in shaders {
                     self.gl.detach_shader(program, shader);
                     self.gl.delete_shader(shader);
@@ -506,6 +510,7 @@ impl OpenGLRenderer {
             } else {
                 glow::TEXTURE_2D
             };
+
             self.gl.active_texture(glow::TEXTURE0 + slot);
             self.gl.bind_texture(ty, Some(tex.raw));
         }
@@ -609,6 +614,7 @@ impl OpenGLRenderer {
             pixels_rgba.len() == expected,
             "invalid RGBA texture upload size"
         );
+
         if expected == 0 {
             return Ok(());
         }
@@ -659,6 +665,7 @@ impl OpenGLRenderer {
             program,
             vert_layouts: desc.vert_bindings,
         });
+
         self.pipelines.push(pipeline);
 
         let pipeline = PipelineHandle((self.pipelines.len() - 1) as u32);
@@ -673,11 +680,13 @@ impl OpenGLRenderer {
                         uniform.f_data[1],
                     )?;
                 }
+
                 crate::graphics::device::UniformBindingType::Sampler2dArray => {
                     self.set_uniform_1i(pipeline, &uniform.name, uniform.binding)?;
                 }
             }
         }
+
         Ok(pipeline)
     }
 
@@ -723,6 +732,7 @@ impl OpenGLRenderer {
             if buffer.target != BufferTarget::Vertex {
                 anyhow::bail!("Trying to bind non-vertex buffer as vertex buffer");
             }
+
             buffer.raw
         };
 
@@ -784,6 +794,7 @@ impl OpenGLRenderer {
             self.gl.use_program(Some(pipeline.program));
             self.gl.bind_vertex_array(Some(self.global_vao));
         }
+
         self.current_pipeline = Some(handle);
         self.current_vbos = [None; MAX_VBOS];
         self.current_ibo = None;
@@ -797,6 +808,7 @@ impl OpenGLRenderer {
         }
 
         let buffer = self.get_buffer(handle)?;
+
         if buffer.target != BufferTarget::Index {
             anyhow::bail!("Trying to bind non-index buffer as index buffer");
         }
@@ -846,9 +858,11 @@ impl OpenGLRenderer {
             BufferTarget::Vertex => {
                 self.current_vbos = [None; MAX_VBOS];
             }
+
             BufferTarget::Index => {
                 self.current_ibo = None;
             }
+
             _ => {}
         }
 
@@ -869,6 +883,7 @@ impl OpenGLRenderer {
                 self.gl.use_program(Some(program));
                 self.current_pipeline = Some(pipeline);
             }
+
             if let Some(location) = self.gl.get_uniform_location(program, name) {
                 self.gl.uniform_2_f32(Some(&location), x, y);
             }
@@ -876,6 +891,7 @@ impl OpenGLRenderer {
 
         Ok(())
     }
+
     pub fn set_uniform_1i(
         &mut self,
         pipeline: PipelineHandle,

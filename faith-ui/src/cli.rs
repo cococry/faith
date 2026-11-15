@@ -48,6 +48,7 @@ impl Cli {
         {
             let certificate =
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.local/system/cert.pem");
+
             if certificate.is_file() {
                 self.ca_file = Some(certificate);
             }

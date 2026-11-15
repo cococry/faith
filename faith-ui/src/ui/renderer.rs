@@ -122,6 +122,7 @@ impl ShapeParts {
             count: 0,
         }
     }
+
     fn push(
         &mut self,
         rect: [f32; 4],
@@ -133,6 +134,7 @@ impl ShapeParts {
         if rect[2] <= 0.0 || rect[3] <= 0.0 {
             return;
         }
+
         let mut quad = QuadInstance::textured(rect, uv, color, params);
         quad.clip = clip;
         self.quads[self.count] = quad;
@@ -213,12 +215,17 @@ impl UIRenderer {
         radius: f32,
     ) -> anyhow::Result<BoxDecoration> {
         let count = if radius > 0.0 {
-            if border.is_some() { 15 } else { 7 }
+            if border.is_some() {
+                15
+            } else {
+                7
+            }
         } else if border.is_some() {
             5
         } else {
             1
         };
+
         anyhow::ensure!(
             self.atlas_instances.len() + self.dedicated_instances.len() + count
                 <= self.max_instances,
@@ -238,6 +245,7 @@ impl UIRenderer {
             clip: self.clip(),
         })
     }
+
     pub(crate) fn resolve_box(&mut self, decoration: BoxDecoration, rect: [f32; 4]) {
         self.resolved_boxes.push((decoration, rect));
     }
@@ -246,29 +254,34 @@ impl UIRenderer {
         if let Some(corner) = self.corners.get(&(radius, stroke)) {
             return Ok(*corner);
         }
+
         let size = radius
             .checked_add(2)
             .ok_or_else(|| anyhow::anyhow!("corner radius overflow"))?;
         let (layer, x, y, w, h) = self.allocate_image_rect(size, size, 0)?;
         let mut pixels = vec![255; size as usize * size as usize * 4];
+
         for py in 0..size {
             for px in 0..size {
-                let alpha = if px == 0 || py == 0 || px == size - 1 || py == size - 1 {
+                let alpha = if px == 0 || py == 0 {
                     0.0
                 } else {
-                    let dx = px as f32 - 0.5 - radius as f32;
-                    let dy = py as f32 - 0.5 - radius as f32;
+                    let dx = (px as f32 - 0.5 - radius as f32).min(0.0);
+                    let dy = (py as f32 - 0.5 - radius as f32).min(0.0);
                     let distance = (dx * dx + dy * dy).sqrt();
                     let outer = (radius as f32 - distance + 0.5).clamp(0.0, 1.0);
+
                     if stroke {
                         outer - (radius as f32 - 1.0 - distance + 0.5).clamp(0.0, 1.0)
                     } else {
                         outer
                     }
                 };
+
                 pixels[((py * size + px) * 4 + 3) as usize] = (alpha * 255.0).round() as u8;
             }
         }
+
         let corner = Corner {
             layer,
             uv: [
@@ -278,6 +291,7 @@ impl UIRenderer {
                 (y + size - 1) as f32 / h as f32,
             ],
         };
+
         self.corner_uploads
             .push((layer, [x, y, size, size], pixels));
         self.corners.insert((radius, stroke), corner);
@@ -294,12 +308,15 @@ impl UIRenderer {
         clip: [f32; 4],
     ) -> anyhow::Result<()> {
         let [x, y, w, h] = rect;
+
         if outside(rect, clip) || color.a <= 0.0 {
             return Ok(());
         }
+
         anyhow::ensure!(radius.is_finite(), "invalid corner radius");
         let r = radius.max(0.0).round().min((w.min(h) * 0.5).floor());
         let solid = [0.0, 0.0, 0.0, QuadType::Solid.as_f32()];
+
         if r <= 0.0 {
             if stroke {
                 for rect in [
@@ -313,16 +330,22 @@ impl UIRenderer {
             } else {
                 parts.push(rect, color, [0.0; 4], solid, clip);
             }
+
             return Ok(());
         }
-        if w * h <= SDF_AREA_LIMIT || r > CORNER_CACHE_MAX_RADIUS {
+
+        if use_distance_field(rect, r) {
             parts.push(
                 rect,
                 color,
                 [0.0; 4],
                 [
                     r,
-                    if stroke { 1.0 } else { 0.0 },
+                    if stroke {
+                        1.0
+                    } else {
+                        0.0
+                    },
                     0.0,
                     QuadType::Rounded.as_f32(),
                 ],
@@ -330,7 +353,9 @@ impl UIRenderer {
             );
             return Ok(());
         }
+
         let corner = self.corner(r as u32, stroke)?;
+
         if stroke {
             for rect in [
                 [x + r, y, w - 2.0 * r, 1.0],
@@ -349,7 +374,9 @@ impl UIRenderer {
                 parts.push(rect, color, [0.0; 4], solid, clip);
             }
         }
+
         let [u0, v0, u1, v1] = corner.uv;
+
         for (rect, uv) in [
             ([x, y, r, r], [u0, v0, u1, v1]),
             ([x + w - r, y, r, r], [u1, v0, u0, v1]),
@@ -364,6 +391,7 @@ impl UIRenderer {
                 clip,
             );
         }
+
         Ok(())
     }
 
@@ -376,6 +404,7 @@ impl UIRenderer {
         clip: [f32; 4],
     ) -> anyhow::Result<ShapeParts> {
         let mut parts = ShapeParts::new();
+
         if let (Some(fill), Some(border)) = (fill, border)
             && fill.a == 1.0
             && border.a == 1.0
@@ -398,10 +427,12 @@ impl UIRenderer {
             if let Some(fill) = fill {
                 self.shape(&mut parts, rect, radius, fill, false, clip)?;
             }
+
             if let Some(border) = border {
                 self.shape(&mut parts, rect, radius, border, true, clip)?;
             }
         }
+
         Ok(parts)
     }
 
@@ -413,21 +444,26 @@ impl UIRenderer {
         border: Option<Color>,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(radius.is_finite(), "invalid corner radius");
+
         if border.is_none() {
             let Some(color) = fill else {
                 return Ok(());
             };
+
             if color.a <= 0.0 || outside(rect, self.clip()) {
                 return Ok(());
             }
+
             let r = radius
                 .max(0.0)
                 .round()
                 .min((rect[2].min(rect[3]) * 0.5).floor());
+
             if r <= 0.0 {
                 return self.quad(rect, color);
             }
-            if rect[2] * rect[3] <= SDF_AREA_LIMIT || r > CORNER_CACHE_MAX_RADIUS {
+
+            if use_distance_field(rect, r) {
                 return self.raw_quad_atlas(
                     rect,
                     [0.0; 4],
@@ -436,6 +472,7 @@ impl UIRenderer {
                 );
             }
         }
+
         let parts = self.box_parts(rect, radius, fill, border, self.clip())?;
         anyhow::ensure!(
             self.atlas_instances.len() + self.dedicated_instances.len() + parts.count
@@ -683,9 +720,11 @@ impl UIRenderer {
             self.atlas_instances[decoration.start..decoration.start + parts.count]
                 .copy_from_slice(&parts.quads[..parts.count]);
         }
+
         while let Some((layer, rect, pixels)) = self.corner_uploads.pop() {
             self.upload_pixels_to_atlas(rect, layer, &pixels, gpu)?;
         }
+
         if self.atlas_instances.is_empty() && self.dedicated_instances.is_empty() {
             return Ok(());
         }
@@ -694,6 +733,7 @@ impl UIRenderer {
         // be rendered, do not copy self.atlas_instances
         // to self.instances to render.
         // Instead, render with self.atlas_instances directly.
+
         let (instances_to_upload, atlas_start) = if self.dedicated_instances.is_empty() {
             (self.atlas_instances.as_slice(), 0)
         } else {
@@ -777,12 +817,15 @@ impl UIRenderer {
     ) -> anyhow::Result<()> {
         let mut instance = QuadInstance::textured(rect, uv, color, params);
         instance.clip = self.clip();
+
         if outside(rect, instance.clip) {
             return Ok(());
         }
+
         if self.atlas_instances.len() + self.dedicated_instances.len() >= self.max_instances {
             anyhow::bail!("UI instance buffer overflow");
         }
+
         self.atlas_instances.push(instance);
 
         Ok(())
@@ -804,12 +847,15 @@ impl UIRenderer {
     ) -> anyhow::Result<()> {
         let mut instance = QuadInstance::textured(rect, uv, color, params);
         instance.clip = self.clip();
+
         if outside(rect, instance.clip) {
             return Ok(());
         }
+
         if self.atlas_instances.len() + self.dedicated_instances.len() >= self.max_instances {
             anyhow::bail!("UI instance buffer overflow");
         }
+
         let start = self.dedicated_instances.len() as u32;
         self.dedicated_instances.push(instance);
 
@@ -820,6 +866,7 @@ impl UIRenderer {
                 // to the last draw.
                 draw.count += 1;
             }
+
             _ => {
                 // If the last draw's and this quad's
                 // textures don't match, push a new
@@ -884,6 +931,7 @@ impl UIRenderer {
 
                 Ok(())
             }
+
             ImageStorage::Atlas {
                 layer,
                 uv_min,
@@ -1079,6 +1127,7 @@ fn intersect_clip(parent: [f32; 4], rect: [f32; 4]) -> [f32; 4] {
         parent[3].min(rect[1] + rect[3].max(0.0)).max(top),
     ]
 }
+
 fn outside(rect: [f32; 4], clip: [f32; 4]) -> bool {
     rect[2] <= 0.0
         || rect[3] <= 0.0
@@ -1088,4 +1137,10 @@ fn outside(rect: [f32; 4], clip: [f32; 4]) -> bool {
         || rect[1] >= clip[3]
         || rect[0] + rect[2] <= clip[0]
         || rect[1] + rect[3] <= clip[1]
+}
+
+fn use_distance_field(rect: [f32; 4], radius: f32) -> bool {
+    rect[2] * rect[3] <= SDF_AREA_LIMIT
+        || radius > CORNER_CACHE_MAX_RADIUS
+        || rect.iter().any(|value| value.fract() != 0.0)
 }

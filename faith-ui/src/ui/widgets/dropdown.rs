@@ -35,11 +35,13 @@ pub fn popup_bounds(header: Bounds, count: usize, window: [f32; 2]) -> Bounds {
     let height = count as f32 * ROW_HEIGHT + 8.0;
     let x = header.x.clamp(8.0, (window[0] - width - 8.0).max(8.0));
     let below = header.y + header.height + 4.0;
+
     let y = if below + height <= window[1] - 8.0 {
         below
     } else {
         (header.y - height - 4.0).max(8.0)
     };
+
     Bounds {
         x,
         y,
@@ -77,36 +79,46 @@ impl State {
     ) -> Response {
         self.rows.resize_with(count, button::State::default);
         let mut selected = None;
+
         for event in events {
             match event {
                 WindowEvent::MouseEntered { position } | WindowEvent::MouseMoved { position } => {
                     pointer = Some(*position)
                 }
+
                 WindowEvent::MouseLeft => pointer = None,
                 WindowEvent::MouseCancelled | WindowEvent::FocusChanged(false) => {
                     self.open = false;
                     self.header = button::State::default();
+
                     for row in &mut self.rows {
                         *row = button::State::default();
                     }
                 }
+
                 WindowEvent::MouseButtonPressed {
                     button: MouseButton::Left,
                 } if self.open && !contains(header, pointer) && !contains(popup, pointer) => {
                     self.open = false
                 }
+
                 _ => {}
             }
+
             let response = self
                 .header
                 .update(header, pointer, std::slice::from_ref(event));
+
             if response.clicked {
                 self.open = !self.open;
+
                 for row in &mut self.rows {
                     *row = button::State::default();
                 }
+
                 continue;
             }
+
             if self.open {
                 for (index, row) in self.rows.iter_mut().enumerate() {
                     if row
@@ -123,6 +135,7 @@ impl State {
                 }
             }
         }
+
         let response = self.header.update(header, pointer, &[]);
         Response {
             selected,
@@ -167,6 +180,7 @@ impl Popup {
         let result = (|| -> anyhow::Result<()> {
             for (index, value) in self.options.iter().enumerate() {
                 let row = row_bounds(b, index);
+
                 if self.hovered == Some(index) || self.selected == index {
                     ui.rounded_box(
                         [row.x, row.y, row.width, row.height],
@@ -175,6 +189,7 @@ impl Popup {
                         None,
                     )?;
                 }
+
                 let metrics = text.measure(value, self.font)?;
                 text.color = theme.text;
                 ui.push_clip([row.x, row.y, (row.width - 36.0).max(0.0), row.height]);
@@ -188,6 +203,7 @@ impl Popup {
                 );
                 ui.pop_clip();
                 result?;
+
                 if index == self.selected {
                     let metrics = text.measure(CHECK, self.icons)?;
                     text.color = theme.selected_icon;
@@ -201,6 +217,7 @@ impl Popup {
                     )?;
                 }
             }
+
             Ok(())
         })();
         ui.pop_clip();

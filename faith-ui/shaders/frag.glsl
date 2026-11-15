@@ -29,9 +29,11 @@ void main() {
         float distance = length(max(q, vec2(0.0)))
             + min(max(q.x, q.y), 0.0) - v_params.x;
         float coverage = clamp(0.5 - distance, 0.0, 1.0);
+
         if (v_params.y > 0.0) {
             coverage -= clamp(0.5 - distance - v_params.y, 0.0, 1.0);
         }
+
         out_color = vec4(v_color.rgb, v_color.a * coverage);
         return;
     }

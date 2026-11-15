@@ -22,6 +22,7 @@ use x11rb::protocol::xproto::ConnectionExt as _;
 use x11rb::protocol::xproto::{
     AtomEnum, CreateWindowAux, EventMask, PixmapEnum, PropMode, WindowClass,
 };
+
 use x11rb::wrapper::ConnectionExt as _;
 use x11rb::xcb_ffi::XCBConnection;
 
@@ -112,6 +113,7 @@ impl X11Platform {
             XSetEventQueueOwner(xdisplay.as_ptr(), XCBOwnsEventQueue);
 
             let conn_ptr = XGetXCBConnection(xdisplay.as_ptr());
+
             if conn_ptr.is_null() {
                 anyhow::bail!("Failed to get XCB connection pointer from X display.");
             }
@@ -303,6 +305,7 @@ impl X11Platform {
                     },
                 });
             }
+
             Event::LeaveNotify(_) => self.pending_input.push(WindowEvent::MouseLeft),
             Event::MotionNotify(e) => {
                 self.pending_input.push(WindowEvent::MouseMoved {
@@ -312,12 +315,15 @@ impl X11Platform {
                     },
                 });
             }
+
             Event::ButtonPress(e) => {
                 self.pending_input.push(x11_button_event(e.detail, true));
             }
+
             Event::ButtonRelease(e) if !(4..=7).contains(&e.detail) => {
                 self.pending_input.push(x11_button_event(e.detail, false));
             }
+
             Event::KeyPress(e) => {
                 self.pending_input
                     .extend(self.keyboard.press(e.detail as u32));
@@ -341,12 +347,14 @@ impl X11Platform {
                     self.keyboard_device,
                     xkb::KEYMAP_COMPILE_NO_FLAGS,
                 );
+
                 if !keymap.get_raw_ptr().is_null() {
                     let state = xkb::x11::state_new_from_device(
                         &keymap,
                         &self.xcb_conn,
                         self.keyboard_device,
                     );
+
                     if !state.get_raw_ptr().is_null() {
                         self.keyboard = Keyboard::new(&self.context, keymap, state);
                     }
@@ -458,6 +466,7 @@ impl X11Platform {
             Err(nix::errno::Errno::EINTR) => return Ok(Vec::new()),
             Err(e) => return Err(e.into()),
         }
+
         for fd in &poll_fds {
             anyhow::ensure!(
                 !fd.revents()
@@ -601,11 +610,13 @@ fn x11_button_event(detail: u8, pressed: bool) -> WindowEvent {
         7 => Some((1.0, 0.0)),
         _ => None,
     };
+
     if let Some((x, y)) = delta {
         return WindowEvent::MouseScrolled {
             delta: ScrollDelta::Lines { x, y },
         };
     }
+
     let button = match detail {
         1 => MouseButton::Left,
         2 => MouseButton::Middle,
@@ -614,6 +625,7 @@ fn x11_button_event(detail: u8, pressed: bool) -> WindowEvent {
         9 => MouseButton::Forward,
         other => MouseButton::Other(other.into()),
     };
+
     if pressed {
         WindowEvent::MouseButtonPressed { button }
     } else {

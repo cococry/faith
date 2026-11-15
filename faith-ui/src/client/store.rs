@@ -38,6 +38,7 @@ fn members(bytes: Vec<u8>) -> rusqlite::Result<Vec<Id>> {
     {
         return Err(rusqlite::Error::InvalidQuery);
     }
+
     Ok(bytes.as_chunks::<16>().0.iter().map(|b| Id(*b)).collect())
 }
 
@@ -45,6 +46,7 @@ fn members(bytes: Vec<u8>) -> rusqlite::Result<Vec<Id>> {
 fn pack(ids: &[Id]) -> Vec<u8> {
     ids.iter().flat_map(|id| id.0).collect()
 }
+
 #[allow(dead_code)]
 fn conversation(db: &Connection, group: Id) -> rusqlite::Result<Option<Conversation>> {
     db.query_row(
@@ -72,6 +74,7 @@ impl Store {
                 .mode(0o700)
                 .create(profile)?;
         }
+
         let metadata = fs::symlink_metadata(profile)?;
         anyhow::ensure!(
             metadata.is_dir()
@@ -123,9 +126,11 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("local storage lock poisoned"))
     }
+
     pub fn conversation(&self, group: Id) -> anyhow::Result<Option<Conversation>> {
         Ok(conversation(&*self.db()?, group)?)
     }
+
     pub fn conversations(&self) -> anyhow::Result<Vec<Conversation>> {
         let db = self.db()?;
         let mut stmt = db.prepare(
@@ -142,6 +147,7 @@ impl Store {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
+
     pub fn selected(&self) -> anyhow::Result<Option<Id>> {
         let db = self.db()?;
         let bytes: Option<Vec<u8>> = db
@@ -151,10 +157,12 @@ impl Store {
             .optional()?;
         Ok(bytes.map(id).transpose()?)
     }
+
     pub fn select(&self, group: Id) -> anyhow::Result<()> {
         self.db()?.execute("INSERT INTO settings(key,value) VALUES('selected',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[group.0.as_slice()])?;
         Ok(())
     }
+
     pub fn history(&self, group: Id, offset: usize) -> anyhow::Result<Vec<String>> {
         let db = self.db()?;
         let mut stmt=db.prepare("SELECT sender,body FROM messages WHERE conversation=? ORDER BY rowid DESC LIMIT 100 OFFSET ?")?;
@@ -173,6 +181,7 @@ impl Store {
         messages.reverse();
         Ok(messages)
     }
+
     pub fn pending(&self) -> anyhow::Result<Option<(GroupPacket, Vec<Id>)>> {
         let db = self.db()?;
         let row: Option<(Vec<u8>, Vec<u8>)> = db
@@ -183,6 +192,7 @@ impl Store {
         row.map(|(packet, targets)| Ok((GroupPacket::decode(&packet)?, members_targets(targets)?)))
             .transpose()
     }
+
     pub fn enqueue(&self, packet: &GroupPacket, targets: &[Id]) -> anyhow::Result<()> {
         let mut db = self.db()?;
         let tx = db.transaction()?;
@@ -198,6 +208,7 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+
     pub fn discard_pending(&self) -> anyhow::Result<()> {
         self.db()?.execute("DELETE FROM outbox", [])?;
         Ok(())
@@ -217,14 +228,17 @@ impl Store {
                 |r| r.get(0),
             )
             .optional()?;
+
         if previous.is_some_and(|seq| event.sequence <= seq) {
             return Ok(());
         }
+
         if event.kind == faith_client::GROUP_PACKET_EVENT {
             anyhow::ensure!(event.data.len() >= 16, "truncated group event");
             let sender = Id(event.data[..16].try_into()?);
             let packet = GroupPacket::decode(&event.data[16..])?;
             let old = conversation(&tx, packet.conversation)?;
+
             let accepted = match packet.kind {
                 GroupKind::Message => old.as_ref().is_some_and(|old| {
                     old.active
@@ -241,6 +255,7 @@ impl Store {
                         }
                 }
             };
+
             if accepted
                 && (packet.kind != GroupKind::Message || std::str::from_utf8(&packet.text).is_ok())
             {
@@ -252,6 +267,7 @@ impl Store {
                     tx.execute("INSERT INTO conversations(id,revision,members,active) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,members=excluded.members,active=excluded.active",
                         params![packet.conversation.0.as_slice(),packet.revision,pack(&packet.members),packet.members.contains(&event.auth)])?;
                 }
+
                 if sender == event.auth {
                     tx.execute(
                         "DELETE FROM outbox WHERE id=?",
@@ -261,11 +277,13 @@ impl Store {
             }
             // Rejected membership/forged sender is durably handled, never applied.
         }
+
         tx.execute("INSERT INTO cursors(device,seq) VALUES(?,?) ON CONFLICT(device) DO UPDATE SET seq=excluded.seq",params![event.device.0.as_slice(),event.sequence])?;
         tx.commit()?;
         Ok(())
     }
 }
+
 #[allow(dead_code)]
 fn members_targets(bytes: Vec<u8>) -> anyhow::Result<Vec<Id>> {
     anyhow::ensure!(
@@ -274,6 +292,7 @@ fn members_targets(bytes: Vec<u8>) -> anyhow::Result<Vec<Id>> {
     );
     Ok(bytes.as_chunks::<16>().0.iter().map(|b| Id(*b)).collect())
 }
+
 impl EventStore for Store {
     fn store(&self, event: StoredEvent<'_>) -> faith_client::Result<()> {
         self.apply(event).map_err(|error| {
