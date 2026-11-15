@@ -13,3 +13,5 @@
 **/ident
 **/*.pem
 faith-db/secrets
+
+**/dist

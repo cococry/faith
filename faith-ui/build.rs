@@ -1,5 +1,6 @@
 use std::{env, fs, path::PathBuf};
 
+#[cfg(feature = "shaderc-compiler")]
 fn main() {
     let shaders = [
         ("shaders/vert.glsl", "vert.spv", shaderc::ShaderKind::Vertex),
@@ -51,5 +52,49 @@ fn main() {
                 out_path.display()
             )
         });
+    }
+}
+
+#[cfg(not(feature = "shaderc-compiler"))]
+fn main() {
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    fs::create_dir_all(&out_dir).expect("create shader output directory");
+
+    for (source, output, stage) in [
+        ("shaders/vert.glsl", "vert.spv", "vert"),
+        ("shaders/frag.glsl", "frag.spv", "frag"),
+        ("shaders/frag_dedicated.glsl", "frag_dedicated.spv", "frag"),
+    ] {
+        println!("cargo:rerun-if-changed={source}");
+        let destination = out_dir.join(output);
+        let intermediate = out_dir.join(format!("{output}.unoptimized"));
+        let mut compiler = std::process::Command::new("glslangValidator");
+        compiler.args(["-V", "--target-env", "vulkan1.0", "-S", stage]);
+
+        if cfg!(debug_assertions) {
+            compiler.arg("-g");
+        }
+
+        let status = compiler
+            .arg(source)
+            .arg("-o")
+            .arg(&intermediate)
+            .status()
+            .expect("glslangValidator is required when shaderc-compiler is disabled");
+        assert!(status.success(), "failed to compile shader {source}");
+
+        if cfg!(debug_assertions) {
+            fs::rename(&intermediate, &destination).expect("move compiled shader");
+        } else {
+            let status = std::process::Command::new("spirv-opt")
+                .arg("-O")
+                .arg(&intermediate)
+                .arg("-o")
+                .arg(&destination)
+                .status()
+                .expect("spirv-opt is required for optimized shader builds");
+            assert!(status.success(), "failed to optimize shader {source}");
+            fs::remove_file(&intermediate).expect("remove unoptimized shader");
+        }
     }
 }

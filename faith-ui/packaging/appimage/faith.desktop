@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Faith Messenger
+Comment=Secure conversations, native and fast
+Exec=faith
+Icon=faith
+Terminal=false
+Categories=Network;InstantMessaging;
+StartupWMClass=faith

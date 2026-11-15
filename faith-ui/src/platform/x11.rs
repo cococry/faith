@@ -199,6 +199,14 @@ impl X11Platform {
             window_config.title.as_bytes(),
         )?;
 
+        conn.change_property8(
+            PropMode::REPLACE,
+            win_id,
+            AtomEnum::WM_CLASS,
+            AtomEnum::STRING,
+            b"faith\0Faith\0",
+        )?;
+
         conn.map_window(win_id)?;
         conn.flush()?;
 

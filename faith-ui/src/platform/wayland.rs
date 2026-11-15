@@ -147,6 +147,7 @@ impl WaylandState {
         let xdg_surface = wm_base.get_xdg_surface(base_surface, qh, WaylandHandler);
         let toplevel = xdg_surface.get_toplevel(qh, WaylandHandler);
         toplevel.set_title(self.title.clone());
+        toplevel.set_app_id("faith".into());
 
         base_surface.commit();
 
