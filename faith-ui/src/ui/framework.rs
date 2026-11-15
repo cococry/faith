@@ -28,6 +28,8 @@ use std::{
 #[derive(Clone, Copy, Debug)]
 pub struct Style {
     pub font_size: u32,
+    /// Independent icon size for icon-and-label buttons; defaults to font_size.
+    pub icon_font_size: Option<u32>,
     pub color: Color,
     pub background: Option<Color>,
     /// Button background while hovered; defaults to a 5% darker background.
@@ -39,6 +41,9 @@ pub struct Style {
     /// Centers an icon button's icon and label together within its bounds.
     pub center_button_content: bool,
     pub margin: f32,
+    /// Extra clickable space outside the visual bounds, in addition to margin.
+    /// Use half the gap between adjacent rows so their hit areas meet.
+    pub hit_padding: f32,
     pub radius: f32,
 }
 
@@ -46,6 +51,7 @@ impl Default for Style {
     fn default() -> Self {
         Self {
             font_size: 16,
+            icon_font_size: None,
             color: Theme::default().text,
             background: None,
             hover_color: None,
@@ -54,6 +60,7 @@ impl Default for Style {
             padding: 0.0,
             center_button_content: false,
             margin: 0.0,
+            hit_padding: 0.0,
             radius: 0.0,
         }
     }
@@ -157,6 +164,12 @@ impl Layout {
 }
 
 pub struct Framework {
+    zoom: f32,
+    zoom_remainder: f64,
+    zoom_indicator: super::scale::Indicator,
+    zoom_indicator_pending: bool,
+    scale: f32,
+    pointer_factor: f32,
     theme: Theme,
     theme_transition: Option<(Theme, Theme, Instant)>,
     theme_animating: bool,
@@ -203,6 +216,12 @@ impl Framework {
     ) -> anyhow::Result<Self> {
         let (w, h) = platform.size();
         let mut framework = Self {
+            zoom: 1.0,
+            zoom_remainder: 0.0,
+            zoom_indicator: super::scale::Indicator::default(),
+            zoom_indicator_pending: false,
+            scale: platform.scale_factor(),
+            pointer_factor: platform.pointer_scale() / platform.scale_factor(),
             theme: Theme::default(),
             theme_transition: None,
             theme_animating: false,
@@ -262,7 +281,17 @@ impl Framework {
     }
 
     fn hit_bounds(&self, bounds: Bounds) -> Bounds {
-        scroll::intersect(bounds, self.clip_bounds())
+        let style = self.style();
+        let padding = style.margin.max(0.0) + style.hit_padding.max(0.0);
+        scroll::intersect(
+            Bounds {
+                x: bounds.x - padding,
+                y: bounds.y - padding,
+                width: bounds.width + 2.0 * padding,
+                height: bounds.height + 2.0 * padding,
+            },
+            self.clip_bounds(),
+        )
     }
 
     fn visible(&self, bounds: Bounds) -> bool {
@@ -361,13 +390,59 @@ impl Framework {
             transition.seen = false;
         }
 
+        let previous_scale = self.scale;
+        for event in events {
+            if let WindowEvent::Zoom(steps) = event {
+                self.zoom = super::scale::zoom(self.zoom, *steps, &mut self.zoom_remainder);
+                if steps.is_finite() && *steps != 0.0 {
+                    self.zoom_indicator_pending = true;
+                }
+            }
+        }
+        self.scale = platform.scale_factor() * self.zoom;
+        let pointer_factor = platform.pointer_scale() / self.scale;
+        if let Some(pointer) = &mut self.pointer {
+            pointer.x *= (pointer_factor / self.pointer_factor) as f64;
+            pointer.y *= (pointer_factor / self.pointer_factor) as f64;
+        }
+        self.pointer_factor = pointer_factor;
+        if previous_scale != self.scale {
+            self.scrolls.invalidate_layout();
+        }
+        let events: Vec<_> = events
+            .iter()
+            .filter_map(|event| {
+                let mut event = event.clone();
+                match &mut event {
+                    WindowEvent::Zoom(_) => return None,
+                    WindowEvent::MouseEntered { position }
+                    | WindowEvent::MouseMoved { position } => {
+                        let factor = (platform.pointer_scale() / self.scale) as f64;
+                        position.x *= factor;
+                        position.y *= factor;
+                    }
+                    WindowEvent::MouseScrolled {
+                        delta: crate::platform::mouse::ScrollDelta::Pixels { x, y },
+                    } => {
+                        let factor = (platform.pointer_scale() / self.scale) as f64;
+                        *x *= factor;
+                        *y *= factor;
+                    }
+                    _ => {}
+                }
+                Some(event)
+            })
+            .collect();
+        let events = events.as_slice();
+        self.text_renderer.set_scale(self.scale);
         let (w, h) = platform.size();
+        let (w, h) = (w as f32 / self.scale, h as f32 / self.scale);
         self.ui_renderer.begin(w, h);
         self.layouts = vec![Layout::new(Bounds {
             x: 0.0,
             y: 0.0,
-            width: w as f32,
-            height: h as f32,
+            width: w,
+            height: h,
         })];
         self.divs.clear();
         self.styles = vec![self.base_style()];
@@ -443,6 +518,7 @@ impl Framework {
         });
 
         self.has_rendered = true;
+        self.render_zoom_indicator(gpu)?;
         self.transitions.retain(|_, transition| transition.seen);
         self.scheduler.schedule(self.deadline);
         self.ui_renderer.end(gpu)
@@ -790,8 +866,21 @@ impl Framework {
     }
 
     pub fn text_size(&mut self, value: &str, font: Option<Font>) -> anyhow::Result<(f32, f32)> {
+        self.wrapped_text_size(value, font, f32::MAX)
+    }
+
+    pub fn wrapped_text_size(
+        &mut self,
+        value: &str,
+        font: Option<Font>,
+        max_width: f32,
+    ) -> anyhow::Result<(f32, f32)> {
         let font = self.font(font.unwrap_or_default())?;
-        let layout = self.text_renderer.measure(value, font)?;
+        let layout = self.text_renderer.measure_with_options(
+            value,
+            font,
+            TextLayoutOptions { max_width },
+        )?;
         Ok((layout.width, layout.height))
     }
 
@@ -1050,6 +1139,33 @@ impl Framework {
         Ok(choice)
     }
 
+    fn render_zoom_indicator<G: GraphicsDevice>(&mut self, gpu: &mut G) -> anyhow::Result<()> {
+        // Start the hold after layout and glyph uploads so a costly zoom frame
+        // does not consume the indicator's visible time before presentation.
+        let now = Instant::now();
+        if std::mem::take(&mut self.zoom_indicator_pending) {
+            self.zoom_indicator.show(now);
+        }
+        let Some((opacity, next)) = self.zoom_indicator.sample(now, self.animations, self.curve)
+        else {
+            return Ok(());
+        };
+        self.animate_until(next);
+
+        let label = format!("{:.0}%", self.zoom * 100.0);
+        let font = self.font_at(Font::Regular, 12)?;
+        let metrics = self.text_renderer.measure(&label, font)?;
+        let window = self.layouts[0].bounds;
+        let x = (window.width - metrics.width - 28.0).max(0.0);
+        let y = (window.height - metrics.height - 24.0).max(0.0);
+        self.text_renderer.color = Color {
+            a: self.theme.muted.a * opacity,
+            ..self.theme.muted
+        };
+        self.text_renderer
+            .render(x, y, &label, font, gpu, &mut self.ui_renderer)
+    }
+
     fn render_scrollbars(&mut self) -> anyhow::Result<()> {
         for (view, clip) in self.scrollbars.drain(..) {
             self.ui_renderer
@@ -1238,8 +1354,8 @@ impl Framework {
         badge: Option<&str>,
     ) -> anyhow::Result<bool> {
         let font = self.font(Font::Regular)?;
-        let icons = self.font(Font::Icons)?;
         let s = self.style();
+        let icons = self.font_at(Font::Icons, s.icon_font_size.unwrap_or(s.font_size).max(1))?;
         let im = self.text_renderer.measure(icon, icons)?;
         let lm = self.text_renderer.measure(label, font)?;
 
@@ -1289,7 +1405,14 @@ impl Framework {
         let s = button::appearance(s, response.hovered, response.pressed);
         let s = self.animate_style(key, s);
         self.paint_style(b, s)?;
-        self.ui_renderer.push_clip(content_clip(b, s));
+        // Keep horizontal padding while allowing the independently sized icon
+        // and centered label to use the row's full height.
+        self.ui_renderer.push_clip([
+            b.x + s.padding,
+            b.y,
+            (b.width - 2.0 * s.padding).max(0.0),
+            b.height,
+        ]);
         self.text_renderer.color = s.color;
         let result = (|| -> anyhow::Result<()> {
             let x = if label.is_empty() {

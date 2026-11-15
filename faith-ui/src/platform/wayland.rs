@@ -38,6 +38,8 @@ pub struct WaylandState {
     entered_outputs: Vec<wl_output::WlOutput>,
     width: u32,
     height: u32,
+    scale: i32,
+    output_scales: Vec<(wl_output::WlOutput, i32)>,
     title: String,
 
     surface: Option<wl_surface::WlSurface>,
@@ -114,6 +116,39 @@ impl WaylandWaker {
 }
 
 impl WaylandState {
+    fn update_scale(&mut self) {
+        let scale = self
+            .output_scales
+            .iter()
+            .filter(|(output, _)| self.entered_outputs.contains(output))
+            .map(|(_, scale)| *scale)
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        if scale != self.scale {
+            self.scale = scale;
+            if let Some(surface) = &self.surface {
+                surface.set_buffer_scale(scale);
+            }
+            self.resize_buffer();
+        }
+    }
+
+    fn resize_buffer(&mut self) {
+        let width = self.width * self.scale as u32;
+        let height = self.height * self.scale as u32;
+        if let Some(window) = &mut self.egl_win {
+            window.resize(width as i32, height as i32, 0, 0);
+        }
+        self.pending_events
+            .push(WindowEvent::Resized { width, height });
+    }
+
+    fn flush_scroll(&mut self) {
+        let control = self.keyboard.as_ref().is_some_and(Keyboard::control);
+        self.pointer_scroll.flush(&mut self.pending_events, control);
+    }
+
     fn update_frame_timing(&self) {
         if let Some(refresh) = self
             .outputs
@@ -247,6 +282,7 @@ impl Dispatch<wl_registry::WlRegistry, WaylandHandler> for WaylandState {
             state.outputs.retain(|(id, output, _)| {
                 if *id == name {
                     state.entered_outputs.retain(|entered| entered != output);
+                    state.output_scales.retain(|(proxy, _)| proxy != output);
 
                     if output.version() >= 3 {
                         output.release();
@@ -258,6 +294,7 @@ impl Dispatch<wl_registry::WlRegistry, WaylandHandler> for WaylandState {
                 }
             });
             state.update_frame_timing();
+            state.update_scale();
         } else if let wl_registry::Event::GlobalRemove { name } = event
             && state.seat_name == Some(name)
         {
@@ -460,6 +497,11 @@ impl Dispatch<wl_output::WlOutput, WaylandHandler> for WaylandState {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        if let wl_output::Event::Scale { factor } = event {
+            state.output_scales.retain(|(proxy, _)| proxy != output);
+            state.output_scales.push((output.clone(), factor));
+            state.update_scale();
+        }
         if let wl_output::Event::Mode { flags, refresh, .. } = event
             && let wayland_client::WEnum::Value(flags) = flags
             && flags.contains(wl_output::Mode::Current)
@@ -502,6 +544,7 @@ impl Dispatch<wl_surface::WlSurface, WaylandHandler> for WaylandState {
         }
 
         state.update_frame_timing();
+        state.update_scale();
     }
 }
 
@@ -524,22 +567,16 @@ impl Dispatch<xdg_surface::XdgSurface, WaylandHandler> for WaylandState {
                 // interop on Wayland.
                 let egl_win = wayland_egl::WlEglSurface::new(
                     surface.id(),
-                    state.width as i32,
-                    state.height as i32,
+                    state.width as i32 * state.scale,
+                    state.height as i32 * state.scale,
                 )
                 .expect("failed to create wl_egl_window");
 
                 state.egl_win = Some(egl_win);
             }
 
-            if let Some((width, height)) = state.pending_resize.take() {
-                if let Some(egl_win) = state.egl_win.as_mut() {
-                    egl_win.resize(width as i32, height as i32, 0, 0);
-                }
-
-                state
-                    .pending_events
-                    .push(WindowEvent::Resized { width, height });
+            if state.pending_resize.take().is_some() {
+                state.resize_buffer();
             }
 
             state.configured = true;
@@ -590,6 +627,8 @@ impl WaylandPlatform {
             frame_timing: super::window::FrameTiming::default(),
             outputs: Vec::new(),
             entered_outputs: Vec::new(),
+            scale: 1,
+            output_scales: Vec::new(),
             width: config.width,
             height: config.height,
             title: config.title.clone(),
@@ -796,8 +835,15 @@ impl WaylandPlatform {
     }
 
     /// Returns the current Wayland window size.
+    pub fn scale_factor(&self) -> f32 {
+        self.state.scale as f32
+    }
+
     pub fn size(&self) -> (u32, u32) {
-        (self.state.width, self.state.height)
+        (
+            self.state.width * self.state.scale as u32,
+            self.state.height * self.state.scale as u32,
+        )
     }
 
     /// Returns the native Wayland window handle
@@ -859,7 +905,7 @@ struct PointerScroll {
 }
 
 impl PointerScroll {
-    fn flush(&mut self, events: &mut Vec<WindowEvent>) {
+    fn flush(&mut self, events: &mut Vec<WindowEvent>, control: bool) {
         for axis in 0..2 {
             let delta = if let Some(value) = self.lines[axis] {
                 ScrollDelta::Lines {
@@ -895,7 +941,17 @@ impl PointerScroll {
                 }
             };
 
-            events.push(WindowEvent::MouseScrolled { delta });
+            if control {
+                let steps = match delta {
+                    ScrollDelta::Lines { y, .. } => -y,
+                    ScrollDelta::Pixels { y, .. } => -y / 100.0,
+                };
+                if steps != 0.0 {
+                    events.push(WindowEvent::Zoom(steps));
+                }
+            } else {
+                events.push(WindowEvent::MouseScrolled { delta });
+            }
         }
 
         *self = Self::default();
@@ -987,7 +1043,7 @@ impl Dispatch<wl_pointer::WlPointer, WaylandHandler> for WaylandState {
                 state.pointer_scroll.pixels[index] += value;
 
                 if pointer.version() < 5 {
-                    state.pointer_scroll.flush(&mut state.pending_events);
+                    state.flush_scroll();
                 }
             }
 
@@ -1004,7 +1060,7 @@ impl Dispatch<wl_pointer::WlPointer, WaylandHandler> for WaylandState {
                 *state.pointer_scroll.lines[index].get_or_insert(0.0) += f64::from(discrete);
             }
 
-            wl_pointer::Event::Frame => state.pointer_scroll.flush(&mut state.pending_events),
+            wl_pointer::Event::Frame => state.flush_scroll(),
             _ => {}
         }
     }

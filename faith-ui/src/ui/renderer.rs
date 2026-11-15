@@ -147,8 +147,8 @@ pub struct UIRenderer {
     corner_uploads: Vec<(u32, [u32; 4], Vec<u8>)>,
     resolved_boxes: Vec<(BoxDecoration, [f32; 4])>,
     clips: Vec<[f32; 4]>,
-    screen_width: u32,
-    screen_height: u32,
+    screen_width: f32,
+    screen_height: f32,
 
     pipeline: PipelineHandle,
     pipeline_dedicated: PipelineHandle,
@@ -514,12 +514,10 @@ impl UIRenderer {
     }
 
     pub(crate) fn clip(&self) -> [f32; 4] {
-        self.clips.last().copied().unwrap_or([
-            0.0,
-            0.0,
-            self.screen_width as f32,
-            self.screen_height as f32,
-        ])
+        self.clips
+            .last()
+            .copied()
+            .unwrap_or([0.0, 0.0, self.screen_width, self.screen_height])
     }
 
     /// Creates a new UI renderer and initializes
@@ -665,8 +663,8 @@ impl UIRenderer {
         })?;
 
         Ok(Self {
-            screen_width,
-            screen_height,
+            screen_width: screen_width as f32,
+            screen_height: screen_height as f32,
             pipeline,
             pipeline_dedicated,
             quad_vbo,
@@ -691,10 +689,10 @@ impl UIRenderer {
     ///
     /// Updates the current screen size and clears
     /// all per-frame quad instance batches.
-    pub fn begin(&mut self, width: u32, height: u32) {
+    pub fn begin(&mut self, width: f32, height: f32) {
         self.resolved_boxes.clear();
         self.clips.clear();
-        self.clips.push([0.0, 0.0, width as f32, height as f32]);
+        self.clips.push([0.0, 0.0, width, height]);
         self.screen_width = width;
         self.screen_height = height;
 
@@ -789,8 +787,8 @@ impl UIRenderer {
             gpu.set_uniform_2f(
                 self.pipeline_dedicated,
                 "u_screen_size",
-                self.screen_width as f32,
-                self.screen_height as f32,
+                self.screen_width,
+                self.screen_height,
             )?;
 
             for draw in &self.dedicated_draws {
@@ -812,8 +810,8 @@ impl UIRenderer {
             gpu.set_uniform_2f(
                 self.pipeline,
                 "u_screen_size",
-                self.screen_width as f32,
-                self.screen_height as f32,
+                self.screen_width,
+                self.screen_height,
             )?;
 
             if self.ui_texture_arrays.len() == 1 {

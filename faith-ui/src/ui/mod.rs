@@ -2,6 +2,7 @@ pub mod animation;
 pub mod framework;
 pub mod quad;
 pub mod renderer;
+mod scale;
 pub mod scroll;
 pub mod text;
 pub mod theme;

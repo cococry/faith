@@ -219,6 +219,7 @@ pub struct TextLayoutOptions {
 /// with HarfBuzz and load glyphs/fonts with
 /// FreeType.
 pub struct TextRenderer {
+    scale: f32,
     pub color: crate::graphics::Color,
     font_manager: FontManager,
 
@@ -241,6 +242,16 @@ pub struct TextRenderer {
 }
 
 impl TextRenderer {
+    pub fn set_scale(&mut self, scale: f32) {
+        if self.scale != scale {
+            self.scale = scale;
+            self.shaped_cache.clear();
+            self.font_run_cache.clear();
+            self.token_range_cache.clear();
+            self.layout_cache.clear();
+        }
+    }
+
     /// Creates a new text renderer with empty
     /// glyph-, fallback-font-, and text-shaping caches.
     ///
@@ -257,6 +268,7 @@ impl TextRenderer {
 
             glyph_locations: HashMap::new(),
 
+            scale: 1.0,
             shaped_cache: LruCache::new(NonZeroUsize::new(8192).unwrap()),
             font_run_cache: LruCache::new(NonZeroUsize::new(2048).unwrap()),
             token_range_cache: LruCache::new(NonZeroUsize::new(2048).unwrap()),
@@ -649,9 +661,24 @@ impl TextRenderer {
             return Ok(Arc::clone(glyphs));
         }
 
-        let glyphs_vec =
-            self.font_manager
-                .shape_text_with_props(text, bidi_lvl, script, font_handle)?;
+        // Shape at the same rounded device size used by FreeType, then express
+        // positions in logical units for wrapping, carets, and run placement.
+        let size = self.font_manager.requested_size(font_handle)?;
+        let raster = self.font_manager.at_size(
+            font_handle,
+            (size as f32 * self.scale).round().max(1.0) as u32,
+        )?;
+        let factor = self.font_manager.scale(raster)?
+            / (self.scale * self.font_manager.scale(font_handle)?);
+        let mut glyphs_vec = self
+            .font_manager
+            .shape_text_with_props(text, bidi_lvl, script, raster)?;
+        for glyph in &mut glyphs_vec {
+            glyph.x_adv *= factor;
+            glyph.y_adv *= factor;
+            glyph.x_off *= factor;
+            glyph.y_off *= factor;
+        }
 
         let glyphs: Arc<[ShapedGlyph]> = Arc::from(glyphs_vec);
 
@@ -845,7 +872,11 @@ impl TextRenderer {
         };
 
         let font_scale = self.font_manager.scale(run_font)?;
-        let font_render_scale = self.font_manager.render_scale(run_font)?;
+        let size = self.font_manager.requested_size(run_font)?;
+        let raster_size = (size as f32 * self.scale).round().max(1.0) as u32;
+        let raster_font = self.font_manager.at_size(run_font, raster_size)?;
+        // The bitmap is already rasterized at the target device size. Never
+        // stretch it back to the unrounded requested size.
         let margin = self.font_manager.line_height(run_font)? as f32 * font_scale * 2.0;
         let clip = ui.clip();
 
@@ -869,7 +900,7 @@ impl TextRenderer {
             }
 
             let key = GlyphKey {
-                font_handle: run_font,
+                font_handle: raster_font,
                 glyph_idx: shaped.glyph_idx,
             };
 
@@ -877,7 +908,7 @@ impl TextRenderer {
                 let glyph = {
                     let glyph_ref = self
                         .font_manager
-                        .get_or_load_glyph(run_font, shaped.glyph_idx)?;
+                        .get_or_load_glyph(raster_font, shaped.glyph_idx)?;
                     glyph_ref.clone()
                 };
 
@@ -887,19 +918,16 @@ impl TextRenderer {
             let atlas_glyph = &self.glyph_locations[&key];
 
             if atlas_glyph.size[0] != 0 && atlas_glyph.size[1] != 0 {
-                let render_x = pen_x
-                    + shaped.x_off * font_scale
-                    + atlas_glyph.bearing[0] as f32 * font_render_scale;
-
-                let render_y = baseline_y
-                    - shaped.y_off * font_scale
-                    - atlas_glyph.bearing[1] as f32 * font_render_scale;
-
-                let w = atlas_glyph.size[0] as f32 * font_render_scale;
-                let h = atlas_glyph.size[1] as f32 * font_render_scale;
+                let rect = glyph_rect(
+                    [pen_x + shaped.x_off * font_scale, baseline_y],
+                    shaped.y_off * font_scale,
+                    atlas_glyph.bearing,
+                    atlas_glyph.size,
+                    self.scale,
+                );
 
                 ui.raw_quad_atlas(
-                    [render_x.round(), render_y.round(), w, h],
+                    rect,
                     [
                         atlas_glyph.uv_min[0],
                         atlas_glyph.uv_min[1],
@@ -937,7 +965,11 @@ impl TextRenderer {
         };
 
         let font_scale = self.font_manager.scale(run_font)?;
-        let font_render_scale = self.font_manager.render_scale(run_font)?;
+        let size = self.font_manager.requested_size(run_font)?;
+        let raster_size = (size as f32 * self.scale).round().max(1.0) as u32;
+        let raster_font = self.font_manager.at_size(run_font, raster_size)?;
+        // The bitmap is already rasterized at the target device size. Never
+        // stretch it back to the unrounded requested size.
         let margin = self.font_manager.line_height(run_font)? as f32 * font_scale * 2.0;
         let clip = ui.clip();
 
@@ -960,7 +992,7 @@ impl TextRenderer {
             }
 
             let key = GlyphKey {
-                font_handle: run_font,
+                font_handle: raster_font,
                 glyph_idx: shaped.glyph_idx,
             };
 
@@ -968,7 +1000,7 @@ impl TextRenderer {
                 let glyph = {
                     let glyph_ref = self
                         .font_manager
-                        .get_or_load_glyph(run_font, shaped.glyph_idx)?;
+                        .get_or_load_glyph(raster_font, shaped.glyph_idx)?;
                     glyph_ref.clone()
                 };
 
@@ -978,19 +1010,16 @@ impl TextRenderer {
             let atlas_glyph = &self.glyph_locations[&key];
 
             if atlas_glyph.size[0] != 0 && atlas_glyph.size[1] != 0 {
-                let render_x = pen_x
-                    + shaped.x_off * font_scale
-                    + atlas_glyph.bearing[0] as f32 * font_render_scale;
-
-                let render_y = baseline_y
-                    - shaped.y_off * font_scale
-                    - atlas_glyph.bearing[1] as f32 * font_render_scale;
-
-                let w = atlas_glyph.size[0] as f32 * font_render_scale;
-                let h = atlas_glyph.size[1] as f32 * font_render_scale;
+                let rect = glyph_rect(
+                    [pen_x + shaped.x_off * font_scale, baseline_y],
+                    shaped.y_off * font_scale,
+                    atlas_glyph.bearing,
+                    atlas_glyph.size,
+                    self.scale,
+                );
 
                 ui.raw_quad_atlas(
-                    [render_x.round(), render_y.round(), w, h],
+                    rect,
                     [
                         atlas_glyph.uv_min[0],
                         atlas_glyph.uv_min[1],
@@ -1031,9 +1060,9 @@ impl TextRenderer {
     ) -> anyhow::Result<()> {
         // Use baseline-y and line height of the
         // base, preferred font.
-        let base_scale = self.font_manager.scale(font_handle)?;
-        let mut baseline_y = y + self.font_manager.ascender(font_handle)? as f32 * base_scale;
-        let line_height = self.font_manager.line_height(font_handle)? as f32 * base_scale;
+        let layout = self.measure(text, font_handle)?;
+        let mut baseline_y = y + layout.ascender;
+        let line_height = layout.line_height;
 
         for line in text.split('\n') {
             let clip = ui.clip();
@@ -1190,6 +1219,19 @@ impl TextRenderer {
         let mut lines = Vec::new();
 
         for range in token_ranges {
+            if matches!(
+                &paragraph[range.byte_start..range.byte_end],
+                "\n" | "\r\n" | "\r"
+            ) {
+                lines.push(LineRange {
+                    byte_start: crnt_start.unwrap_or(range.byte_start),
+                    byte_end: range.byte_start,
+                });
+                crnt_start = None;
+                crnt_end = range.byte_end;
+                crnt_width = 0.0;
+                continue;
+            }
             if crnt_start.is_none() {
                 // Trim whitespace
                 crnt_start = Some(self.trim_line_start_whitespace(
@@ -1248,6 +1290,12 @@ impl TextRenderer {
             lines.push(LineRange {
                 byte_start,
                 byte_end: crnt_end,
+            });
+        }
+        if paragraph.ends_with(['\n', '\r']) {
+            lines.push(LineRange {
+                byte_start: paragraph.len(),
+                byte_end: paragraph.len(),
             });
         }
 
@@ -1435,6 +1483,42 @@ impl TextRenderer {
         Ok(tokens)
     }
 
+    fn line_metrics(
+        &mut self,
+        base: FontHandle,
+        runs: &[ShapedTextRun],
+    ) -> anyhow::Result<(f32, f32)> {
+        let size = self.font_manager.requested_size(base)?;
+        let raster = self
+            .font_manager
+            .at_size(base, (size as f32 * self.scale).round().max(1.0) as u32)?;
+        let mut ascent = self.font_manager.ascender(raster)? as f32;
+        let mut descent = self.font_manager.descender(raster)? as f32;
+        let line_height = self.font_manager.line_height(raster)? as f32;
+        for run in runs {
+            let size = self.font_manager.requested_size(run.font_handle)?;
+            let raster = self.font_manager.at_size(
+                run.font_handle,
+                (size as f32 * self.scale).round().max(1.0) as u32,
+            )?;
+            let offset_scale = self.font_manager.scale(run.font_handle)? * self.scale;
+            for shaped in run.shaped_glyphs.iter() {
+                let glyph = self
+                    .font_manager
+                    .get_or_load_glyph(raster, shaped.glyph_idx)?;
+                let top = glyph.bearing_y as f32 + (shaped.y_off * offset_scale).round();
+                ascent = ascent.max(top);
+                descent = descent.max(glyph.height as f32 - top);
+            }
+        }
+        // A device pixel of leading on each side absorbs baseline snapping
+        // and fractional widget/clip origins without cutting off edge rows.
+        Ok((
+            (ascent + 1.0) / self.scale,
+            line_height.max(ascent + descent + 2.0) / self.scale,
+        ))
+    }
+
     fn layout_cached(
         &mut self,
         text: &str,
@@ -1451,13 +1535,10 @@ impl TextRenderer {
             return Ok(layout.clone());
         }
 
-        let base_scale = self.font_manager.scale(font_handle)?;
-        let line_height = self.font_manager.line_height(font_handle)? as f32 * base_scale;
-        let ascender = self.font_manager.ascender(font_handle)? as f32 * base_scale;
-
         // First shape the entire paragraph once
         // (cached per paragraph)
         let paragraph_runs = self.build_shaped_runs_cached(font_handle, text)?;
+        let (ascender, line_height) = self.line_metrics(font_handle, &paragraph_runs)?;
         // Second, firgure out the byte ranges of the
         // tokens in the paragraph string and get their
         // displayed pixel size by mapping the
@@ -1659,6 +1740,23 @@ impl TextRenderer {
 
         Ok(layout)
     }
+}
+
+/// Place an unscaled raster bitmap on the framebuffer pixel grid. Snap the
+/// shared baseline before subtracting integer bearings, never each logical y.
+fn glyph_rect(
+    origin: [f32; 2],
+    y_offset: f32,
+    bearing: [i32; 2],
+    size: [u32; 2],
+    scale: f32,
+) -> [f32; 4] {
+    [
+        ((origin[0] * scale).round() + bearing[0] as f32) / scale,
+        ((origin[1] * scale).round() - (y_offset * scale).round() - bearing[1] as f32) / scale,
+        size[0] as f32 / scale,
+        size[1] as f32 / scale,
+    ]
 }
 
 fn bordered_glyph(glyph: &Glyph) -> anyhow::Result<Vec<u8>> {

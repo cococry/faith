@@ -31,6 +31,11 @@ impl Keyboard {
         }
     }
 
+    pub fn control(&self) -> bool {
+        self.state
+            .mod_name_is_active(xkb::MOD_NAME_CTRL, xkb::STATE_MODS_EFFECTIVE)
+    }
+
     pub fn reset(&mut self) {
         if let Some(compose) = &mut self.compose {
             compose.reset();
@@ -46,6 +51,18 @@ impl Keyboard {
         let alt = self
             .state
             .mod_name_is_active(xkb::MOD_NAME_ALT, xkb::STATE_MODS_EFFECTIVE);
+
+        if control {
+            let steps = match sym {
+                0x002b | 0x003d | 0xffab => Some(1.0),
+                0x002d | 0xffad => Some(-1.0),
+                _ => None,
+            };
+            if let Some(steps) = steps {
+                self.reset();
+                return vec![WindowEvent::Zoom(steps)];
+            }
+        }
 
         let key = match sym {
             0xff0d | 0xff8d => Some(Key::Enter),

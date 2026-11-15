@@ -305,6 +305,13 @@ pub struct Areas {
 }
 
 impl Areas {
+    /// Old hit regions and drag geometry cannot be used after a scale change.
+    pub fn invalidate_layout(&mut self) {
+        self.regions.clear();
+        self.previous.clear();
+        self.drag = None;
+    }
+
     pub fn begin(
         &mut self,
         events: &[WindowEvent],
