@@ -16,6 +16,7 @@ use ui::{
     widgets::input::InputOptions,
 };
 
+// Icons are kept separate from the normal text fonts.
 const MENU: &str = "\u{eb94}";
 const ACCOUNTS: &str = "\u{eb99}";
 const CHATS: &str = "\u{eac7}";
@@ -59,6 +60,7 @@ enum Action {
     Rounded(bool),
 }
 
+// State shared by the pages.
 struct App {
     root: std::path::PathBuf,
     profiles: Vec<Profile>,
@@ -74,14 +76,18 @@ struct App {
     rounded: bool,
 }
 
+// Account sessions and actions returned by the pages.
 impl App {
     fn login(&mut self, profile: Profile, cli: &cli::Cli, platform: &Platform) {
+        // Stop the old session before selecting another account.
         self.session = None;
         self.error.clear();
         self.conversation = None;
         self.list_offset = 0;
         self.page = Page::Conversations;
         self.selected = Some(profile.clone());
+
+        // The client worker handles connection and authentication.
         match client::Session::start(
             faith_client::Config {
                 host: cli.host.clone(),
@@ -105,6 +111,7 @@ impl App {
         platform: &Platform,
         ui: &mut Framework,
     ) -> anyhow::Result<()> {
+        // Apply the action after the current frame has finished.
         match action {
             Action::None => return Ok(()),
             Action::Select(index) => self.login(self.profiles[index].clone(), cli, platform),
@@ -114,10 +121,14 @@ impl App {
                     self.profiles.sort_by(|a, b| a.alias.cmp(&b.alias));
                     self.login(profile, cli, platform);
                 }
+
                 Err(error) => self.error = error.to_string(),
             },
+
+            // Refresh the profiles when opening the account list.
             Action::Choose => {
                 self.error.clear();
+
                 match profiles::discover(&self.root) {
                     Ok(mut profiles) => {
                         if let Some(selected) = &self.selected
@@ -125,31 +136,40 @@ impl App {
                         {
                             profiles.push(selected.clone());
                         }
+
                         self.profiles = profiles;
                     }
+
                     Err(error) => self.error = error.to_string(),
                 }
+
                 self.page = if self.profiles.is_empty() {
                     Page::Create
                 } else {
                     Page::Accounts
                 };
+
                 self.list_offset = 0;
             }
+
+            // Start with an empty handle when opening the creation form.
             Action::New => {
                 self.error.clear();
                 ui.clear_input("new-profile-handle");
                 self.page = Page::Create;
             }
+
             Action::Retry => {
                 if let Some(profile) = self.selected.clone() {
                     self.login(profile, cli, platform);
                 }
             }
+
             Action::Chats => {
                 self.page = Page::Conversations;
                 self.list_offset = 0;
             }
+
             Action::Settings => self.page = Page::Settings,
             Action::ToggleMenu => self.collapsed = !self.collapsed,
             Action::ListPage(offset) => self.list_offset = offset,
@@ -159,16 +179,19 @@ impl App {
                 self.rounded = enabled;
                 ui.set_rounded_corners(enabled);
             }
+
             Action::Theme(theme) => {
                 self.theme = theme;
                 ui.set_theme(theme.colors());
             }
         }
+
         platform.request_redraw()?;
         Ok(())
     }
 }
 
+// A pane with its own layout and clipping region.
 fn panel(ui: &mut Framework, x: f32, y: f32, w: f32, h: f32, surface: bool) -> anyhow::Result<()> {
     ui.set_position(x, y);
     ui.push_style(Style {
@@ -179,19 +202,23 @@ fn panel(ui: &mut Framework, x: f32, y: f32, w: f32, h: f32, surface: bool) -> a
         }),
         ..ui.style()
     });
+
     ui.div_begin(DivOptions {
         width: Some(w.max(0.0)),
         height: Some(h.max(0.0)),
         ..Default::default()
     })?;
+
     Ok(())
 }
 
+// Restore the parent pane and its style.
 fn end_panel(ui: &mut Framework) {
     ui.div_end();
     ui.pop_style();
 }
 
+// Text using the current theme and the requested weight.
 fn label(
     ui: &mut Framework,
     gpu: &mut Renderer,
@@ -210,16 +237,24 @@ fn label(
         },
         ..ui.style()
     });
-    let font = Some(if bold { Font::Bold } else { Font::Regular });
+
+    let font = Some(if bold {
+        Font::Bold
+    } else {
+        Font::Regular
+    });
+
     let result = if centered {
         ui.text_centered(gpu, value, font)
     } else {
         ui.text(gpu, value, font)
     };
+
     ui.pop_style();
     result
 }
 
+// Centered icon button for compact controls.
 fn icon(
     ui: &mut Framework,
     gpu: &mut Renderer,
@@ -239,6 +274,7 @@ fn icon(
         background: selected.then_some(ui.theme().button),
         ..ui.style()
     });
+
     ui.push_sizing(Some(40.0), Some(40.0));
     let result = ui.icon_button(gpu, id, glyph);
     ui.pop_sizing();
@@ -246,6 +282,7 @@ fn icon(
     result
 }
 
+// Full-width button with an icon and an optional selected badge.
 fn row_button(
     ui: &mut Framework,
     gpu: &mut Renderer,
@@ -275,6 +312,7 @@ fn row_button(
         }),
         ..ui.style()
     });
+
     ui.push_sizing(Some(ui.div_width()), Some(48.0));
     let result = ui.icon_label_badge_button(
         gpu,
@@ -288,6 +326,7 @@ fn row_button(
     result
 }
 
+// The collapsible rail for accounts, chats and settings.
 fn navigation(
     ui: &mut Framework,
     gpu: &mut Renderer,
@@ -296,10 +335,13 @@ fn navigation(
 ) -> anyhow::Result<Action> {
     let mut action = Action::None;
     ui.set_position(16.0, 16.0);
+
     if icon(ui, gpu, "nav-collapse", MENU, false)? {
         action = Action::ToggleMenu;
     }
+
     ui.set_position(16.0, 88.0);
+
     if icon(
         ui,
         gpu,
@@ -309,11 +351,16 @@ fn navigation(
     )? {
         action = Action::Choose;
     }
+
     ui.set_position(16.0, 144.0);
+
     if icon(ui, gpu, "nav-chats", CHATS, app.page == Page::Conversations)? {
         action = Action::Chats;
     }
+
+    // Keep settings at the bottom of the rail.
     ui.set_position(16.0, (height - 64.0).max(200.0));
+
     if icon(
         ui,
         gpu,
@@ -323,9 +370,11 @@ fn navigation(
     )? {
         action = Action::Settings;
     }
+
     Ok(action)
 }
 
+// Shared heading, menu toggle and overflow button.
 fn list_header(
     ui: &mut Framework,
     gpu: &mut Renderer,
@@ -334,15 +383,34 @@ fn list_header(
 ) -> anyhow::Result<Action> {
     let mut action = Action::None;
     let width = ui.div_width();
+
+    // Keep the menu toggle available when the rail is hidden.
     if app.collapsed {
         ui.set_position(12.0, 16.0);
+
         if icon(ui, gpu, "list-expand", MENU, false)? {
             action = Action::ToggleMenu;
         }
     }
-    ui.set_position(if app.collapsed { 62.0 } else { 24.0 }, 22.0);
+
+    ui.set_position(
+        if app.collapsed {
+            62.0
+        } else {
+            24.0
+        },
+        22.0,
+    );
     ui.push_sizing(
-        Some((width - if app.collapsed { 118.0 } else { 80.0 }).max(1.0)),
+        Some(
+            (width
+                - if app.collapsed {
+                    118.0
+                } else {
+                    80.0
+                })
+            .max(1.0),
+        ),
         None,
     );
     label(ui, gpu, title, 20, true, false, false)?;
@@ -352,6 +420,7 @@ fn list_header(
     Ok(action)
 }
 
+// The available settings sections.
 fn settings_list(
     ui: &mut Framework,
     gpu: &mut Renderer,
@@ -368,6 +437,7 @@ fn settings_list(
         (height - 110.0).max(48.0),
         true,
     )?;
+
     if row_button(
         ui,
         gpu,
@@ -379,7 +449,9 @@ fn settings_list(
     )? {
         action = Action::SettingsItem(SettingsItem::Theme);
     }
+
     ui.space(10.0);
+
     if row_button(
         ui,
         gpu,
@@ -391,10 +463,12 @@ fn settings_list(
     )? {
         action = Action::SettingsItem(SettingsItem::Misc);
     }
+
     end_panel(ui);
     Ok(action)
 }
 
+// Profile and conversation rows in the left-hand list.
 fn item_list(
     ui: &mut Framework,
     gpu: &mut Renderer,
@@ -414,11 +488,14 @@ fn item_list(
     )?;
     let width = ui.div_width();
     let chats = app.page == Page::Conversations;
+
     let count = if chats {
         snapshot.conversations.len()
     } else {
         app.profiles.len()
     };
+
+    // Fit as many rows as the current window height allows.
     let per_page = ((height - 250.0) / 58.0).floor().max(1.0) as usize;
     let offset = app
         .list_offset
@@ -431,6 +508,8 @@ fn item_list(
         (height - 226.0).max(60.0),
         true,
     )?;
+
+    // An empty list still gets a heading and a short explanation.
     if count == 0 {
         ui.set_position(8.0, 14.0);
         label(
@@ -463,11 +542,14 @@ fn item_list(
         )?;
         ui.pop_sizing();
     } else {
+        // Render one row for each visible profile or conversation.
         for index in offset..(offset + per_page).min(count) {
             ui.set_position(0.0, (index - offset) as f32 * 58.0);
+
             if chats {
                 let id = snapshot.conversations[index];
                 let title = format!("Chat · {}", &id.to_string()[..8]);
+
                 if row_button(
                     ui,
                     gpu,
@@ -485,6 +567,7 @@ fn item_list(
                     .selected
                     .as_ref()
                     .is_some_and(|p| p.path == profile.path);
+
                 if row_button(
                     ui,
                     gpu,
@@ -499,18 +582,27 @@ fn item_list(
             }
         }
     }
+
     end_panel(ui);
+
+    // Show paging controls when the list does not fit.
     if count > per_page {
         ui.set_position(16.0, height - 126.0);
+
         if offset > 0 && icon(ui, gpu, "list-previous", BACK, false)? {
             action = Action::ListPage(offset.saturating_sub(per_page));
         }
+
         ui.set_position(width - 56.0, height - 126.0);
+
         if offset + per_page < count && icon(ui, gpu, "list-next", NEXT, false)? {
             action = Action::ListPage(offset + per_page);
         }
     }
+
+    // The list footer shows account status or the create button.
     panel(ui, 16.0, height - 70.0, width - 32.0, 54.0, true)?;
+
     if chats {
         if let Some(profile) = &app.selected {
             label(ui, gpu, &profile.alias, 15, true, false, false)?;
@@ -551,10 +643,12 @@ fn item_list(
     )? {
         action = Action::New;
     }
+
     end_panel(ui);
     Ok(action)
 }
 
+// The centered logo, name and tagline.
 fn brand_page(ui: &mut Framework, gpu: &mut Renderer, logo: Image) -> anyhow::Result<()> {
     let width = ui.div_width();
     let height = ui.div_height();
@@ -566,8 +660,13 @@ fn brand_page(ui: &mut Framework, gpu: &mut Renderer, logo: Image) -> anyhow::Re
         width: Some(content_width),
         ..Default::default()
     })?;
+
     ui.set_position((content_width - size) * 0.5, 0.0);
+
+    // Center the logo inside the text column.
     ui.image(logo, size, size)?;
+
+    // Let wrapped headings push the tagline down.
     ui.space(32.0);
     label(ui, gpu, "Faith Messenger", 30, true, false, true)?;
     ui.space(12.0);
@@ -584,11 +683,13 @@ fn brand_page(ui: &mut Framework, gpu: &mut Renderer, logo: Image) -> anyhow::Re
     Ok(())
 }
 
+// The form for creating a local account profile.
 fn profile_creation_page(
     ui: &mut Framework,
     gpu: &mut Renderer,
     has_profiles: bool,
 ) -> anyhow::Result<Action> {
+    // Keep the form narrow and centered in the main pane.
     let width = (ui.div_width() - 64.0).clamp(1.0, 380.0);
     let x = (ui.div_width() - width) * 0.5;
     let y = ((ui.div_height() - 540.0) * 0.5).max(24.0);
@@ -597,15 +698,18 @@ fn profile_creation_page(
         background: Some(ui.theme().background),
         ..ui.style()
     });
+
     ui.div_begin(DivOptions {
         width: Some(width),
         ..Default::default()
     })?;
+
     ui.push_style(Style {
         font_size: 28,
         color: ui.theme().muted,
         ..ui.style()
     });
+
     ui.text(gpu, LOCK, Some(Font::Icons))?;
     ui.pop_style();
     ui.space(20.0);
@@ -622,7 +726,7 @@ fn profile_creation_page(
     label(
         ui,
         gpu,
-        "Create a profile for your private conversations.",
+        "Create a profile for your private conversations. This is a local alias for your account.",
         15,
         false,
         true,
@@ -639,6 +743,8 @@ fn profile_creation_page(
         background: Some(ui.theme().input),
         ..ui.style()
     });
+
+    // Only allow characters that are valid in a profile handle.
     let alias = ui.input_with_options(
         gpu,
         "new-profile-handle",
@@ -660,13 +766,17 @@ fn profile_creation_page(
     )?;
     ui.space(24.0);
     let mut action = Action::None;
+
+    // Create the profile when the completed button click is valid.
     if row_button(ui, gpu, "submit-create", ADD, "Create account", false, true)?
         && profiles::valid_alias(&alias)
     {
         action = Action::Create(alias);
     }
+
     if has_profiles {
         ui.space(12.0);
+
         if row_button(
             ui,
             gpu,
@@ -679,10 +789,12 @@ fn profile_creation_page(
             action = Action::Choose;
         }
     }
+
     end_panel(ui);
     Ok(action)
 }
 
+// Account status and the conversation placeholder.
 fn logged_in_page(
     ui: &mut Framework,
     gpu: &mut Renderer,
@@ -702,9 +814,12 @@ fn logged_in_page(
         false,
         false,
     )?;
+
+    // Display the identity reported by the client worker.
     if let Some(id) = snapshot.auth {
         label(ui, gpu, &format!("User ID: {id}"), 12, false, true, false)?;
     }
+
     if !snapshot.status.is_empty() {
         ui.push_style(Style {
             font_size: 13,
@@ -715,21 +830,31 @@ fn logged_in_page(
             },
             ..ui.style()
         });
+
         ui.text(gpu, &snapshot.status, None)?;
         ui.pop_style();
     }
+
     if let Some(notice) = snapshot.notices.last() {
         label(ui, gpu, notice, 12, false, true, false)?;
     }
+
     end_panel(ui);
+
+    // Center the empty conversation view in its own column.
     let top = (ui.div_height() * 0.5 - 38.0).max(200.0);
     ui.set_position(24.0, top);
-    ui.push_sizing(Some((width - 48.0).max(1.0)), None);
+    ui.div_begin(DivOptions {
+        width: Some((width - 48.0).max(1.0)),
+        ..Default::default()
+    })?;
+
     ui.push_style(Style {
         font_size: 36,
         color: ui.theme().muted,
         ..ui.style()
     });
+
     ui.text_centered(gpu, CHATS, Some(Font::Icons))?;
     ui.pop_style();
     label(
@@ -758,25 +883,40 @@ fn logged_in_page(
         true,
         true,
     )?;
-    ui.pop_sizing();
+    ui.div_end();
     let mut action = Action::None;
+
     if app.selected.is_some() && !snapshot.authorized {
+        // Centered reconnect button with centered content.
+        let button_width = (width - 56.0).min(220.0);
         panel(
             ui,
-            28.0,
+            (width - button_width) / 2.0,
             (ui.div_height() - 90.0).max(280.0),
-            (width - 56.0).min(220.0),
+            button_width,
             52.0,
             false,
         )?;
-        if row_button(ui, gpu, "reconnect", REFRESH, "Reconnect", false, false)? {
+
+        ui.push_style(Style {
+            center_button_content: true,
+            ..ui.style()
+        });
+
+        let reconnect = row_button(ui, gpu, "reconnect", REFRESH, "Reconnect", false, false);
+        ui.pop_style();
+
+        if reconnect? {
             action = Action::Retry;
         }
+
         end_panel(ui);
     }
+
     Ok(action)
 }
 
+// Small interface preferences.
 fn misc_settings_page(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Result<Action> {
     let width = (ui.div_width() - 64.0).max(1.0);
     let height = (ui.div_height() - 72.0).max(1.0);
@@ -795,6 +935,8 @@ fn misc_settings_page(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyh
     ui.space(36.0);
     label(ui, gpu, "Interface", 13, true, true, false)?;
     ui.space(10.0);
+
+    // Apply the rounded-corner preference when the checkbox changes.
     let change = ui.checkbox(
         gpu,
         "settings-rounded-corners",
@@ -815,10 +957,12 @@ fn misc_settings_page(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyh
     Ok(change.map_or(Action::None, Action::Rounded))
 }
 
+// The selected settings section and its controls.
 fn settings_page(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Result<Action> {
     if app.settings_item == SettingsItem::Misc {
         return misc_settings_page(ui, gpu, app);
     }
+
     let width = (ui.div_width() - 64.0).max(1.0);
     let height = (ui.div_height() - 72.0).max(1.0);
     panel(ui, 32.0, 36.0, width, height, false)?;
@@ -844,12 +988,19 @@ fn settings_page(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::R
         border_color: Some(ui.theme().border),
         ..ui.style()
     });
+
     ui.push_sizing(Some(width.min(340.0)), None);
+
+    // Switch between the available themes without leaving the page.
     let choice = ui.dropdown(
         gpu,
         "settings-theme-dropdown",
         &["Dark (Gruvbox)", "Light (Blossom Light)"],
-        if app.theme == ThemeName::Dark { 0 } else { 1 },
+        if app.theme == ThemeName::Dark {
+            0
+        } else {
+            1
+        },
     )?;
     ui.pop_sizing();
     ui.pop_style();
@@ -861,61 +1012,85 @@ fn settings_page(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::R
     })
 }
 
+// Arrange the navigation rail, item list and main content.
 fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyhow::Result<Action> {
     let width = ui.div_width();
     let height = ui.div_height();
-    let rail = if app.collapsed { 0.0 } else { 72.0 };
+
+    // The item list takes about a quarter of the available width.
+    let rail = if app.collapsed {
+        0.0
+    } else {
+        72.0
+    };
+
     let remaining = (width - rail).max(1.0);
     let list = (remaining / 4.0)
         .clamp(220.0, 400.0)
         .min((remaining - 200.0).max(100.0));
     let content = (remaining - list).max(1.0);
+
+    // Read the latest client state without making network requests.
     let snapshot = app
         .session
         .as_ref()
         .map_or_else(client::Snapshot::default, |s| s.snapshot());
     let mut action = Action::None;
+
+    // Draw the rail only while it is expanded.
     if !app.collapsed {
         panel(ui, 0.0, 0.0, rail, height, true)?;
         action = navigation(ui, gpu, app, height)?;
         end_panel(ui);
     }
+
     panel(ui, rail, 0.0, list, height, true)?;
+
+    // Settings has its own list beside profiles and conversations.
     let list_action = if app.page == Page::Settings {
         settings_list(ui, gpu, app, height)?
     } else {
         item_list(ui, gpu, app, &snapshot, height)?
     };
+
     if !matches!(list_action, Action::None) {
         action = list_action;
     }
+
     end_panel(ui);
     panel(ui, rail + list, 0.0, 1.0, height, true)?;
     ui.push_style(Style {
         background: Some(ui.theme().separator),
         ..ui.style()
     });
+
     ui.div_begin(DivOptions {
         width: Some(1.0),
         height: Some(height),
         ..Default::default()
     })?;
+
     ui.div_end();
     ui.pop_style();
     end_panel(ui);
     panel(ui, rail + list + 1.0, 0.0, content - 1.0, height, false)?;
+
+    // Render the current page in the main content pane.
     let content_action = match app.page {
         Page::Accounts => {
             brand_page(ui, gpu, logo)?;
             Action::None
         }
+
         Page::Create => profile_creation_page(ui, gpu, !app.profiles.is_empty())?,
         Page::Conversations => logged_in_page(ui, gpu, app, &snapshot)?,
         Page::Settings => settings_page(ui, gpu, app)?,
     };
+
     if !matches!(content_action, Action::None) {
         action = content_action;
     }
+
     if !app.error.is_empty() {
         ui.set_position(28.0, (height - 42.0).max(0.0));
         ui.push_style(Style {
@@ -923,17 +1098,22 @@ fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyh
             color: ui.theme().error,
             ..ui.style()
         });
+
         ui.push_sizing(Some((content - 56.0).max(1.0)), None);
         ui.text(gpu, &app.error, None)?;
         ui.pop_sizing();
         ui.pop_style();
     }
+
     end_panel(ui);
     Ok(action)
 }
 
+// Start the window and run the blocking UI loop.
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().init();
+
+    // Read startup options and the local TLS configuration.
     let mut cli = cli::Cli::parse();
     cli.resolve_local_tls();
     let config = WindowConfig {
@@ -942,9 +1122,13 @@ fn main() -> anyhow::Result<()> {
         width: cli.width.max(800),
         height: cli.height.max(540),
     };
+
+    // Create the window and select a graphics backend.
     let mut platform = Platform::new(&config)?;
     let mut renderer = Renderer::new(cli.graphics.into(), &platform)?;
     let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
+
+    // Register text and icon fonts; glyphs are loaded when needed.
     let mut ui = Framework::new(
         &mut renderer,
         &platform,
@@ -965,6 +1149,8 @@ fn main() -> anyhow::Result<()> {
     )?;
     ui.set_theme(cli.theme.colors());
     let root = profiles::root()?;
+
+    // Discover the accounts stored on this machine.
     let profiles = profiles::discover(&root)?;
     let mut app = App {
         root,
@@ -980,6 +1166,8 @@ fn main() -> anyhow::Result<()> {
         settings_item: SettingsItem::Theme,
         rounded: false,
     };
+
+    // Use an explicit profile, or automatically select the only account.
     if let Some(path) = &cli.profile {
         app.login(
             Profile {
@@ -998,26 +1186,38 @@ fn main() -> anyhow::Result<()> {
     } else if !app.profiles.is_empty() {
         app.page = Page::Accounts;
     }
+
     platform.request_redraw()?;
     let mut logo = None;
+
+    // Wait for input or a client notification before drawing again.
     loop {
         let events = platform.poll_events()?;
+
+        // Handle window shutdown and resizing first.
         for event in &events {
             match *event {
                 WindowEvent::CloseRequested => return Ok(()),
                 WindowEvent::Resized { width, height } if width > 0 && height > 0 => {
                     renderer.resize(width, height)
                 }
+
                 _ => {}
             }
         }
+
         let (w, h) = platform.size();
+
         if w == 0 || h == 0 || events.is_empty() {
             continue;
         }
+
+        // Begin a new UI pass with the active theme.
         renderer.clear_color(ui.theme().background);
         renderer.begin_frame()?;
         ui.begin(&platform, &events);
+
+        // Upload the logo once and reuse its image handle.
         let logo = match logo {
             Some(image) => image,
             None => {
@@ -1029,9 +1229,12 @@ fn main() -> anyhow::Result<()> {
                 image
             }
         };
+
+        // Draw the shell, then apply any action returned by the widgets.
         let action = shell(&mut ui, &mut renderer, &app, logo)?;
         ui.end(&mut renderer)?;
         renderer.end_frame()?;
+
         app.act(action, &cli, &platform, &mut ui)?;
     }
 }

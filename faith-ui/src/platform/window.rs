@@ -3,6 +3,7 @@ use crate::{
     cli::PlatformBackend,
     platform::{wayland::WaylandWaker, x11::X11Waker},
 };
+
 use tracing::{info, warn};
 
 /// Window creation configuration.
@@ -84,6 +85,7 @@ impl Platform {
             "Window '{0}' at {1}x{2}",
             config.title, config.width, config.height
         );
+
         match config.backend {
             PlatformBackend::Auto => Self::new_auto(config),
 
@@ -108,6 +110,7 @@ impl Platform {
                     info!("using Wayland backend");
                     return Ok(Self::Wayland(Box::new(platform)));
                 }
+
                 Err(err) => {
                     warn!("Wayland windowing failed, falling back to X11: {err}");
                 }
@@ -125,14 +128,18 @@ impl Platform {
             Self::X11(platform) => platform.poll_events()?,
             Self::Wayland(platform) => platform.poll_events()?,
         };
+
         let mouse = match self {
             Self::X11(platform) => &mut platform.mouse,
             Self::Wayland(platform) => &mut platform.mouse,
         };
+
         mouse.begin_frame();
+
         for event in &events {
             mouse.handle(event);
         }
+
         Ok(events)
     }
 

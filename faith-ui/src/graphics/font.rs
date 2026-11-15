@@ -7,6 +7,7 @@ use std::{
     os::unix::fs::FileExt,
     path::{Path, PathBuf},
 };
+
 use unicode_bidi::Level;
 use unicode_script::Script;
 
@@ -227,6 +228,7 @@ impl FontManager {
         // true for all Emoji fonts, making it a
         // reasonable way to determine if a glyph
         // needs color loaded.
+
         let flags = if font.bitmap_strike {
             ft::face::LoadFlag::RENDER | ft::face::LoadFlag::COLOR
         } else {
@@ -242,6 +244,7 @@ impl FontManager {
         let mut height = bitmap.rows() as u32;
 
         // Convert the pixels to RGBA
+
         let mut pixels_rgba = match bitmap.pixel_mode()? {
             bitmap::PixelMode::Bgra => self.bgra_to_rgba(&bitmap),
             bitmap::PixelMode::Gray => self.alpha_to_rgba(&bitmap),
@@ -363,9 +366,11 @@ impl FontManager {
     ) -> anyhow::Result<FontHandle> {
         anyhow::ensure!(size > 0 && face_idx >= 0, "invalid font size or face index");
         let key = (path.as_ref().to_path_buf(), size, face_idx);
+
         if let Some(handle) = self.font_handles.get(&key) {
             return Ok(*handle);
         }
+
         let handle = FontHandle(self.fonts.len() as u32);
         self.fonts.push(FontSlot {
             path: key.0.clone(),
@@ -373,6 +378,7 @@ impl FontManager {
             face_idx,
             loaded: OnceCell::new(),
         });
+
         self.font_handles.insert(key, handle);
         Ok(handle)
     }
@@ -417,9 +423,11 @@ impl FontManager {
         face_idx: isize,
     ) -> anyhow::Result<harfbuzz_rs::Shared<harfbuzz_rs::Face<'static>>> {
         let key = (path.to_path_buf(), face_idx);
+
         if let Some(source) = self.sources.borrow().get(&key) {
             return Ok(source.clone());
         }
+
         let source = table_face(path, face_idx as u32)?;
         self.sources.borrow_mut().insert(key, source.clone());
         Ok(source)
@@ -642,6 +650,7 @@ fn table_face(
     let mut header = [0; 12];
     file.read_exact(&mut header)?;
     let mut directory = 0_u64;
+
     if &header[..4] == b"ttcf" {
         let count = u32::from_be_bytes(header[8..12].try_into()?);
         anyhow::ensure!(face_idx < count, "font collection index out of bounds");
@@ -652,13 +661,16 @@ fn table_face(
     } else {
         anyhow::ensure!(face_idx == 0, "font face index out of bounds");
     }
+
     if !matches!(&header[..4], b"\0\x01\0\0" | b"OTTO" | b"true" | b"typ1") {
         return Ok(harfbuzz_rs::Face::from_file(path, face_idx)?.to_shared());
     }
+
     let count = usize::from(u16::from_be_bytes(header[4..6].try_into()?));
     let mut records = vec![0; count * 16];
     file.read_exact_at(&mut records, directory + 12)?;
     let mut tables = HashMap::with_capacity(count);
+
     for record in records.as_chunks::<16>().0 {
         let tag = u32::from_be_bytes(record[..4].try_into()?);
         let offset = u64::from(u32::from_be_bytes(record[8..12].try_into()?));
@@ -666,11 +678,13 @@ fn table_face(
         anyhow::ensure!(offset + size as u64 <= length, "font table outside file");
         tables.insert(tag, (offset, size));
     }
+
     let mut cache: HashMap<u32, harfbuzz_rs::Shared<harfbuzz_rs::Blob<'static>>> = HashMap::new();
     let face = harfbuzz_rs::Face::from_table_func(move |tag| {
         if let Some(blob) = cache.get(&tag.0) {
             return Some(blob.clone());
         }
+
         let &(offset, size) = tables.get(&tag.0)?;
         let mut bytes = vec![0; size];
         file.read_exact_at(&mut bytes, offset).ok()?;
@@ -678,5 +692,6 @@ fn table_face(
         cache.insert(tag.0, blob);
         cache.get(&tag.0).cloned()
     });
+
     Ok(face.to_shared())
 }

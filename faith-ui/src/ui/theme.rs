@@ -38,6 +38,7 @@ impl CornerRadii {
         checkbox: 0.0,
         popup: 0.0,
     };
+
     pub const ROUNDED: Self = Self {
         control: 10.0,
         row: 12.0,

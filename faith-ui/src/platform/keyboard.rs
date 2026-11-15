@@ -3,6 +3,7 @@ use std::{
     ffi::OsString,
     time::{Duration, Instant},
 };
+
 use xkbcommon::xkb::{self, compose};
 
 /// Shared layout/compose translation. Platform backends supply keymaps and
@@ -45,6 +46,7 @@ impl Keyboard {
         let alt = self
             .state
             .mod_name_is_active(xkb::MOD_NAME_ALT, xkb::STATE_MODS_EFFECTIVE);
+
         let key = match sym {
             0xff0d | 0xff8d => Some(Key::Enter),
             0xff08 => Some(Key::Backspace),
@@ -58,32 +60,40 @@ impl Keyboard {
             0xff56 => Some(Key::PageDown),
             _ => None,
         };
+
         if let Some(key) = key {
             self.reset();
             return vec![WindowEvent::KeyPressed { key, control }];
         }
+
         if control || alt {
             return Vec::new();
         }
+
         let text = if let Some(compose) = &mut self.compose {
             compose.feed(xkb::Keysym::new(sym));
+
             match compose.status() {
                 compose::Status::Composing => return Vec::new(),
                 compose::Status::Cancelled => {
                     compose.reset();
                     return Vec::new();
                 }
+
                 compose::Status::Composed => {
                     let text = compose.utf8().unwrap_or_default();
                     compose.reset();
                     text
                 }
+
                 compose::Status::Nothing => self.state.key_get_utf8(code),
             }
         } else {
             self.state.key_get_utf8(code)
         };
+
         let text: String = text.chars().filter(|c| !c.is_control()).collect();
+
         if text.is_empty() {
             Vec::new()
         } else {
@@ -99,16 +109,19 @@ pub struct KeyRepeat {
     delay: u32,
     held: Option<(u32, Instant)>,
 }
+
 impl KeyRepeat {
     pub fn configure(&mut self, rate: i32, delay: i32) {
         self.rate = rate.clamp(0, 1000) as u32;
         self.delay = delay.max(0) as u32;
         self.cancel();
     }
+
     pub fn press(&mut self, key: u32, repeats: bool) {
         if !repeats {
             return;
         }
+
         self.held = if self.rate > 0 {
             Some((
                 key,
@@ -118,14 +131,17 @@ impl KeyRepeat {
             None
         };
     }
+
     pub fn release(&mut self, key: u32) {
         if self.held.is_some_and(|(k, _)| k == key) {
             self.cancel();
         }
     }
+
     pub fn cancel(&mut self) {
         self.held = None;
     }
+
     pub fn timeout(&self) -> nix::poll::PollTimeout {
         self.held.map_or(nix::poll::PollTimeout::NONE, |(_, at)| {
             nix::poll::PollTimeout::try_from(
@@ -137,11 +153,14 @@ impl KeyRepeat {
             .unwrap_or(nix::poll::PollTimeout::MAX)
         })
     }
+
     pub fn due(&mut self) -> Option<u32> {
         let (key, at) = self.held?;
+
         if Instant::now() < at {
             return None;
         }
+
         self.held = Some((
             key,
             Instant::now() + Duration::from_micros(1_000_000 / self.rate as u64),

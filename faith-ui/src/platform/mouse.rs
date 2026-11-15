@@ -103,6 +103,7 @@ impl Mouse {
                     self.movement.x += position.x - previous.x;
                     self.movement.y += position.y - previous.y;
                 }
+
                 self.moved |= self.cursor != Some(position);
                 self.cursor = Some(position);
             }
@@ -114,23 +115,28 @@ impl Mouse {
                     self.went_down.insert(button);
                 }
             }
+
             WindowEvent::MouseButtonReleased { button } => {
                 if self.pressed.remove(&button) {
                     self.released.insert(button);
                 }
             }
+
             WindowEvent::MouseScrolled { delta } => {
                 let (target, x, y) = match delta {
                     ScrollDelta::Lines { x, y } => (&mut self.scroll.lines, x, y),
                     ScrollDelta::Pixels { x, y } => (&mut self.scroll.pixels, x, y),
                 };
+
                 target.x += x;
                 target.y += y;
             }
+
             WindowEvent::MouseCancelled | WindowEvent::FocusChanged(false) => {
                 self.released.extend(self.pressed.drain());
                 self.cursor = None;
             }
+
             _ => {}
         }
     }

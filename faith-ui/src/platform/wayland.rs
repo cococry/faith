@@ -15,6 +15,7 @@ use nix::{
     poll::{PollFd, PollFlags, poll},
     sys::eventfd::{EfdFlags, EventFd},
 };
+
 use wayland_client::{
     Connection, Dispatch, EventQueue, Proxy, QueueHandle,
     protocol::{wl_compositor, wl_keyboard, wl_pointer, wl_registry, wl_seat, wl_surface},
@@ -113,6 +114,7 @@ impl WaylandState {
             if pointer.version() >= 3 {
                 pointer.release();
             }
+
             self.pointer_scroll = PointerScroll::default();
             self.pending_events.push(WindowEvent::MouseCancelled);
         }
@@ -178,6 +180,7 @@ impl Dispatch<wl_registry::WlRegistry, WaylandHandler> for WaylandState {
                     ));
                     state.seat_name = Some(name);
                 }
+
                 "wl_compositor" => {
                     let compositor = registry.bind::<wl_compositor::WlCompositor, _, _>(
                         name,
@@ -217,12 +220,15 @@ impl Dispatch<wl_registry::WlRegistry, WaylandHandler> for WaylandState {
             {
                 keyboard.release();
             }
+
             state.remove_pointer();
+
             if let Some(seat) = state.seat.take()
                 && seat.version() >= 5
             {
                 seat.release();
             }
+
             state.seat_name = None;
             state.keyboard = None;
             state.focused = false;
@@ -252,6 +258,7 @@ impl Dispatch<wl_seat::WlSeat, WaylandHandler> for WaylandState {
             } else {
                 state.remove_pointer();
             }
+
             if caps.contains(wl_seat::Capability::Keyboard) {
                 if state.keyboard_proxy.is_none() {
                     state.keyboard_proxy = Some(seat.get_keyboard(qh, WaylandHandler));
@@ -262,6 +269,7 @@ impl Dispatch<wl_seat::WlSeat, WaylandHandler> for WaylandState {
                 {
                     keyboard.release();
                 }
+
                 state.keyboard = None;
                 state.repeat.cancel();
                 state.focused = false;
@@ -281,6 +289,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, WaylandHandler> for WaylandState {
         _: &QueueHandle<Self>,
     ) {
         use wayland_client::WEnum;
+
         match event {
             wl_keyboard::Event::Keymap {
                 format: WEnum::Value(wl_keyboard::KeymapFormat::XkbV1),
@@ -313,11 +322,13 @@ impl Dispatch<wl_keyboard::WlKeyboard, WaylandHandler> for WaylandState {
                     let keyboard_state = xkb::State::new(&keymap);
                     Ok(Keyboard::new(&context, keymap, keyboard_state))
                 })();
+
                 match result {
                     Ok(keyboard) => state.keyboard = Some(keyboard),
                     Err(e) => state.input_error = Some(e.to_string()),
                 }
             }
+
             wl_keyboard::Event::Enter { surface, .. }
                 if state.surface.as_ref() == Some(&surface) =>
             {
@@ -325,14 +336,18 @@ impl Dispatch<wl_keyboard::WlKeyboard, WaylandHandler> for WaylandState {
                 state.repeat.cancel();
                 state.pending_events.push(WindowEvent::FocusChanged(true));
             }
+
             wl_keyboard::Event::Leave { .. } => {
                 state.focused = false;
                 state.repeat.cancel();
+
                 if let Some(keyboard) = &mut state.keyboard {
                     keyboard.reset();
                 }
+
                 state.pending_events.push(WindowEvent::FocusChanged(false));
             }
+
             wl_keyboard::Event::Modifiers {
                 mods_depressed,
                 mods_latched,
@@ -351,6 +366,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, WaylandHandler> for WaylandState {
                     );
                 }
             }
+
             wl_keyboard::Event::RepeatInfo { rate, delay } => state.repeat.configure(rate, delay),
             wl_keyboard::Event::Key {
                 key,
@@ -358,6 +374,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, WaylandHandler> for WaylandState {
                 ..
             } if state.focused => {
                 let code = key + 8;
+
                 if key_state == wl_keyboard::KeyState::Pressed {
                     if let Some(keyboard) = &mut state.keyboard {
                         state.pending_events.extend(keyboard.press(code));
@@ -369,6 +386,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, WaylandHandler> for WaylandState {
                     state.repeat.release(code);
                 }
             }
+
             _ => {}
         }
     }
@@ -507,6 +525,7 @@ impl WaylandPlatform {
         while !state.configured {
             ev_queue.blocking_dispatch(&mut state)?;
         }
+
         let wake_fd = Arc::new(EventFd::from_value_and_flags(
             0,
             EfdFlags::EFD_NONBLOCK | EfdFlags::EFD_CLOEXEC,
@@ -554,11 +573,13 @@ impl WaylandPlatform {
                 {
                     return Ok(true);
                 }
+
                 Err(wayland_client::backend::WaylandError::Io(error))
                     if error.kind() == std::io::ErrorKind::Interrupted =>
                 {
                     continue;
                 }
+
                 Err(error) => return Err(error.into()),
             }
         }
@@ -571,6 +592,7 @@ impl WaylandPlatform {
         if let Some(error) = self.state.input_error.take() {
             anyhow::bail!(error);
         }
+
         if let Some(code) = self.state.repeat.due()
             && let Some(keyboard) = &mut self.state.keyboard
         {
@@ -587,15 +609,18 @@ impl WaylandPlatform {
 
         // prepare_read() returns None when events became pending between
         // dispatch_pending() and prepare_read(). In that case, dispatch again.
+
         let guard = loop {
             if let Some(guard) = self.conn.prepare_read() {
                 break guard;
             }
 
             while self.ev_queue.dispatch_pending(&mut self.state)? > 0 {}
+
             if !self.state.pending_events.is_empty() {
                 return Ok(std::mem::take(&mut self.state.pending_events));
             }
+
             needs_flush = self.flush_pending()?;
         };
 
@@ -622,6 +647,7 @@ impl WaylandPlatform {
             Err(nix::errno::Errno::EINTR) => return Ok(Vec::new()),
             Err(e) => return Err(e.into()),
         }
+
         for fd in &poll_fds {
             anyhow::ensure!(
                 !fd.revents()
@@ -661,9 +687,11 @@ impl WaylandPlatform {
         while self.ev_queue.dispatch_pending(&mut self.state)? > 0 {}
 
         self.flush_pending()?;
+
         if let Some(error) = self.state.input_error.take() {
             anyhow::bail!(error);
         }
+
         if let Some(code) = self.state.repeat.due()
             && let Some(keyboard) = &mut self.state.keyboard
         {
@@ -741,21 +769,41 @@ impl PointerScroll {
         for axis in 0..2 {
             let delta = if let Some(value) = self.lines[axis] {
                 ScrollDelta::Lines {
-                    x: if axis == 0 { value } else { 0.0 },
-                    y: if axis == 1 { value } else { 0.0 },
+                    x: if axis == 0 {
+                        value
+                    } else {
+                        0.0
+                    },
+                    y: if axis == 1 {
+                        value
+                    } else {
+                        0.0
+                    },
                 }
             } else {
                 let value = self.pixels[axis];
+
                 if value == 0.0 {
                     continue;
                 }
+
                 ScrollDelta::Pixels {
-                    x: if axis == 0 { value } else { 0.0 },
-                    y: if axis == 1 { value } else { 0.0 },
+                    x: if axis == 0 {
+                        value
+                    } else {
+                        0.0
+                    },
+                    y: if axis == 1 {
+                        value
+                    } else {
+                        0.0
+                    },
                 }
             };
+
             events.push(WindowEvent::MouseScrolled { delta });
         }
+
         *self = Self::default();
     }
 }
@@ -770,6 +818,7 @@ impl Dispatch<wl_pointer::WlPointer, WaylandHandler> for WaylandState {
         _: &QueueHandle<Self>,
     ) {
         use wayland_client::WEnum;
+
         match event {
             wl_pointer::Event::Enter {
                 surface,
@@ -784,12 +833,14 @@ impl Dispatch<wl_pointer::WlPointer, WaylandHandler> for WaylandState {
                     },
                 });
             }
+
             wl_pointer::Event::Leave { .. } => {
                 state.pending_events.push(WindowEvent::MouseLeft);
                 // Wayland ends pointer focus only after the implicit grab ends.
                 state.pending_events.push(WindowEvent::MouseCancelled);
                 state.pointer_scroll = PointerScroll::default();
             }
+
             wl_pointer::Event::Motion {
                 surface_x,
                 surface_y,
@@ -802,12 +853,14 @@ impl Dispatch<wl_pointer::WlPointer, WaylandHandler> for WaylandState {
                     },
                 });
             }
+
             wl_pointer::Event::Button {
                 button,
                 state: WEnum::Value(button_state),
                 ..
             } => {
                 // wl_pointer uses Linux input-event button codes.
+
                 let button = match button {
                     0x110 => MouseButton::Left,
                     0x111 => MouseButton::Right,
@@ -816,6 +869,7 @@ impl Dispatch<wl_pointer::WlPointer, WaylandHandler> for WaylandState {
                     0x114 | 0x115 => MouseButton::Forward,
                     other => MouseButton::Other(other),
                 };
+
                 state
                     .pending_events
                     .push(if button_state == wl_pointer::ButtonState::Pressed {
@@ -824,6 +878,7 @@ impl Dispatch<wl_pointer::WlPointer, WaylandHandler> for WaylandState {
                         WindowEvent::MouseButtonReleased { button }
                     });
             }
+
             wl_pointer::Event::Axis {
                 axis: WEnum::Value(axis),
                 value,
@@ -834,11 +889,14 @@ impl Dispatch<wl_pointer::WlPointer, WaylandHandler> for WaylandState {
                     wl_pointer::Axis::VerticalScroll => 1,
                     _ => return,
                 };
+
                 state.pointer_scroll.pixels[index] += value;
+
                 if pointer.version() < 5 {
                     state.pointer_scroll.flush(&mut state.pending_events);
                 }
             }
+
             wl_pointer::Event::AxisDiscrete {
                 axis: WEnum::Value(axis),
                 discrete,
@@ -848,8 +906,10 @@ impl Dispatch<wl_pointer::WlPointer, WaylandHandler> for WaylandState {
                     wl_pointer::Axis::VerticalScroll => 1,
                     _ => return,
                 };
+
                 *state.pointer_scroll.lines[index].get_or_insert(0.0) += f64::from(discrete);
             }
+
             wl_pointer::Event::Frame => state.pointer_scroll.flush(&mut state.pending_events),
             _ => {}
         }

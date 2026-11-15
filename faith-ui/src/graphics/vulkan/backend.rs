@@ -6,12 +6,14 @@ use crate::graphics::device::{
     DrawIndexedInstanced, TextureArrayDesc, UniformBindingShaderStage, VertexAttribute,
     VertexBufferBindingLayout, VertexFormat,
 };
+
 use crate::graphics::vulkan::{VulkanBuffer, VulkanPipeline, VulkanTexture, VulkanTextureKind};
 use crate::graphics::{
     BufferDesc, BufferHandle, BufferTarget, BufferUsage, BuiltinShaderPipeline, Color,
     GraphicsDevice, PipelineDesc, PipelineHandle, TextureArrayWrite, TextureDesc, TextureFormat,
     TextureHandle, UniformBindingType, VertexStepMode,
 };
+
 use crate::platform::Platform;
 
 use anyhow::Context;
@@ -19,6 +21,7 @@ use ash::vk::{
     ColorComponentFlags, DescriptorPoolCreateFlags, Extent2D, ImageViewCreateInfo, PipelineCache,
     QueueFlags,
 };
+
 use ash::{Entry, vk};
 use vk_mem::Alloc;
 
@@ -46,6 +49,7 @@ pub struct UploadContext {
     cmd_buf: vk::CommandBuffer,
     fence: vk::Fence,
 }
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FramePhase {
     Idle,
@@ -269,6 +273,7 @@ impl VulkanRenderer {
                 if queue_family.queue_flags.contains(QueueFlags::GRAPHICS) {
                     graphics_queue_family_idx = queue_family_index as isize;
                 }
+
                 let device_supports_presentation = unsafe {
                     surface_inst.get_physical_device_surface_support(
                         phys_dev,
@@ -378,9 +383,11 @@ impl VulkanRenderer {
                 return Ok(*fmt);
             }
         }
+
         if surface_fmts.is_empty() {
             anyhow::bail!("Physical device returned no surface formats.");
         }
+
         Ok(surface_fmts[0])
     }
 
@@ -390,6 +397,7 @@ impl VulkanRenderer {
                 return *mode;
             }
         }
+
         vk::PresentModeKHR::FIFO
     }
 
@@ -906,6 +914,7 @@ impl VulkanRenderer {
             unsafe {
                 logical_dev.destroy_fence(upload.fence, None);
             }
+
             upload.fence = vk::Fence::null();
         }
 
@@ -915,6 +924,7 @@ impl VulkanRenderer {
             unsafe {
                 logical_dev.destroy_command_pool(upload.cmd_pool, None);
             }
+
             upload.cmd_pool = vk::CommandPool::null();
             upload.cmd_buf = vk::CommandBuffer::null();
         }
@@ -1078,6 +1088,7 @@ impl VulkanRenderer {
                     );
                 }
             }
+
             Platform::Wayland(_) => {
                 if !have_ext_vk_khr_wayland_surface {
                     anyhow::bail!("VK_KHR_wayland_surface is not supported.");
@@ -1142,6 +1153,7 @@ impl VulkanRenderer {
                 phys_dev,
             ))?
         };
+
         let upload_ctx = Self::create_upload_context(&logical_device, graphics_queue_family_idx)?;
         let staging_buf = Self::create_vk_buffer_raw(
             &allocator,
@@ -1556,6 +1568,7 @@ impl VulkanRenderer {
 
         Ok(())
     }
+
     fn buffer_target_barrier_dst(
         target: BufferTarget,
     ) -> anyhow::Result<(vk::PipelineStageFlags, vk::AccessFlags)> {
@@ -1658,6 +1671,7 @@ impl VulkanRenderer {
         };
 
         self.swapchain.image_idx = image_idx;
+
         if self.swapchain.imgs_in_flight[image_idx] != vk::Fence::null() {
             unsafe {
                 self.logical_device.wait_for_fences(
@@ -1849,6 +1863,7 @@ impl VulkanRenderer {
 
         Ok(())
     }
+
     pub fn clear_color(&mut self, color: Color) {
         self.clear_color = [color.r, color.g, color.b, color.a];
     }
@@ -1946,6 +1961,7 @@ impl VulkanRenderer {
                 include_bytes!(concat!(env!("OUT_DIR"), "/frag_dedicated.spv")).as_slice(),
             ),
         };
+
         let vert_module = self.create_shader_module_from_bytes(vertex_spv)?;
         let frag_module = self.create_shader_module_from_bytes(fragment_spv)?;
 
@@ -2028,6 +2044,7 @@ impl VulkanRenderer {
                 attribs.push(self.get_vertex_input_attribute_desc(attr, binding.binding)?);
             }
         }
+
         let vertex_input_state = vk::PipelineVertexInputStateCreateInfo {
             vertex_binding_description_count: bindings.len() as u32,
             vertex_attribute_description_count: attribs.len() as u32,
@@ -2038,13 +2055,16 @@ impl VulkanRenderer {
 
         let mut pc_size: u32 = 0;
         let mut stage_flags = vk::ShaderStageFlags::empty();
+
         for pc in &desc.uniform_bindings {
             if pc.ty == UniformBindingType::Vec2 {
                 pc_size += size_of::<f32>() as u32 * 2;
+
                 let vk_stage = match pc.stage {
                     UniformBindingShaderStage::Vertex => vk::ShaderStageFlags::VERTEX,
                     UniformBindingShaderStage::Fragment => vk::ShaderStageFlags::FRAGMENT,
                 };
+
                 stage_flags |= vk_stage;
             }
         }
@@ -2068,6 +2088,7 @@ impl VulkanRenderer {
             if binding.ty != UniformBindingType::Sampler2dArray {
                 continue;
             }
+
             let vk_type = match binding.ty {
                 UniformBindingType::Sampler2dArray => vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                 _ => anyhow::bail!("This should not exist."),
@@ -2566,6 +2587,7 @@ impl VulkanRenderer {
             if self.frame_phase == FramePhase::InRenderPass {
                 anyhow::bail!("device local write_buffer called after render pass started");
             }
+
             self.transfer_to_device_local_buffer(handle, offset, data)
         }
     }
@@ -2741,6 +2763,7 @@ impl VulkanRenderer {
 
         Ok(())
     }
+
     pub fn set_pipeline(&mut self, handle: PipelineHandle) -> anyhow::Result<()> {
         self.ensure_render_pass_started()?;
 
@@ -3113,6 +3136,7 @@ impl VulkanRenderer {
                 self.staging_ring.cap,
             );
         }
+
         if desc.width > self.phys_dev_limits.max_image_dimension2_d
             || desc.height > self.phys_dev_limits.max_image_dimension2_d
         {

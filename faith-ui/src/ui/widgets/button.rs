@@ -31,15 +31,18 @@ pub fn appearance(mut style: Style, hovered: bool, pressed: bool) -> Style {
     if !hovered && !pressed {
         return style;
     }
+
     let original = style.background;
     let hover = style
         .hover_color
         .or_else(|| original.map(|c| darken(c, 0.05)));
+
     let target = if pressed {
         style.click_color.or_else(|| hover.map(|c| darken(c, 0.05)))
     } else {
         hover
     };
+
     let change = match (original, target) {
         (Some(base), Some(target)) => {
             let base = brightness(base);
@@ -51,6 +54,7 @@ pub fn appearance(mut style: Style, hovered: bool, pressed: bool) -> Style {
                 delta
             }
         }
+
         _ => {
             if pressed {
                 -0.0975
@@ -59,17 +63,21 @@ pub fn appearance(mut style: Style, hovered: bool, pressed: bool) -> Style {
             }
         }
     };
+
     style.background = target;
     style.color = if change < 0.0 {
         brighten(style.color, (-change).min(1.0))
     } else {
         darken(style.color, change.min(1.0))
     };
+
     style
 }
+
 fn brightness(color: Color) -> f32 {
     color.r * 0.2126 + color.g * 0.7152 + color.b * 0.0722
 }
+
 fn darken(color: Color, amount: f32) -> Color {
     Color::rgba(
         color.r * (1.0 - amount),
@@ -78,6 +86,7 @@ fn darken(color: Color, amount: f32) -> Color {
         color.a,
     )
 }
+
 fn brighten(color: Color, amount: f32) -> Color {
     Color::rgba(
         color.r + (1.0 - color.r) * amount,
@@ -96,11 +105,13 @@ use crate::platform::{
 pub struct State {
     held: bool,
 }
+
 pub struct Response {
     pub clicked: bool,
     pub hovered: bool,
     pub pressed: bool,
 }
+
 impl State {
     /// Capture only presses originating here. Leaving removes the pressed
     /// appearance; release elsewhere or cancellation never activates a button.
@@ -118,17 +129,21 @@ impl State {
                     && p.y < (bounds.y + bounds.height) as f64
             })
         };
+
         let mut clicked = false;
+
         for event in events {
             match event {
                 WindowEvent::MouseEntered { position } | WindowEvent::MouseMoved { position } => {
                     pointer = Some(*position)
                 }
+
                 WindowEvent::MouseLeft => pointer = None,
                 WindowEvent::MouseCancelled => {
                     self.held = false;
                     pointer = None;
                 }
+
                 WindowEvent::FocusChanged(false) => self.held = false,
                 WindowEvent::MouseButtonPressed {
                     button: MouseButton::Left,
@@ -139,9 +154,11 @@ impl State {
                     clicked |= self.held && inside(pointer);
                     self.held = false;
                 }
+
                 _ => {}
             }
         }
+
         let hovered = inside(pointer);
         Response {
             clicked,
