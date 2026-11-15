@@ -215,10 +215,10 @@ impl App {
             Action::ListPage(offset) => self.list_offset = offset,
             Action::Conversation(id) => self.conversation = Some(id),
             Action::SettingsItem(item) => {
-                if item == SettingsItem::Theme {
-                    if let Err(error) = self.themes.refresh() {
-                        self.error = format!("Could not discover themes: {error:#}");
-                    }
+                if item == SettingsItem::Theme
+                    && let Err(error) = self.themes.refresh()
+                {
+                    self.error = format!("Could not discover themes: {error:#}");
                 }
 
                 self.settings_item = item;
@@ -1294,12 +1294,12 @@ fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyh
         .saved_at
         .map(|saved| settings::confirmation_opacity(saved, app.animations, app.animation_curve))
         .unwrap_or(0.0);
-    if app.settings_error.is_empty() {
-        if let Some(deadline) = app.saved_at.and_then(|saved| {
+    if app.settings_error.is_empty()
+        && let Some(deadline) = app.saved_at.and_then(|saved| {
             settings::confirmation_deadline(saved, std::time::Instant::now(), app.animations)
-        }) {
-            ui.animate_until(deadline);
-        }
+        })
+    {
+        ui.animate_until(deadline);
     }
 
     let feedback = if app.settings_error.is_empty() {

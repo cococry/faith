@@ -235,10 +235,8 @@ impl Framework {
         self.animations = enabled;
         self.curve = curve;
 
-        if !enabled {
-            if let Some((_, target, _)) = self.theme_transition.take() {
-                self.theme = target;
-            }
+        if !enabled && let Some((_, target, _)) = self.theme_transition.take() {
+            self.theme = target;
         }
     }
 
