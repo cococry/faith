@@ -50,26 +50,24 @@ supports concurrent networking, implements a custom binary protocol and uses TLS
 
 ## Build & Run
 
-As faith is written in Rust, use cargo to build:
+To run faith, you will first need to start the local development server. This will run two API servers
+and the database server on your local machine. For the script to work, you will need a functional `docker`
+setup with `docker compose` available.
 
+Start the server:
 ```console
 git clone https://github.com/cococry/faith
 cd faith
-cargo build --release
+./scripts/boot_system.sh
 ```
 
-Run it directly:
+Once the server is running, start the GUI client with the default options.
+
+From the project root:
 ```console
-./target/release/faith
+cd faith-ui
+cargo run
 ```
-
-Or install it into your Cargo binary directory:
-```console
-cargo install --path .
-faith
-```
-
-Make sure `~/.cargo/bin` is in your `PATH` env variable.
 
 ## Contributing to faith 
 
