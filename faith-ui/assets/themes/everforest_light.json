@@ -1,0 +1,18 @@
+{
+  "name": "Everforest (Light)",
+  "background": "#fff9e8",
+  "surface": "#f0ead9",
+  "selected_icon": "#3a94c5",
+  "separator": "#e8e2d1",
+  "text": "#272f35",
+  "muted": "#686c6b",
+  "border": "#c2bcab",
+  "input": "#e0dac9",
+  "button": "#d1cbba",
+  "button_text": "#272f35",
+  "primary": "#3a94c5",
+  "primary_text": "#272f35",
+  "success": "#5da111",
+  "warning": "#dfa000",
+  "error": "#c85552"
+}

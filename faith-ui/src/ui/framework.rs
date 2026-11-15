@@ -44,7 +44,7 @@ impl Default for Style {
     fn default() -> Self {
         Self {
             font_size: 16,
-            color: Theme::LIGHT.text,
+            color: Theme::default().text,
             background: None,
             hover_color: None,
             click_color: None,
@@ -192,7 +192,7 @@ impl Framework {
     ) -> anyhow::Result<Self> {
         let (w, h) = platform.size();
         let mut framework = Self {
-            theme: Theme::LIGHT,
+            theme: Theme::default(),
             theme_transition: None,
             theme_animating: false,
             animations: true,
@@ -235,10 +235,8 @@ impl Framework {
         self.animations = enabled;
         self.curve = curve;
 
-        if !enabled {
-            if let Some((_, target, _)) = self.theme_transition.take() {
-                self.theme = target;
-            }
+        if !enabled && let Some((_, target, _)) = self.theme_transition.take() {
+            self.theme = target;
         }
     }
 
@@ -803,14 +801,21 @@ impl Framework {
         };
 
         let state = self.dropdowns.entry(id.to_owned()).or_default();
-        let response = state.update(bounds, popup, options.len(), self.batch_pointer, events);
+        let response = state.update(
+            bounds,
+            popup,
+            options.len(),
+            selected,
+            self.batch_pointer,
+            events,
+        );
         let open = state.open;
 
         if open {
             self.active_dropdown = Some(id.to_owned());
-            let mut row_styles = Vec::with_capacity(options.len());
+            let mut row_styles = Vec::with_capacity(response.visible);
 
-            for index in 0..options.len() {
+            for index in response.first..response.first + response.visible {
                 let style = Style {
                     color: self.theme.text,
                     background: (response.hovered_row == Some(index) || selected == index)
@@ -823,7 +828,12 @@ impl Framework {
             self.pending_popup = Some(dropdown::Popup {
                 row_styles,
                 bounds: popup,
-                options: options.iter().map(|value| (*value).to_owned()).collect(),
+                options: options[response.first..response.first + response.visible]
+                    .iter()
+                    .map(|value| (*value).to_owned())
+                    .collect(),
+                first: response.first,
+                total: options.len(),
                 selected,
                 font,
                 icons,

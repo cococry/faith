@@ -15,7 +15,7 @@ use profiles::Profile;
 use ui::{
     framework::{DivOptions, Font, Fonts, Framework, Style},
     renderer::Image,
-    theme::ThemeName,
+    theme::{self, Catalog},
     widgets::input::InputOptions,
 };
 
@@ -54,6 +54,7 @@ enum Action {
     Select(usize),
     Create(String),
     Choose,
+    CancelCreate,
     New,
     Retry,
     Chats,
@@ -61,7 +62,7 @@ enum Action {
     ToggleMenu,
     ListPage(usize),
     Conversation(faith_client::Id),
-    Theme(ThemeName),
+    Theme(String),
     SettingsItem(SettingsItem),
     Rounded(bool),
     Animations(bool),
@@ -75,11 +76,13 @@ struct App {
     selected: Option<Profile>,
     session: Option<client::Session>,
     page: Page,
+    creating_profile: bool,
     error: String,
     collapsed: bool,
     list_offset: usize,
     conversation: Option<faith_client::Id>,
-    theme: ThemeName,
+    theme: String,
+    themes: Catalog,
     settings_item: SettingsItem,
     rounded: bool,
     animations: bool,
@@ -95,7 +98,7 @@ impl App {
         self.saved_at = None;
         self.settings_error.clear();
         self.settings.save(settings::Settings {
-            theme: self.theme,
+            theme: self.theme.clone(),
             rounded_corners: self.rounded,
             animations: self.animations,
             animation_curve: self.animation_curve,
@@ -109,6 +112,7 @@ impl App {
         self.conversation = None;
         self.list_offset = 0;
         self.page = Page::Conversations;
+        self.creating_profile = false;
         self.selected = Some(profile.clone());
 
         // The client worker handles connection and authentication.
@@ -150,7 +154,11 @@ impl App {
             },
 
             // Refresh the profiles when opening the account list.
-            Action::Choose => {
+            Action::Choose | Action::CancelCreate => {
+                if matches!(action, Action::CancelCreate) {
+                    self.creating_profile = false;
+                }
+
                 self.error.clear();
 
                 match profiles::discover(&self.root) {
@@ -167,7 +175,7 @@ impl App {
                     Err(error) => self.error = error.to_string(),
                 }
 
-                self.page = if self.profiles.is_empty() {
+                self.page = if self.creating_profile || self.profiles.is_empty() {
                     Page::Create
                 } else {
                     Page::Accounts
@@ -180,6 +188,7 @@ impl App {
             Action::New => {
                 self.error.clear();
                 ui.clear_input("new-profile-handle");
+                self.creating_profile = true;
                 self.page = Page::Create;
             }
 
@@ -194,11 +203,27 @@ impl App {
                 self.list_offset = 0;
             }
 
-            Action::Settings => self.page = Page::Settings,
+            Action::Settings => {
+                if let Err(error) = self.themes.refresh() {
+                    self.error = format!("Could not discover themes: {error:#}");
+                }
+
+                self.page = Page::Settings;
+            }
+
             Action::ToggleMenu => self.collapsed = !self.collapsed,
             Action::ListPage(offset) => self.list_offset = offset,
             Action::Conversation(id) => self.conversation = Some(id),
-            Action::SettingsItem(item) => self.settings_item = item,
+            Action::SettingsItem(item) => {
+                if item == SettingsItem::Theme
+                    && let Err(error) = self.themes.refresh()
+                {
+                    self.error = format!("Could not discover themes: {error:#}");
+                }
+
+                self.settings_item = item;
+            }
+
             Action::Rounded(enabled) => {
                 self.rounded = enabled;
                 ui.set_rounded_corners(enabled);
@@ -217,11 +242,16 @@ impl App {
                 self.save_settings();
             }
 
-            Action::Theme(theme) => {
-                self.theme = theme;
-                ui.set_theme(theme.colors());
-                self.save_settings();
-            }
+            Action::Theme(theme) => match self.themes.load(&theme) {
+                Ok(colors) => {
+                    self.theme = theme;
+                    self.error.clear();
+                    ui.set_theme(colors);
+                    self.save_settings();
+                }
+
+                Err(error) => self.error = format!("{error:#}"),
+            },
         }
 
         platform.request_redraw()?;
@@ -803,15 +833,7 @@ fn profile_creation_page(
     ui.text(gpu, LOCK, Some(Font::Icons))?;
     ui.pop_style();
     ui.space(20.0);
-    label(
-        ui,
-        gpu,
-        "New profile",
-        26,
-        true,
-        false,
-        false,
-    )?;
+    label(ui, gpu, "New profile", 26, true, false, false)?;
     ui.space(12.0);
     label(
         ui,
@@ -876,7 +898,7 @@ fn profile_creation_page(
             false,
             false,
         )? {
-            action = Action::Choose;
+            action = Action::CancelCreate;
         }
     }
 
@@ -1124,25 +1146,34 @@ fn settings_page(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::R
 
     ui.push_sizing(Some(width.min(340.0)), None);
 
-    // Switch between the available themes without leaving the page.
-    let choice = ui.dropdown(
-        gpu,
-        "settings-theme-dropdown",
-        &["Dark (Gruvbox)", "Light (Blossom Light)"],
-        if app.theme == ThemeName::Dark {
-            0
-        } else {
-            1
-        },
-    )?;
+    let options: Vec<&str> = app.themes.names.iter().map(String::as_str).collect();
+    let selected = app
+        .themes
+        .ids
+        .iter()
+        .position(|id| *id == app.theme)
+        .unwrap_or(0);
+    let choice = if options.is_empty() {
+        None
+    } else {
+        ui.dropdown(gpu, "settings-theme-dropdown", &options, selected)?
+    };
     ui.pop_sizing();
     ui.pop_style();
+    ui.space(16.0);
+    label(
+        ui,
+        gpu,
+        "Add JSON files to the themes folder, then reopen Settings.",
+        13,
+        false,
+        true,
+        false,
+    )?;
     end_panel(ui);
-    Ok(match choice {
-        Some(0) => Action::Theme(ThemeName::Dark),
-        Some(1) => Action::Theme(ThemeName::Light),
-        _ => Action::None,
-    })
+    Ok(choice.map_or(Action::None, |index| {
+        Action::Theme(app.themes.ids[index].clone())
+    }))
 }
 
 // Arrange the navigation rail, item list and main content.
@@ -1263,12 +1294,12 @@ fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyh
         .saved_at
         .map(|saved| settings::confirmation_opacity(saved, app.animations, app.animation_curve))
         .unwrap_or(0.0);
-    if app.settings_error.is_empty() {
-        if let Some(deadline) = app.saved_at.and_then(|saved| {
+    if app.settings_error.is_empty()
+        && let Some(deadline) = app.saved_at.and_then(|saved| {
             settings::confirmation_deadline(saved, std::time::Instant::now(), app.animations)
-        }) {
-            ui.animate_until(deadline);
-        }
+        })
+    {
+        ui.animate_until(deadline);
     }
 
     let feedback = if app.settings_error.is_empty() {
@@ -1349,16 +1380,26 @@ fn main() -> anyhow::Result<()> {
     )?;
     let root = profiles::root()?;
     let settings_path = root.parent().unwrap().join("settings.json");
-    let (mut preferences, settings_error) = match settings::Settings::load(&settings_path) {
+    let (mut preferences, mut settings_error) = match settings::Settings::load(&settings_path) {
         Ok(settings) => (settings, String::new()),
         Err(error) => (settings::Settings::default(), format!("{error:#}")),
     };
 
     if explicit_theme {
-        preferences.theme = cli.theme;
+        preferences.theme = cli.theme.clone();
     }
 
-    ui.set_theme(preferences.theme.colors());
+    let themes = Catalog::open(root.parent().unwrap().join("themes"))?;
+    preferences.theme = theme::canonical_id(&preferences.theme).to_owned();
+    let colors = match themes.load(&preferences.theme) {
+        Ok(colors) => colors,
+        Err(error) => {
+            settings_error = format!("{error:#}");
+            preferences.theme = theme::DEFAULT_ID.to_owned();
+            themes.load(theme::DEFAULT_ID).unwrap_or_default()
+        }
+    };
+    ui.set_theme(colors);
     ui.set_rounded_corners(preferences.rounded_corners);
     ui.set_animations(preferences.animations, preferences.animation_curve);
 
@@ -1370,11 +1411,13 @@ fn main() -> anyhow::Result<()> {
         selected: None,
         session: None,
         page: Page::Create,
+        creating_profile: false,
         error: String::new(),
         collapsed: false,
         list_offset: 0,
         conversation: None,
         theme: preferences.theme,
+        themes,
         settings_item: SettingsItem::Theme,
         rounded: preferences.rounded_corners,
         animations: preferences.animations,

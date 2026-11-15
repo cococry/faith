@@ -1,0 +1,18 @@
+{
+  "name": "Solarized (Light)",
+  "background": "#fdf6e3",
+  "surface": "#ede7d3",
+  "selected_icon": "#268bd2",
+  "separator": "#e0dbc3",
+  "text": "#002b36",
+  "muted": "#4c686a",
+  "border": "#ddd6be",
+  "input": "#e8dfc9",
+  "button": "#e4ddc4",
+  "button_text": "#002b36",
+  "primary": "#268bd2",
+  "primary_text": "#002b36",
+  "success": "#859900",
+  "warning": "#b58900",
+  "error": "#dc322f"
+}

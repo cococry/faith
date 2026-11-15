@@ -3,8 +3,12 @@ use clap::{Parser, ValueEnum};
 #[derive(Debug, Parser)]
 #[command(name = "faith")]
 pub struct Cli {
-    #[arg(long, value_enum, default_value_t = crate::ui::theme::ThemeName::Light)]
-    pub theme: crate::ui::theme::ThemeName,
+    #[arg(
+        long,
+        default_value = crate::ui::theme::DEFAULT_ID,
+        help = "Theme filename without .json"
+    )]
+    pub theme: String,
 
     #[arg(long, default_value = "127.0.0.1")]
     pub host: String,

@@ -1,0 +1,18 @@
+{
+  "name": "Bloodvoid",
+  "background": "#111111",
+  "surface": "#151515",
+  "selected_icon": "#b8b8b8",
+  "separator": "#202020",
+  "text": "#d8d8d8",
+  "muted": "#8a8a8a",
+  "border": "#303030",
+  "input": "#181818",
+  "button": "#202020",
+  "button_text": "#d8d8d8",
+  "primary": "#635a46",
+  "primary_text": "#d8d8d8",
+  "success": "#415237",
+  "warning": "#99883f",
+  "error": "#8f6a5a"
+}

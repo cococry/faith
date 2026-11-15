@@ -1,0 +1,18 @@
+{
+  "name": "Monekai (Monokai inspired)",
+  "background": "#272822",
+  "surface": "#2f302a",
+  "selected_icon": "#51afef",
+  "separator": "#363942",
+  "text": "#f5f4f1",
+  "muted": "#b7b7b3",
+  "border": "#464741",
+  "input": "#363731",
+  "button": "#3e3f39",
+  "button_text": "#f5f4f1",
+  "primary": "#51afef",
+  "primary_text": "#272822",
+  "success": "#96c367",
+  "warning": "#e6c181",
+  "error": "#e36d76"
+}

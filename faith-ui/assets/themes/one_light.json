@@ -1,0 +1,18 @@
+{
+  "name": "One Light",
+  "background": "#fafafa",
+  "surface": "#eaeaeb",
+  "selected_icon": "#4078f2",
+  "separator": "#e2e2e2",
+  "text": "#54555b",
+  "muted": "#86868b",
+  "border": "#cccccd",
+  "input": "#dadadb",
+  "button": "#d4d4d5",
+  "button_text": "#54555b",
+  "primary": "#4078f2",
+  "primary_text": "#fafafa",
+  "success": "#50a14f",
+  "warning": "#c18401",
+  "error": "#d84a3d"
+}

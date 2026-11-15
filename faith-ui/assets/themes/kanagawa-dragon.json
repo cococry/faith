@@ -1,0 +1,18 @@
+{
+  "name": "Kanagawa Dragon",
+  "background": "#181616",
+  "surface": "#1f1d1d",
+  "selected_icon": "#8ba4b0",
+  "separator": "#282727",
+  "text": "#adada4",
+  "muted": "#808079",
+  "border": "#343232",
+  "input": "#262424",
+  "button": "#2d2b2b",
+  "button_text": "#adada4",
+  "primary": "#8ba4b0",
+  "primary_text": "#181616",
+  "success": "#8a9a7b",
+  "warning": "#c4b28a",
+  "error": "#c4746e"
+}

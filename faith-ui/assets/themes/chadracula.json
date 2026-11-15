@@ -1,0 +1,18 @@
+{
+  "name": "Chadracula (Dracula inspired)",
+  "background": "#282a36",
+  "surface": "#2d303e",
+  "selected_icon": "#a1b1e3",
+  "separator": "#3c3d49",
+  "text": "#f8f8f2",
+  "muted": "#bababa",
+  "border": "#565761",
+  "input": "#373844",
+  "button": "#44475a",
+  "button_text": "#f8f8f2",
+  "primary": "#a1b1e3",
+  "primary_text": "#282a36",
+  "success": "#50fa7b",
+  "warning": "#f1fa8c",
+  "error": "#ff7070"
+}

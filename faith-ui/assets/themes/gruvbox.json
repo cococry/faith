@@ -1,0 +1,18 @@
+{
+  "name": "Gruvbox (Dark)",
+  "background": "#282828",
+  "surface": "#232323",
+  "selected_icon": "#bdae93",
+  "separator": "#3c3836",
+  "text": "#ebdbb2",
+  "muted": "#bdae93",
+  "border": "#656565",
+  "input": "#282828",
+  "button": "#3c3836",
+  "button_text": "#ebdbb2",
+  "primary": "#83a598",
+  "primary_text": "#282828",
+  "success": "#b8bb26",
+  "warning": "#fabd2f",
+  "error": "#fb4934"
+}

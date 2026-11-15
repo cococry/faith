@@ -1,0 +1,18 @@
+{
+  "name": "Rosé Pine Dawn",
+  "background": "#faf4ed",
+  "surface": "#ede1d6",
+  "selected_icon": "#56949f",
+  "separator": "#eadccf",
+  "text": "#575279",
+  "muted": "#88839c",
+  "border": "#dec7b3",
+  "input": "#eadccf",
+  "button": "#e4d2c1",
+  "button_text": "#575279",
+  "primary": "#56949f",
+  "primary_text": "#faf4ed",
+  "success": "#286983",
+  "warning": "#ea9d34",
+  "error": "#b4637a"
+}

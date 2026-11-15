@@ -1,0 +1,18 @@
+{
+  "name": "One Dark",
+  "background": "#1e222a",
+  "surface": "#252931",
+  "selected_icon": "#61afef",
+  "separator": "#31353d",
+  "text": "#abb2bf",
+  "muted": "#818792",
+  "border": "#373b43",
+  "input": "#282c34",
+  "button": "#353b45",
+  "button_text": "#abb2bf",
+  "primary": "#61afef",
+  "primary_text": "#1e222a",
+  "success": "#98c379",
+  "warning": "#e7c787",
+  "error": "#e06c75"
+}

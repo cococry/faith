@@ -1,0 +1,18 @@
+{
+  "name": "Everforest (Dark)",
+  "background": "#2b3339",
+  "surface": "#323a40",
+  "selected_icon": "#7393b3",
+  "separator": "#3a4248",
+  "text": "#d3c6aa",
+  "muted": "#a19a88",
+  "border": "#3a4248",
+  "input": "#363e44",
+  "button": "#363e44",
+  "button_text": "#d3c6aa",
+  "primary": "#7393b3",
+  "primary_text": "#2b3339",
+  "success": "#83c092",
+  "warning": "#dbbc7f",
+  "error": "#e67e80"
+}

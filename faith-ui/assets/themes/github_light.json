@@ -1,0 +1,18 @@
+{
+  "name": "GitHub (Light)",
+  "background": "#ffffff",
+  "surface": "#edeff1",
+  "selected_icon": "#0d7fdd",
+  "separator": "#eaecee",
+  "text": "#24292e",
+  "muted": "#66696d",
+  "border": "#d7d9db",
+  "input": "#eaecee",
+  "button": "#e1e3e5",
+  "button_text": "#24292e",
+  "primary": "#0d7fdd",
+  "primary_text": "#ffffff",
+  "success": "#18654b",
+  "warning": "#dbab09",
+  "error": "#de2c2e"
+}

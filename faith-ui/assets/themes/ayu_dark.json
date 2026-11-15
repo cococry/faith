@@ -1,0 +1,18 @@
+{
+  "name": "Ayu (Dark)",
+  "background": "#0b0e14",
+  "surface": "#14171d",
+  "selected_icon": "#36a3d9",
+  "separator": "#24272d",
+  "text": "#ced4df",
+  "muted": "#9399a2",
+  "border": "#2b2e34",
+  "input": "#1c1f25",
+  "button": "#24272d",
+  "button_text": "#ced4df",
+  "primary": "#36a3d9",
+  "primary_text": "#0b0e14",
+  "success": "#aad84c",
+  "warning": "#e7c547",
+  "error": "#f07178"
+}
