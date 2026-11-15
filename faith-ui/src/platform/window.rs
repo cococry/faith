@@ -1,3 +1,11 @@
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
+
 use super::{event::WindowEvent, mouse::Mouse};
 use crate::{
     cli::PlatformBackend,
@@ -23,6 +31,7 @@ pub struct WindowConfig {
 #[allow(dead_code)]
 pub struct PlatformWaker {
     inner: PlatformWakerInner,
+    timing: FrameTiming,
 }
 
 #[derive(Clone)]
@@ -30,6 +39,27 @@ pub struct PlatformWaker {
 enum PlatformWakerInner {
     X11(X11Waker),
     Wayland(WaylandWaker),
+}
+
+#[derive(Clone)]
+pub(crate) struct FrameTiming(Arc<AtomicU64>);
+
+impl Default for FrameTiming {
+    fn default() -> Self {
+        Self(Arc::new(AtomicU64::new(1_000_000_000 / 60)))
+    }
+}
+
+impl FrameTiming {
+    pub fn set_refresh_millihz(&self, refresh: u64) {
+        if let Some(interval) = 1_000_000_000_000u64.checked_div(refresh) {
+            self.0.store(interval, Ordering::Relaxed);
+        }
+    }
+
+    fn interval(&self) -> Duration {
+        Duration::from_nanos(self.0.load(Ordering::Relaxed).max(1))
+    }
 }
 
 impl Default for WindowConfig {
@@ -63,6 +93,10 @@ pub enum WindowHandleInfo {
 }
 
 impl PlatformWaker {
+    pub fn frame_interval(&self) -> Duration {
+        self.timing.interval()
+    }
+
     #[allow(dead_code)]
     pub fn request_redraw(&self) -> anyhow::Result<()> {
         match &self.inner {
@@ -185,10 +219,12 @@ impl Platform {
         match self {
             Platform::X11(platform) => PlatformWaker {
                 inner: PlatformWakerInner::X11(platform.waker()),
+                timing: platform.frame_timing.clone(),
             },
 
             Platform::Wayland(platform) => PlatformWaker {
                 inner: PlatformWakerInner::Wayland(platform.waker()),
+                timing: platform.frame_timing().clone(),
             },
         }
     }

@@ -18,6 +18,7 @@ use ash::vk::{XcbSurfaceCreateInfoKHR, XlibSurfaceCreateInfoKHR};
 use x11rb::COPY_DEPTH_FROM_PARENT;
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
+use x11rb::protocol::randr::{ConnectionExt as _, ModeFlag, NotifyMask};
 use x11rb::protocol::xproto::ConnectionExt as _;
 use x11rb::protocol::xproto::{
     AtomEnum, CreateWindowAux, EventMask, PixmapEnum, PropMode, WindowClass,
@@ -39,6 +40,7 @@ use x11::xlib_xcb::{XEventQueueOwner::XCBOwnsEventQueue, XGetXCBConnection, XSet
 /// X11 window and wake file descriptor used to
 /// drive the window event loop.
 pub struct X11Platform {
+    pub(crate) frame_timing: super::window::FrameTiming,
     width: u32,
     height: u32,
 
@@ -257,7 +259,13 @@ impl X11Platform {
         .reply()?;
         conn.flush()?;
 
-        Ok(Self {
+        let root = screen.root;
+        let _ = conn.randr_select_input(
+            root,
+            NotifyMask::SCREEN_CHANGE | NotifyMask::CRTC_CHANGE | NotifyMask::OUTPUT_CHANGE,
+        );
+        let platform = Self {
+            frame_timing: super::window::FrameTiming::default(),
             width: window_config.width,
             height: window_config.height,
             xdisplay,
@@ -270,7 +278,64 @@ impl X11Platform {
             keyboard_device,
             pending_input: Vec::new(),
             wake_fd,
-        })
+        };
+        let _ = platform.update_frame_timing();
+        Ok(platform)
+    }
+
+    fn update_frame_timing(&self) -> anyhow::Result<()> {
+        let geometry = self.xcb_conn.get_geometry(self.window)?.reply()?;
+        let position = self
+            .xcb_conn
+            .translate_coordinates(self.window, geometry.root, 0, 0)?
+            .reply()?;
+        let resources = self
+            .xcb_conn
+            .randr_get_screen_resources_current(geometry.root)?
+            .reply()?;
+        let mut selected = None;
+
+        for crtc in &resources.crtcs {
+            let info = self
+                .xcb_conn
+                .randr_get_crtc_info(*crtc, resources.config_timestamp)?
+                .reply()?;
+            let Some(mode) = resources.modes.iter().find(|mode| mode.id == info.mode) else {
+                continue;
+            };
+            let overlap_w = (i32::from(position.dst_x) + i32::from(geometry.width))
+                .min(i32::from(info.x) + i32::from(info.width))
+                - i32::from(position.dst_x).max(i32::from(info.x));
+            let overlap_h = (i32::from(position.dst_y) + i32::from(geometry.height))
+                .min(i32::from(info.y) + i32::from(info.height))
+                - i32::from(position.dst_y).max(i32::from(info.y));
+            let area = i64::from(overlap_w.max(0)) * i64::from(overlap_h.max(0));
+            let total = u64::from(mode.htotal) * u64::from(mode.vtotal);
+
+            if total == 0 || mode.dot_clock == 0 || area == 0 {
+                continue;
+            }
+
+            let mut refresh = u64::from(mode.dot_clock) * 1000 / total;
+
+            if mode.mode_flags.contains(ModeFlag::INTERLACE) {
+                refresh *= 2;
+            }
+
+            if mode.mode_flags.contains(ModeFlag::DOUBLE_SCAN) {
+                refresh /= 2;
+            }
+
+            if selected.is_none_or(|(best_area, _)| area > best_area) {
+                selected = Some((area, refresh));
+            }
+        }
+
+        if let Some((_, refresh)) = selected {
+            self.frame_timing.set_refresh_millihz(refresh);
+        }
+
+        Ok(())
     }
 
     fn collect_event(
@@ -290,7 +355,13 @@ impl X11Platform {
                 *redraw_requested = true;
             }
 
+            Event::RandrNotify(_) | Event::RandrScreenChangeNotify(_) => {
+                let _ = self.update_frame_timing();
+                *redraw_requested = true;
+            }
+
             Event::ConfigureNotify(e) => {
+                let _ = self.update_frame_timing();
                 self.width = e.width as u32;
                 self.height = e.height as u32;
 

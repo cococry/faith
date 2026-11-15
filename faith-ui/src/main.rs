@@ -3,9 +3,10 @@ mod client;
 mod graphics;
 mod platform;
 mod profiles;
+mod settings;
 mod ui;
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 use graphics::{GraphicsDevice, Renderer};
 use platform::{Platform, WindowConfig, WindowEvent};
 use profiles::Profile;
@@ -74,10 +75,22 @@ struct App {
     theme: ThemeName,
     settings_item: SettingsItem,
     rounded: bool,
+    settings: settings::Store,
+    saved_at: Option<std::time::Instant>,
+    settings_error: String,
 }
 
 // Account sessions and actions returned by the pages.
 impl App {
+    fn save_settings(&mut self) {
+        self.saved_at = None;
+        self.settings_error.clear();
+        self.settings.save(settings::Settings {
+            theme: self.theme,
+            rounded_corners: self.rounded,
+        });
+    }
+
     fn login(&mut self, profile: Profile, cli: &cli::Cli, platform: &Platform) {
         // Stop the old session before selecting another account.
         self.session = None;
@@ -178,11 +191,13 @@ impl App {
             Action::Rounded(enabled) => {
                 self.rounded = enabled;
                 ui.set_rounded_corners(enabled);
+                self.save_settings();
             }
 
             Action::Theme(theme) => {
                 self.theme = theme;
                 ui.set_theme(theme.colors());
+                self.save_settings();
             }
         }
 
@@ -1105,6 +1120,42 @@ fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyh
         ui.pop_style();
     }
 
+    // Keep save feedback small and independent of the active settings section.
+    let opacity = app
+        .saved_at
+        .map(settings::confirmation_opacity)
+        .unwrap_or(0.0);
+    let feedback = if app.settings_error.is_empty() {
+        "Settings saved"
+    } else {
+        &app.settings_error
+    };
+
+    if opacity > 0.0 || !app.settings_error.is_empty() {
+        ui.set_position(28.0, (height - 68.0).max(0.0));
+        let mut color = if app.settings_error.is_empty() {
+            ui.theme().muted
+        } else {
+            ui.theme().error
+        };
+
+        color.a *= if app.settings_error.is_empty() {
+            opacity
+        } else {
+            1.0
+        };
+
+        ui.push_style(Style {
+            font_size: 12,
+            color,
+            ..ui.style()
+        });
+        ui.push_sizing(Some((content - 56.0).max(1.0)), None);
+        ui.text(gpu, feedback, None)?;
+        ui.pop_sizing();
+        ui.pop_style();
+    }
+
     end_panel(ui);
     Ok(action)
 }
@@ -1114,7 +1165,10 @@ fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().init();
 
     // Read startup options and the local TLS configuration.
-    let mut cli = cli::Cli::parse();
+    let matches = cli::Cli::command().get_matches();
+    let explicit_theme =
+        matches.value_source("theme") == Some(clap::parser::ValueSource::CommandLine);
+    let mut cli = cli::Cli::from_arg_matches(&matches)?;
     cli.resolve_local_tls();
     let config = WindowConfig {
         backend: cli.platform,
@@ -1147,8 +1201,19 @@ fn main() -> anyhow::Result<()> {
             .collect(),
         },
     )?;
-    ui.set_theme(cli.theme.colors());
     let root = profiles::root()?;
+    let settings_path = root.parent().unwrap().join("settings.json");
+    let (mut preferences, settings_error) = match settings::Settings::load(&settings_path) {
+        Ok(settings) => (settings, String::new()),
+        Err(error) => (settings::Settings::default(), format!("{error:#}")),
+    };
+
+    if explicit_theme {
+        preferences.theme = cli.theme;
+    }
+
+    ui.set_theme(preferences.theme.colors());
+    ui.set_rounded_corners(preferences.rounded_corners);
 
     // Discover the accounts stored on this machine.
     let profiles = profiles::discover(&root)?;
@@ -1162,9 +1227,12 @@ fn main() -> anyhow::Result<()> {
         collapsed: false,
         list_offset: 0,
         conversation: None,
-        theme: cli.theme,
+        theme: preferences.theme,
         settings_item: SettingsItem::Theme,
-        rounded: false,
+        rounded: preferences.rounded_corners,
+        settings: settings::Store::start(settings_path, platform.waker())?,
+        saved_at: None,
+        settings_error,
     };
 
     // Use an explicit profile, or automatically select the only account.
@@ -1203,6 +1271,18 @@ fn main() -> anyhow::Result<()> {
                 }
 
                 _ => {}
+            }
+        }
+
+        // Show confirmation only after the settings have reached disk.
+        if let Some(result) = app.settings.poll() {
+            match result {
+                Ok(saved) => {
+                    app.saved_at = Some(saved);
+                    app.settings_error.clear();
+                }
+
+                Err(error) => app.settings_error = error,
             }
         }
 
