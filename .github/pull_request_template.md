@@ -6,5 +6,5 @@ Briefly explain what this PR changes.
 
 Describe how you tested this change.
 
-- [ ] `scripts/check.sh` passes locally
+- [ ] `faith-ui/scripts/check.sh` passes locally
 - [ ] CI passes for this pull request
