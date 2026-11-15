@@ -67,6 +67,7 @@ enum Action {
     Rounded(bool),
     Animations(bool),
     AnimationCurve(Curve),
+    SmoothScrolling(bool),
 }
 
 // State shared by the pages.
@@ -87,6 +88,7 @@ struct App {
     rounded: bool,
     animations: bool,
     animation_curve: Curve,
+    smooth_scrolling: bool,
     settings: settings::Store,
     saved_at: Option<std::time::Instant>,
     settings_error: String,
@@ -102,6 +104,7 @@ impl App {
             rounded_corners: self.rounded,
             animations: self.animations,
             animation_curve: self.animation_curve,
+            smooth_scrolling: self.smooth_scrolling,
         });
     }
 
@@ -233,6 +236,12 @@ impl App {
             Action::Animations(enabled) => {
                 self.animations = enabled;
                 ui.set_animations(enabled, self.animation_curve);
+                self.save_settings();
+            }
+
+            Action::SmoothScrolling(enabled) => {
+                self.smooth_scrolling = enabled;
+                ui.set_smooth_scrolling(enabled);
                 self.save_settings();
             }
 
@@ -1041,7 +1050,19 @@ fn logged_in_page(
 fn misc_settings_page(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Result<Action> {
     let width = (ui.div_width() - 64.0).max(1.0);
     let height = (ui.div_height() - 72.0).max(1.0);
-    panel(ui, 32.0, 36.0, width, height, false)?;
+    ui.set_position(32.0, 36.0);
+    ui.push_style(Style {
+        background: Some(ui.theme().background),
+        ..ui.style()
+    });
+    ui.div_begin_id(
+        "settings-misc",
+        DivOptions {
+            width: Some(width),
+            height: Some(height),
+            scrollable: true,
+        },
+    )?;
     label(ui, gpu, "Misc", 26, true, false, false)?;
     ui.space(12.0);
     label(
@@ -1087,7 +1108,7 @@ fn misc_settings_page(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyh
         radius: ui.corner_radii().control,
         ..ui.style()
     });
-    ui.push_sizing(Some(width.min(340.0)), None);
+    ui.push_sizing(Some(ui.div_width().min(340.0)), None);
     let curve = ui.dropdown(
         gpu,
         "settings-animation-curve",
@@ -1099,12 +1120,31 @@ fn misc_settings_page(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyh
     )?;
     ui.pop_sizing();
     ui.pop_style();
+    ui.space(24.0);
+    let smooth = ui.checkbox(
+        gpu,
+        "settings-smooth-scrolling",
+        "Smooth scrolling",
+        app.smooth_scrolling,
+    )?;
+    ui.space(8.0);
+    label(
+        ui,
+        gpu,
+        "Interpolate wheel and touchpad scrolling in containers.",
+        13,
+        false,
+        true,
+        false,
+    )?;
     end_panel(ui);
 
     Ok(if let Some(enabled) = change {
         Action::Rounded(enabled)
     } else if let Some(enabled) = animations {
         Action::Animations(enabled)
+    } else if let Some(enabled) = smooth {
+        Action::SmoothScrolling(enabled)
     } else if let Some(index) = curve {
         Action::AnimationCurve(Curve::ALL[index])
     } else {
@@ -1402,6 +1442,7 @@ fn main() -> anyhow::Result<()> {
     ui.set_theme(colors);
     ui.set_rounded_corners(preferences.rounded_corners);
     ui.set_animations(preferences.animations, preferences.animation_curve);
+    ui.set_smooth_scrolling(preferences.smooth_scrolling);
 
     // Discover the accounts stored on this machine.
     let profiles = profiles::discover(&root)?;
@@ -1422,6 +1463,7 @@ fn main() -> anyhow::Result<()> {
         rounded: preferences.rounded_corners,
         animations: preferences.animations,
         animation_curve: preferences.animation_curve,
+        smooth_scrolling: preferences.smooth_scrolling,
         settings: settings::Store::start(settings_path, platform.waker())?,
         saved_at: None,
         settings_error,

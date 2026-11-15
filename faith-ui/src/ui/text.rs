@@ -846,6 +846,8 @@ impl TextRenderer {
 
         let font_scale = self.font_manager.scale(run_font)?;
         let font_render_scale = self.font_manager.render_scale(run_font)?;
+        let margin = self.font_manager.line_height(run_font)? as f32 * font_scale * 2.0;
+        let clip = ui.clip();
 
         let color = if is_colored {
             crate::graphics::Color::rgba(1.0, 1.0, 1.0, 1.0)
@@ -857,6 +859,15 @@ impl TextRenderer {
 
         for glyph_idx in slice.glyph_range.clone() {
             let shaped = &run.shaped_glyphs[glyph_idx];
+            let glyph_x = pen_x + shaped.x_off * font_scale;
+
+            if glyph_x + shaped.x_adv.abs() * font_scale + margin < clip[0]
+                || glyph_x - margin > clip[2]
+            {
+                pen_x += shaped.x_adv * font_scale;
+                continue;
+            }
+
             let key = GlyphKey {
                 font_handle: run_font,
                 glyph_idx: shaped.glyph_idx,
@@ -927,6 +938,8 @@ impl TextRenderer {
 
         let font_scale = self.font_manager.scale(run_font)?;
         let font_render_scale = self.font_manager.render_scale(run_font)?;
+        let margin = self.font_manager.line_height(run_font)? as f32 * font_scale * 2.0;
+        let clip = ui.clip();
 
         let color = if is_colored {
             crate::graphics::Color::rgba(1.0, 1.0, 1.0, 1.0)
@@ -937,6 +950,15 @@ impl TextRenderer {
         let mut pen_x = run_x;
 
         for shaped in run.shaped_glyphs.iter() {
+            let glyph_x = pen_x + shaped.x_off * font_scale;
+
+            if glyph_x + shaped.x_adv.abs() * font_scale + margin < clip[0]
+                || glyph_x - margin > clip[2]
+            {
+                pen_x += shaped.x_adv * font_scale;
+                continue;
+            }
+
             let key = GlyphKey {
                 font_handle: run_font,
                 glyph_idx: shaped.glyph_idx,
@@ -1014,6 +1036,13 @@ impl TextRenderer {
         let line_height = self.font_manager.line_height(font_handle)? as f32 * base_scale;
 
         for line in text.split('\n') {
+            let clip = ui.clip();
+
+            if baseline_y + line_height < clip[1] || baseline_y - line_height > clip[3] {
+                baseline_y += line_height;
+                continue;
+            }
+
             let runs = self.build_shaped_runs_cached(font_handle, line)?;
 
             let mut cursor_x = x;
@@ -1573,9 +1602,14 @@ impl TextRenderer {
         gpu: &mut G,
         ui: &mut UIRenderer,
     ) -> anyhow::Result<()> {
-        let mut baseline = xy[1] + layout.ascender;
+        let clip = ui.clip();
+        let height = layout.line_height.max(1.0);
+        let first =
+            (((clip[1] - xy[1]) / height).floor().max(0.0) as usize).min(layout.lines.len());
+        let end = (((clip[3] - xy[1]) / height).ceil().max(0.0) as usize).min(layout.lines.len());
+        let mut baseline = xy[1] + layout.ascender + first as f32 * layout.line_height;
 
-        for line in &layout.lines {
+        for line in layout.lines.iter().take(end).skip(first) {
             let offset = if centered {
                 (width - line.width) * 0.5
             } else if line.is_rtl {

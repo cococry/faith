@@ -27,6 +27,7 @@ pub struct Settings {
     #[serde(default = "animations_default")]
     pub animations: bool,
     pub animation_curve: Curve,
+    pub smooth_scrolling: bool,
 }
 
 impl Settings {
@@ -172,6 +173,7 @@ impl Default for Settings {
             rounded_corners: false,
             animations: true,
             animation_curve: Curve::default(),
+            smooth_scrolling: true,
         }
     }
 }
