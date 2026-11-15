@@ -72,6 +72,27 @@ pub struct Theme {
 }
 
 impl Theme {
+    pub fn interpolate(self, target: Self, t: f32) -> Self {
+        Self {
+            radii: target.radii,
+            background: super::animation::color(self.background, target.background, t),
+            surface: super::animation::color(self.surface, target.surface, t),
+            selected_icon: super::animation::color(self.selected_icon, target.selected_icon, t),
+            separator: super::animation::color(self.separator, target.separator, t),
+            text: super::animation::color(self.text, target.text, t),
+            muted: super::animation::color(self.muted, target.muted, t),
+            border: super::animation::color(self.border, target.border, t),
+            input: super::animation::color(self.input, target.input, t),
+            button: super::animation::color(self.button, target.button, t),
+            button_text: super::animation::color(self.button_text, target.button_text, t),
+            primary: super::animation::color(self.primary, target.primary, t),
+            primary_text: super::animation::color(self.primary_text, target.primary_text, t),
+            success: super::animation::color(self.success, target.success, t),
+            warning: super::animation::color(self.warning, target.warning, t),
+            error: super::animation::color(self.error, target.error, t),
+        }
+    }
+
     pub const LIGHT: Self = Self {
         radii: CornerRadii::ROUNDED,
         background: hex(0xe6dfdc),

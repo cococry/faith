@@ -1,4 +1,4 @@
-use super::{button, input::Bounds};
+use super::input::Bounds;
 use crate::{
     graphics::{FontHandle, GraphicsDevice},
     ui::{TextRenderer, UIRenderer, framework::Style, text::TextLayout, theme::Theme},
@@ -11,8 +11,7 @@ pub struct Checkbox {
     pub layout: Arc<TextLayout>,
     pub icons: FontHandle,
     pub checked: bool,
-    pub hovered: bool,
-    pub pressed: bool,
+    pub style: Style,
     pub radius: f32,
 }
 
@@ -26,29 +25,8 @@ impl Checkbox {
     ) -> anyhow::Result<()> {
         let b = self.bounds;
         let box_rect = [b.x, b.y + 6.0, 20.0, 20.0];
-        let style = button::appearance(
-            Style {
-                background: Some(if self.checked {
-                    theme.primary
-                } else {
-                    theme.input
-                }),
-                color: if self.checked {
-                    theme.primary_text
-                } else {
-                    theme.text
-                },
-                ..Style::default()
-            },
-            self.hovered,
-            self.pressed,
-        );
-        ui.rounded_box(
-            box_rect,
-            self.radius,
-            style.background,
-            (!self.checked).then_some(theme.border),
-        )?;
+        let style = self.style;
+        ui.rounded_box(box_rect, self.radius, style.background, style.border_color)?;
 
         if self.checked {
             let metrics = text.measure("\u{eab2}", self.icons)?;

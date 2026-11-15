@@ -1,3 +1,4 @@
+use ui::animation::Curve;
 mod assets;
 mod cli;
 mod client;
@@ -63,6 +64,8 @@ enum Action {
     Theme(ThemeName),
     SettingsItem(SettingsItem),
     Rounded(bool),
+    Animations(bool),
+    AnimationCurve(Curve),
 }
 
 // State shared by the pages.
@@ -79,6 +82,8 @@ struct App {
     theme: ThemeName,
     settings_item: SettingsItem,
     rounded: bool,
+    animations: bool,
+    animation_curve: Curve,
     settings: settings::Store,
     saved_at: Option<std::time::Instant>,
     settings_error: String,
@@ -92,6 +97,8 @@ impl App {
         self.settings.save(settings::Settings {
             theme: self.theme,
             rounded_corners: self.rounded,
+            animations: self.animations,
+            animation_curve: self.animation_curve,
         });
     }
 
@@ -195,6 +202,18 @@ impl App {
             Action::Rounded(enabled) => {
                 self.rounded = enabled;
                 ui.set_rounded_corners(enabled);
+                self.save_settings();
+            }
+
+            Action::Animations(enabled) => {
+                self.animations = enabled;
+                ui.set_animations(enabled, self.animation_curve);
+                self.save_settings();
+            }
+
+            Action::AnimationCurve(curve) => {
+                self.animation_curve = curve;
+                ui.set_animations(self.animations, curve);
                 self.save_settings();
             }
 
@@ -728,7 +747,7 @@ fn brand_page(ui: &mut Framework, gpu: &mut Renderer, logo: Image) -> anyhow::Re
 
     // Let wrapped headings push the tagline down.
     ui.space(32.0);
-    label(ui, gpu, "Faith Messenger", 30, true, false, true)?;
+    label(ui, gpu, "faith.", 30, true, false, true)?;
     ui.space(12.0);
     label(
         ui,
@@ -787,7 +806,7 @@ fn profile_creation_page(
     label(
         ui,
         gpu,
-        "A fresh disposable identity",
+        "New profile",
         26,
         true,
         false,
@@ -797,7 +816,7 @@ fn profile_creation_page(
     label(
         ui,
         gpu,
-        "Create a profile for your private conversations. This is a local alias for your account.",
+        "Create a profile for your private conversations. Enter the alias for your account. You can create unlimited profiles.",
         15,
         false,
         true,
@@ -1033,8 +1052,42 @@ fn misc_settings_page(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyh
         true,
         false,
     )?;
+    ui.space(24.0);
+    let animations = ui.checkbox(gpu, "settings-animations", "UI animations", app.animations)?;
+    ui.space(16.0);
+    label(ui, gpu, "Animation interpolation", 13, true, true, false)?;
+    ui.space(10.0);
+    ui.push_style(Style {
+        font_size: 15,
+        padding: 12.0,
+        background: Some(ui.theme().input),
+        border_color: Some(ui.theme().border),
+        radius: ui.corner_radii().control,
+        ..ui.style()
+    });
+    ui.push_sizing(Some(width.min(340.0)), None);
+    let curve = ui.dropdown(
+        gpu,
+        "settings-animation-curve",
+        &Curve::LABELS,
+        Curve::ALL
+            .iter()
+            .position(|curve| *curve == app.animation_curve)
+            .unwrap_or(1),
+    )?;
+    ui.pop_sizing();
+    ui.pop_style();
     end_panel(ui);
-    Ok(change.map_or(Action::None, Action::Rounded))
+
+    Ok(if let Some(enabled) = change {
+        Action::Rounded(enabled)
+    } else if let Some(enabled) = animations {
+        Action::Animations(enabled)
+    } else if let Some(index) = curve {
+        Action::AnimationCurve(Curve::ALL[index])
+    } else {
+        Action::None
+    })
 }
 
 // The selected settings section and its controls.
@@ -1208,8 +1261,16 @@ fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyh
     // Keep save feedback small and independent of the active settings section.
     let opacity = app
         .saved_at
-        .map(settings::confirmation_opacity)
+        .map(|saved| settings::confirmation_opacity(saved, app.animations, app.animation_curve))
         .unwrap_or(0.0);
+    if app.settings_error.is_empty() {
+        if let Some(deadline) = app.saved_at.and_then(|saved| {
+            settings::confirmation_deadline(saved, std::time::Instant::now(), app.animations)
+        }) {
+            ui.animate_until(deadline);
+        }
+    }
+
     let feedback = if app.settings_error.is_empty() {
         "Settings saved"
     } else {
@@ -1257,7 +1318,7 @@ fn main() -> anyhow::Result<()> {
     cli.resolve_local_tls();
     let config = WindowConfig {
         backend: cli.platform,
-        title: "Faith Messenger".into(),
+        title: "faith.".into(),
         width: cli.width.max(800),
         height: cli.height.max(540),
     };
@@ -1299,6 +1360,7 @@ fn main() -> anyhow::Result<()> {
 
     ui.set_theme(preferences.theme.colors());
     ui.set_rounded_corners(preferences.rounded_corners);
+    ui.set_animations(preferences.animations, preferences.animation_curve);
 
     // Discover the accounts stored on this machine.
     let profiles = profiles::discover(&root)?;
@@ -1315,6 +1377,8 @@ fn main() -> anyhow::Result<()> {
         theme: preferences.theme,
         settings_item: SettingsItem::Theme,
         rounded: preferences.rounded_corners,
+        animations: preferences.animations,
+        animation_curve: preferences.animation_curve,
         settings: settings::Store::start(settings_path, platform.waker())?,
         saved_at: None,
         settings_error,
@@ -1378,6 +1442,7 @@ fn main() -> anyhow::Result<()> {
         }
 
         // Begin a new UI pass with the active theme.
+        ui.update_animations();
         renderer.clear_color(ui.theme().background);
         renderer.begin_frame()?;
         ui.begin(&platform, &events);
