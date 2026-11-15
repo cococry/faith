@@ -24,12 +24,13 @@ export LP_NUM_THREADS=2
 
 timeout 30s xvfb-run -a -s '-screen 0 1280x720x24 +extension GLX' \
     bash -eu -o pipefail -c '
-        "$1/relocated/AppRun" --platform x11 --graphics opengl > "$1/startup.log" 2>&1 &
+        "$1/relocated/AppRun" --platform x11 --graphics opengl \
+            --ready-file "$1/first-frame-ready" > "$1/startup.log" 2>&1 &
         ui_pid=$!
         trap '\''kill "$ui_pid" 2>/dev/null || true; wait "$ui_pid" 2>/dev/null || true'\'' EXIT
 
         for ((attempt = 0; attempt < 200; attempt++)); do
-            if grep -q "First UI frame rendered" "$1/startup.log"; then
+            if [[ -f "$1/first-frame-ready" ]]; then
                 printf "First-frame RSS (KiB, software renderer): "
                 ps -o rss= -p "$ui_pid"
                 cat "$1/startup.log"

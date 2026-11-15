@@ -3,6 +3,10 @@ use clap::{Parser, ValueEnum};
 #[derive(Debug, Parser)]
 #[command(name = "faith")]
 pub struct Cli {
+    /// Signal successful first-frame presentation to packaging smoke checks.
+    #[arg(long, hide = true)]
+    pub ready_file: Option<std::path::PathBuf>,
+
     #[arg(
         long,
         default_value = crate::ui::theme::DEFAULT_ID,
