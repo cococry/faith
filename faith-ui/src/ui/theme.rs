@@ -1,7 +1,9 @@
 use crate::graphics::Color;
 use clap::ValueEnum;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ThemeName {
     #[default]
     #[value(alias = "blossom_light")]
