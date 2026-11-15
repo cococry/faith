@@ -46,7 +46,9 @@ pub(crate) struct FrameTiming(Arc<AtomicU64>);
 
 impl Default for FrameTiming {
     fn default() -> Self {
-        Self(Arc::new(AtomicU64::new(1_000_000_000 / 60)))
+        // Leave timing unresolved until the platform reports a refresh rate
+        // or an animation actually needs the fallback interval.
+        Self(Arc::new(AtomicU64::new(0)))
     }
 }
 
@@ -58,7 +60,25 @@ impl FrameTiming {
     }
 
     fn interval(&self) -> Duration {
-        Duration::from_nanos(self.0.load(Ordering::Relaxed).max(1))
+        let mut interval = self.0.load(Ordering::Relaxed);
+        if interval == 0 {
+            const FALLBACK: u64 = 1_000_000_000 / 60;
+            interval = match self.0.compare_exchange(
+                0,
+                FALLBACK,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    warn!(
+                        "Monitor refresh rate unavailable; falling back to 60 Hz animation timing"
+                    );
+                    FALLBACK
+                }
+                Err(detected) => detected,
+            };
+        }
+        Duration::from_nanos(interval.max(1))
     }
 }
 

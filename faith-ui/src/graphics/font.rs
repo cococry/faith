@@ -500,7 +500,14 @@ impl FontManager {
     /// Returns the font line height in pixels.
     pub fn line_height(&self, font_handle: FontHandle) -> anyhow::Result<i32> {
         let font = self.get_font(font_handle)?;
-        Ok(font.face.size_metrics().unwrap().height as i32 >> 6)
+        let metrics = font.face.size_metrics().unwrap();
+        Ok((metrics.height.max(metrics.ascender - metrics.descender) as i32 + 63) >> 6)
+    }
+
+    /// Positive descent in raster pixels, rounded outwards.
+    pub fn descender(&self, font_handle: FontHandle) -> anyhow::Result<i32> {
+        let font = self.get_font(font_handle)?;
+        Ok((-font.face.size_metrics().unwrap().descender as i32 + 63) >> 6)
     }
 
     /// Returns the font scale from selected raster
@@ -508,22 +515,6 @@ impl FontManager {
     pub fn scale(&self, font_handle: FontHandle) -> anyhow::Result<f32> {
         let font = self.get_font(font_handle)?;
         Ok(font.scale)
-    }
-
-    /// Returns the scale that should be applied
-    /// during rendering.
-    ///
-    /// Bitmap-strike fonts are already rasterized
-    /// at their target size and use a render scale
-    /// of 1.0.
-    pub fn render_scale(&self, font_handle: FontHandle) -> anyhow::Result<f32> {
-        let font = self.get_font(font_handle)?;
-
-        if font.bitmap_strike {
-            Ok(1.0)
-        } else {
-            Ok(font.scale)
-        }
     }
 
     /// Returns whether the font uses colored

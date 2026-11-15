@@ -377,7 +377,9 @@ fn row_button(
 
     ui.push_style(Style {
         font_size: 16,
+        icon_font_size: (glyph == ACCOUNTS || glyph == ACCOUNTS_SELECTED).then_some(28),
         padding: 14.0,
+        hit_padding: 5.0,
         radius: ui.corner_radii().row,
         color: if primary {
             ui.theme().primary_text
@@ -424,6 +426,11 @@ fn navigation(
     }
 
     ui.set_position(16.0, 88.0);
+    // The 40px icons are 56px apart; split the gap at its midpoint.
+    ui.push_style(Style {
+        hit_padding: 8.0,
+        ..ui.style()
+    });
     let accounts_selected = matches!(app.page, Page::Accounts | Page::Create);
 
     if icon(
@@ -457,6 +464,7 @@ fn navigation(
     )? {
         action = Action::Chats;
     }
+    ui.pop_style();
 
     // Keep settings at the bottom of the rail.
     ui.set_position(16.0, (height - 64.0).max(200.0));
@@ -770,10 +778,29 @@ fn item_list(
 fn brand_page(ui: &mut Framework, gpu: &mut Renderer, logo: Image) -> anyhow::Result<()> {
     let width = ui.div_width();
     let height = ui.div_height();
-    let content_width = (width - 40.0).max(1.0);
+    let side_padding = (width * 0.12).clamp(24.0, 96.0);
+    let content_width = (width - 2.0 * side_padding).clamp(1.0, 640.0);
     let size = 100.0_f32.min(content_width);
-    let top = ((height - 250.0) * 0.5).max(24.0);
-    ui.set_position(20.0, top);
+    let motivation = "Faith lets you create disposable profiles without creating links to your identity. Talk securely in a fast, native application that just works.";
+    let quote = "When faith is lost, software decays.";
+    let version = concat!("v", env!("CARGO_PKG_VERSION"));
+    let mut content_height = size + 32.0 + 12.0 + 12.0 + 20.0;
+    for (text, font_size, font) in [
+        ("faith.", 30, Font::Bold),
+        (motivation, 15, Font::Regular),
+        (quote, 15, Font::Italic),
+        (version, 12, Font::Regular),
+    ] {
+        ui.push_style(Style {
+            font_size,
+            ..ui.style()
+        });
+        let measured = ui.wrapped_text_size(text, Some(font), content_width);
+        ui.pop_style();
+        content_height += measured?.1;
+    }
+    let top = ((height - content_height) * 0.5).max(24.0);
+    ui.set_position(((width - content_width) * 0.5).max(0.0), top);
     ui.div_begin(DivOptions {
         width: Some(content_width),
         ..Default::default()
@@ -788,26 +815,20 @@ fn brand_page(ui: &mut Framework, gpu: &mut Renderer, logo: Image) -> anyhow::Re
     ui.space(32.0);
     label(ui, gpu, "faith.", 30, true, false, true)?;
     ui.space(12.0);
-    label(
-        ui,
-        gpu,
-        "Secure conversations, native and fast.",
-        15,
-        false,
-        true,
-        true,
-    )?;
+    label(ui, gpu, motivation, 15, false, true, true)?;
+    // Keep the quote distinct from the motivation text.
+    ui.space(12.0);
+    ui.push_style(Style {
+        font_size: 15,
+        color: ui.theme().muted,
+        ..ui.style()
+    });
+    let result = ui.text_centered(gpu, quote, Some(Font::Italic));
+    ui.pop_style();
+    result?;
     // Keep the installed version quiet and separate from the tagline.
     ui.space(20.0);
-    label(
-        ui,
-        gpu,
-        concat!("v", env!("CARGO_PKG_VERSION")),
-        12,
-        false,
-        true,
-        true,
-    )?;
+    label(ui, gpu, version, 12, false, true, true)?;
     ui.div_end();
     Ok(())
 }
@@ -842,12 +863,12 @@ fn profile_creation_page(
     ui.text(gpu, LOCK, Some(Font::Icons))?;
     ui.pop_style();
     ui.space(20.0);
-    label(ui, gpu, "New profile", 26, true, false, false)?;
+    label(ui, gpu, "Create a new profile", 26, true, false, false)?;
     ui.space(12.0);
     label(
         ui,
         gpu,
-        "Create a profile for your private conversations. Enter the alias for your account. You can create unlimited profiles.",
+        "Enter the local alias for your account. You can create unlimited profiles.",
         15,
         false,
         true,
@@ -1379,7 +1400,13 @@ fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyh
 
 // Start the window and run the blocking UI loop.
 fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt().init();
+    tracing_subscriber::fmt()
+        .with_max_level(if cfg!(debug_assertions) {
+            tracing::Level::INFO
+        } else {
+            tracing::Level::WARN
+        })
+        .init();
 
     // Read startup options and the local TLS configuration.
     let matches = cli::Cli::command().get_matches();
@@ -1406,7 +1433,7 @@ fn main() -> anyhow::Result<()> {
         Fonts {
             regular: assets.join("NotoSans-Regular.ttf"),
             bold: assets.join("NotoSans-Bold.ttf"),
-            italic: None,
+            italic: Some(assets.join("NotoSans-Italic.ttf")),
             icons: assets.join("nerd-fonts/SymbolsNerdFont-Regular.ttf"),
             fallbacks: [
                 "NotoColorEmoji.ttf",
