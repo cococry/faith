@@ -169,7 +169,8 @@ pub struct UIRenderer {
 
     // Shared texture array used for UI images,
     // glyphs and atlas-backed quads.
-    ui_texture_array: TextureHandle,
+    ui_texture_arrays: Vec<TextureHandle>,
+    atlas_draws: Vec<DedicatedDraw>,
 
     image_atlas_layers: Vec<ImageAtlasLayer>,
 
@@ -200,10 +201,11 @@ impl QuadType {
 const UI_ATLAS_WIDTH: u32 = 2048;
 const UI_ATLAS_HEIGHT: u32 = 2048;
 const UI_ATLAS_LAYERS: u32 = 32;
+const UI_ATLAS_PAGE_LAYERS: u32 = 4;
 const SDF_AREA_LIMIT: f32 = 16_384.0;
 const CORNER_CACHE_MAX_RADIUS: f32 = 32.0;
 const MAX_INSTANCES: usize = 65_536;
-const MAX_INSTANCES_PER_FRAME: usize = 65_536 * 8;
+const MAX_INSTANCES_PER_FRAME: usize = MAX_INSTANCES;
 
 impl UIRenderer {
     /// Reserve a solid decoration before its contents; resolve its bounds once
@@ -654,7 +656,7 @@ impl UIRenderer {
         let ui_texture_array = gpu.create_texture_array(TextureArrayDesc {
             width: UI_ATLAS_WIDTH,
             height: UI_ATLAS_HEIGHT,
-            layers: UI_ATLAS_LAYERS,
+            layers: UI_ATLAS_PAGE_LAYERS,
             format: TextureFormat::Rgba8,
         })?;
 
@@ -670,7 +672,8 @@ impl UIRenderer {
             dedicated_instances: Vec::new(),
             atlas_instances: Vec::with_capacity(4096),
             max_instances: MAX_INSTANCES,
-            ui_texture_array,
+            ui_texture_arrays: vec![ui_texture_array],
+            atlas_draws: Vec::new(),
             image_atlas_layers: Vec::new(),
             dedicated_draws: Vec::new(),
             clips: Vec::new(),
@@ -727,6 +730,26 @@ impl UIRenderer {
 
         if self.atlas_instances.is_empty() && self.dedicated_instances.is_empty() {
             return Ok(());
+        }
+
+        self.atlas_draws.clear();
+
+        if self.ui_texture_arrays.len() > 1 {
+            for (index, instance) in self.atlas_instances.iter_mut().enumerate() {
+                let layer = instance.params[2] as u32;
+                let page = layer / UI_ATLAS_PAGE_LAYERS;
+                instance.params[2] = (layer % UI_ATLAS_PAGE_LAYERS) as f32;
+                let texture_handle = self.ui_texture_arrays[page as usize];
+
+                match self.atlas_draws.last_mut() {
+                    Some(draw) if draw.texture_handle == texture_handle => draw.count += 1,
+                    _ => self.atlas_draws.push(DedicatedDraw {
+                        texture_handle,
+                        start: index as u32,
+                        count: 1,
+                    }),
+                }
+            }
         }
 
         // If there are no dedicated-texture instances to
@@ -789,15 +812,27 @@ impl UIRenderer {
                 self.screen_height as f32,
             )?;
 
-            gpu.set_texture(0, self.ui_texture_array)?;
-
-            gpu.draw_indexed_instanced(DrawIndexedInstanced {
-                index_count: 6,
-                index_offset: 0,
-                vertex_offset: 0,
-                inst_count: self.atlas_instances.len() as u32,
-                inst_offset: atlas_start,
-            })?;
+            if self.ui_texture_arrays.len() == 1 {
+                gpu.set_texture(0, self.ui_texture_arrays[0])?;
+                gpu.draw_indexed_instanced(DrawIndexedInstanced {
+                    index_count: 6,
+                    index_offset: 0,
+                    vertex_offset: 0,
+                    inst_count: self.atlas_instances.len() as u32,
+                    inst_offset: atlas_start,
+                })?;
+            } else {
+                for draw in &self.atlas_draws {
+                    gpu.set_texture(0, draw.texture_handle)?;
+                    gpu.draw_indexed_instanced(DrawIndexedInstanced {
+                        index_count: 6,
+                        index_offset: 0,
+                        vertex_offset: 0,
+                        inst_count: draw.count,
+                        inst_offset: atlas_start + draw.start,
+                    })?;
+                }
+            }
         }
 
         Ok(())
@@ -1038,20 +1073,30 @@ impl UIRenderer {
     /// texture array at the given layer and
     /// position.
     pub fn upload_pixels_to_atlas<G: GraphicsDevice>(
-        &self,
+        &mut self,
         pos_size: [u32; 4],
         layer: u32,
         pixels: &[u8],
         gpu: &mut G,
     ) -> anyhow::Result<()> {
-        // Write to the GPU texture array at the
-        // given layer
+        let page = (layer / UI_ATLAS_PAGE_LAYERS) as usize;
+
+        while self.ui_texture_arrays.len() <= page {
+            let texture = gpu.create_texture_array(TextureArrayDesc {
+                width: UI_ATLAS_WIDTH,
+                height: UI_ATLAS_HEIGHT,
+                layers: UI_ATLAS_PAGE_LAYERS,
+                format: TextureFormat::Rgba8,
+            })?;
+            self.ui_texture_arrays.push(texture);
+        }
+
         gpu.write_texture_array_layer(
             TextureArrayWrite {
-                texture: self.ui_texture_array,
+                texture: self.ui_texture_arrays[page],
                 x: pos_size[0],
                 y: pos_size[1],
-                layer,
+                layer: layer % UI_ATLAS_PAGE_LAYERS,
                 width: pos_size[2],
                 height: pos_size[3],
             },

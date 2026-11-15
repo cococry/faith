@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+appdir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+export LD_LIBRARY_PATH="$appdir/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export XKB_CONFIG_ROOT="${XKB_CONFIG_ROOT:-$appdir/usr/share/X11/xkb}"
+
+# Use the host's maintained trust store with the bundled OpenSSL library.
+if [ -z "${SSL_CERT_FILE:-}" ]; then
+    for certificates in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/cert.pem; do
+        if [ -r "$certificates" ]; then
+            export SSL_CERT_FILE="$certificates"
+            break
+        fi
+    done
+fi
+
+exec "$appdir/usr/bin/faith" "$@"

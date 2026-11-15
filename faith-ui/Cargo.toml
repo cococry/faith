@@ -5,6 +5,12 @@ version = "0.1.0"    # the current version, obeying semver
 authors = ["Luca Machiedo", "Luca Machiedo <cococry.btw@gmail.com>"]
 description = "Faith Instant Messaging Client"
 edition = "2024"
+default-run = "faith"
+
+[features]
+default = ["shaderc-compiler"]
+shaderc-compiler = ["dep:shaderc"]
+appimage = ["freetype-rs/bundled"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -25,7 +31,7 @@ clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 bytemuck = { version = "1.25.0", features = ["derive"] }
-image = "0.25.10"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
 freetype-rs = "0.38.0"
 harfbuzz_rs = {
     version = "2.0.1",
@@ -38,9 +44,22 @@ nix = { version = "0.31.3", features = ["event", "poll"] }
 unicode-bidi = "0.3.18"
 unicode-script = "0.5.8"
 ash = { version = "0.38.0", features = ["linked"] }
-vma = "0.3.1"
 vk-mem = "0.5.0"
 
 
 [build-dependencies]
-shaderc = "0.8"
+shaderc = { version = "0.8", optional = true }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+debug = false
+incremental = false
+
+[[bin]]
+name = "faith-package-icon"
+path = "packaging/appimage/icon.rs"
+required-features = ["appimage"]

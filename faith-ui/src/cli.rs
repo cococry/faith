@@ -40,7 +40,8 @@ impl Cli {
             return;
         }
 
-        if self.ca_file.is_none()
+        if cfg!(debug_assertions)
+            && self.ca_file.is_none()
             && self
                 .server_name
                 .as_deref()

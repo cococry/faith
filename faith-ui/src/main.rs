@@ -1,3 +1,4 @@
+mod assets;
 mod cli;
 mod client;
 mod graphics;
@@ -738,6 +739,17 @@ fn brand_page(ui: &mut Framework, gpu: &mut Renderer, logo: Image) -> anyhow::Re
         true,
         true,
     )?;
+    // Keep the installed version quiet and separate from the tagline.
+    ui.space(20.0);
+    label(
+        ui,
+        gpu,
+        concat!("v", env!("CARGO_PKG_VERSION")),
+        12,
+        false,
+        true,
+        true,
+    )?;
     ui.div_end();
     Ok(())
 }
@@ -1253,7 +1265,7 @@ fn main() -> anyhow::Result<()> {
     // Create the window and select a graphics backend.
     let mut platform = Platform::new(&config)?;
     let mut renderer = Renderer::new(cli.graphics.into(), &platform)?;
-    let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
+    let assets = assets::directory()?;
 
     // Register text and icon fonts; glyphs are loaded when needed.
     let mut ui = Framework::new(
@@ -1370,14 +1382,13 @@ fn main() -> anyhow::Result<()> {
         renderer.begin_frame()?;
         ui.begin(&platform, &events);
 
+        let first_frame = logo.is_none();
+
         // Upload the logo once and reuse its image handle.
         let logo = match logo {
             Some(image) => image,
             None => {
-                let image = ui.load_image(
-                    &mut renderer,
-                    &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../assets/logo.png"),
-                )?;
+                let image = ui.load_image(&mut renderer, &assets.join("logo.png"))?;
                 logo = Some(image);
                 image
             }
@@ -1387,6 +1398,10 @@ fn main() -> anyhow::Result<()> {
         let action = shell(&mut ui, &mut renderer, &app, logo)?;
         ui.end(&mut renderer)?;
         renderer.end_frame()?;
+
+        if first_frame {
+            tracing::info!("First UI frame rendered");
+        }
 
         app.act(action, &cli, &platform, &mut ui)?;
     }
