@@ -42,6 +42,48 @@ impl Curve {
     }
 }
 
+/* sliders and container scrollbars share the same hover transition */
+#[derive(Clone, Copy, Default)]
+pub struct Hover {
+    value: f32,
+    hovered: bool,
+    from: f32,
+    start: Option<Instant>,
+}
+
+impl Hover {
+    pub fn update(
+        &mut self,
+        hovered: bool,
+        now: Instant,
+        enabled: bool,
+        curve: Curve,
+    ) -> (f32, bool) {
+        if let Some(start) = self.start {
+            let t = now.saturating_duration_since(start).as_secs_f32() / DURATION.as_secs_f32();
+            let target = f32::from(self.hovered);
+            self.value = self.from + (target - self.from) * curve.sample(t);
+            if t >= 1.0 {
+                self.value = target;
+                self.start = None;
+            }
+        }
+
+        if hovered != self.hovered {
+            self.from = self.value;
+            self.hovered = hovered;
+            self.start = Some(now);
+        }
+
+        if !enabled {
+            self.value = f32::from(hovered);
+            self.start = None;
+        }
+
+        (self.value, self.start.is_some())
+    }
+}
+
 /* we sleep until the next requested frame, and stay asleep when nothing moves */
 pub struct Scheduler {
     sender: Option<Sender<Option<Instant>>>,

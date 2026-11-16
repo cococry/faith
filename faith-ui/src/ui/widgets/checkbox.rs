@@ -13,6 +13,7 @@ pub struct Checkbox {
     pub checked: bool,
     pub style: Style,
     pub radius: f32,
+    pub focused: bool,
 }
 
 impl Checkbox {
@@ -24,16 +25,29 @@ impl Checkbox {
         theme: Theme,
     ) -> anyhow::Result<()> {
         let b = self.bounds;
-        let box_rect = [b.x, b.y + 6.0, 20.0, 20.0];
+        let box_rect = if self.focused {
+            [b.x, b.y + 5.0, 22.0, 22.0]
+        } else {
+            [b.x, b.y + 6.0, 20.0, 20.0]
+        };
         let style = self.style;
-        ui.rounded_box(box_rect, self.radius, style.background, style.border_color)?;
+        ui.rounded_box(
+            box_rect,
+            self.radius,
+            style.background,
+            if self.focused {
+                Some(theme.primary)
+            } else {
+                style.border_color
+            },
+        )?;
 
         if self.checked {
             let metrics = text.measure("\u{eab2}", self.icons)?;
             text.color = style.color;
             text.render(
-                b.x + (20.0 - metrics.width) * 0.5,
-                box_rect[1] + (20.0 - metrics.height) * 0.5,
+                box_rect[0] + (box_rect[2] - metrics.width) * 0.5,
+                box_rect[1] + (box_rect[3] - metrics.height) * 0.5,
                 "\u{eab2}",
                 self.icons,
                 gpu,

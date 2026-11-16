@@ -52,6 +52,11 @@ impl Keyboard {
             .state
             .mod_name_is_active(xkb::MOD_NAME_ALT, xkb::STATE_MODS_EFFECTIVE);
 
+        if control && !alt && matches!(sym, 0x0020 | 0xff80) {
+            self.reset();
+            return vec![WindowEvent::QuickShellRequested];
+        }
+
         if control {
             let steps = match sym {
                 0x002b | 0x003d | 0xffab => Some(1.0),
@@ -64,12 +69,22 @@ impl Keyboard {
             }
         }
 
+        if matches!(sym, 0xff09 | 0xfe20) {
+            let backwards = self
+                .state
+                .mod_name_is_active(xkb::MOD_NAME_SHIFT, xkb::STATE_MODS_EFFECTIVE);
+            self.reset();
+            return vec![WindowEvent::FocusNext { backwards }];
+        }
+
         let key = match sym {
             0xff0d | 0xff8d => Some(Key::Enter),
             0xff08 => Some(Key::Backspace),
             0xffff | 0xff9f => Some(Key::Delete),
             0xff51 | 0xff96 => Some(Key::Left),
             0xff53 | 0xff98 => Some(Key::Right),
+            0xff52 | 0xff97 => Some(Key::Up),
+            0xff54 | 0xff99 => Some(Key::Down),
             0xff50 | 0xff95 => Some(Key::Home),
             0xff57 | 0xff9c => Some(Key::End),
             0xff1b => Some(Key::Escape),

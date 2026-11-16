@@ -5,6 +5,7 @@ mod client;
 mod graphics;
 mod platform;
 mod profiles;
+mod quickshell;
 mod settings;
 mod ui;
 
@@ -32,7 +33,7 @@ const MORE: &str = "\u{ea7c}";
 const ADD: &str = "\u{ea60}";
 const LOCK: &str = "\u{ea75}";
 const BACK: &str = "\u{eab5}";
-const NEXT: &str = "\u{ea9c}";
+const NEXT: &str = "\u{eab6}";
 const REFRESH: &str = "\u{eb37}";
 
 #[derive(Clone, Copy, PartialEq)]
@@ -49,12 +50,38 @@ enum SettingsItem {
     Misc,
 }
 
+/* we bring back the subsection and list position along with the page */
+#[derive(Clone, Copy, PartialEq)]
+struct Location {
+    page: Page,
+    settings_item: SettingsItem,
+    conversation: Option<faith_client::Id>,
+    list_offset: usize,
+}
+
+#[derive(Clone)]
 enum Action {
     None,
     Select(usize),
+    OpenProfile(Profile),
+    OpenConversation {
+        profile: Profile,
+        id: faith_client::Id,
+    },
+    OpenSettings {
+        section: SettingsItem,
+        control: Option<&'static str>,
+    },
+    FocusSetting {
+        action: Box<Action>,
+        section: SettingsItem,
+        control: &'static str,
+    },
+    ResetZoom,
     Create(String),
     Choose,
-    CancelCreate,
+    Back,
+    Forward,
     New,
     Retry,
     Chats,
@@ -68,6 +95,8 @@ enum Action {
     Animations(bool),
     AnimationCurve(Curve),
     SmoothScrolling(bool),
+    ZoomStep(u32),
+    DefaultZoom(u32),
 }
 
 // State shared by the pages.
@@ -77,7 +106,8 @@ struct App {
     selected: Option<Profile>,
     session: Option<client::Session>,
     page: Page,
-    creating_profile: bool,
+    back_history: Vec<Location>,
+    forward_history: Vec<Location>,
     error: String,
     collapsed: bool,
     list_offset: usize,
@@ -89,6 +119,8 @@ struct App {
     animations: bool,
     animation_curve: Curve,
     smooth_scrolling: bool,
+    zoom_step: u32,
+    default_zoom: u32,
     settings: settings::Store,
     saved_at: Option<std::time::Instant>,
     settings_error: String,
@@ -96,6 +128,27 @@ struct App {
 
 // Account sessions and actions returned by the pages.
 impl App {
+    fn location(&self) -> Location {
+        Location {
+            page: self.page,
+            settings_item: self.settings_item,
+            conversation: self.conversation,
+            list_offset: self.list_offset,
+        }
+    }
+
+    fn restore_location(&mut self, location: Location) {
+        self.page = location.page;
+        self.settings_item = location.settings_item;
+        self.conversation = location.conversation.filter(|id| {
+            self.session
+                .as_ref()
+                .is_some_and(|session| session.snapshot().conversations.contains(id))
+        });
+        self.list_offset = location.list_offset;
+        self.error.clear();
+    }
+
     fn save_settings(&mut self) {
         self.saved_at = None;
         self.settings_error.clear();
@@ -105,6 +158,8 @@ impl App {
             animations: self.animations,
             animation_curve: self.animation_curve,
             smooth_scrolling: self.smooth_scrolling,
+            zoom_step: self.zoom_step,
+            default_zoom: self.default_zoom,
         });
     }
 
@@ -115,7 +170,6 @@ impl App {
         self.conversation = None;
         self.list_offset = 0;
         self.page = Page::Conversations;
-        self.creating_profile = false;
         self.selected = Some(profile.clone());
 
         // The client worker handles connection and authentication.
@@ -142,10 +196,116 @@ impl App {
         platform: &Platform,
         ui: &mut Framework,
     ) -> anyhow::Result<()> {
+        if let Action::FocusSetting {
+            action,
+            section,
+            control,
+        } = action
+        {
+            self.act(*action, cli, platform, ui)?;
+            return self.act(
+                Action::OpenSettings {
+                    section,
+                    control: Some(control),
+                },
+                cli,
+                platform,
+                ui,
+            );
+        }
+
         // Apply the action after the current frame has finished.
+        let previous = self.location();
+        let focus_requested = matches!(
+            action,
+            Action::New
+                | Action::OpenSettings {
+                    control: Some(_),
+                    ..
+                }
+        );
+        let record_history = matches!(
+            action,
+            Action::Select(_)
+                | Action::Create(_)
+                | Action::OpenProfile(_)
+                | Action::OpenConversation { .. }
+                | Action::OpenSettings { .. }
+                | Action::Choose
+                | Action::New
+                | Action::Chats
+                | Action::Settings
+                | Action::Conversation(_)
+                | Action::SettingsItem(_)
+        );
         match action {
+            Action::FocusSetting { .. } => unreachable!(),
             Action::None => return Ok(()),
+            Action::Back => {
+                let destination = self.back_history.pop().or_else(|| {
+                    (self.page != Page::Accounts).then_some(Location {
+                        page: Page::Accounts,
+                        ..previous
+                    })
+                });
+                if let Some(destination) = destination {
+                    self.forward_history.push(previous);
+                    self.restore_location(destination);
+                }
+            }
+            Action::Forward => {
+                if let Some(destination) = self.forward_history.pop() {
+                    self.back_history.push(previous);
+                    self.restore_location(destination);
+                }
+            }
             Action::Select(index) => self.login(self.profiles[index].clone(), cli, platform),
+            Action::OpenProfile(profile) => {
+                anyhow::ensure!(profile.path.is_dir(), "Profile is no longer available");
+                if self
+                    .selected
+                    .as_ref()
+                    .is_none_or(|selected| selected.path != profile.path)
+                {
+                    self.login(profile, cli, platform);
+                } else {
+                    self.page = Page::Conversations;
+                }
+            }
+            Action::OpenConversation { profile, id } => {
+                anyhow::ensure!(profile.path.is_dir(), "Profile is no longer available");
+                if self
+                    .selected
+                    .as_ref()
+                    .is_none_or(|selected| selected.path != profile.path)
+                {
+                    self.login(profile, cli, platform);
+                }
+
+                if let Some(session) = &self.session {
+                    match session.submit(format!("/use {id}")) {
+                        Ok(_) => {
+                            self.conversation = Some(id);
+                            self.page = Page::Conversations;
+                        }
+                        Err(error) => self.error = error.to_string(),
+                    }
+                }
+            }
+            Action::OpenSettings { section, control } => {
+                self.page = Page::Settings;
+                self.settings_item = section;
+                if section == SettingsItem::Theme
+                    && let Err(error) = self.themes.refresh()
+                {
+                    self.error = error.to_string();
+                }
+
+                if let Some(id) = control {
+                    ui.focus_control(id, true);
+                }
+            }
+            Action::ResetZoom => ui.reset_zoom(),
             Action::Create(alias) => match profiles::create(&self.root, &alias) {
                 Ok(profile) => {
                     self.profiles.push(profile.clone());
@@ -157,11 +317,7 @@ impl App {
             },
 
             // Refresh the profiles when opening the account list.
-            Action::Choose | Action::CancelCreate => {
-                if matches!(action, Action::CancelCreate) {
-                    self.creating_profile = false;
-                }
-
+            Action::Choose => {
                 self.error.clear();
 
                 match profiles::discover(&self.root) {
@@ -178,11 +334,7 @@ impl App {
                     Err(error) => self.error = error.to_string(),
                 }
 
-                self.page = if self.creating_profile || self.profiles.is_empty() {
-                    Page::Create
-                } else {
-                    Page::Accounts
-                };
+                self.page = Page::Accounts;
 
                 self.list_offset = 0;
             }
@@ -191,7 +343,7 @@ impl App {
             Action::New => {
                 self.error.clear();
                 ui.clear_input("new-profile-handle");
-                self.creating_profile = true;
+                ui.focus_input("new-profile-handle");
                 self.page = Page::Create;
             }
 
@@ -239,6 +391,17 @@ impl App {
                 self.save_settings();
             }
 
+            Action::ZoomStep(step) => {
+                self.zoom_step = step.clamp(1, 50);
+                ui.set_zoom_step(self.zoom_step);
+                self.save_settings();
+            }
+
+            Action::DefaultZoom(percent) => {
+                self.default_zoom = percent;
+                self.save_settings();
+            }
+
             Action::SmoothScrolling(enabled) => {
                 self.smooth_scrolling = enabled;
                 ui.set_smooth_scrolling(enabled);
@@ -261,6 +424,19 @@ impl App {
 
                 Err(error) => self.error = format!("{error:#}"),
             },
+        }
+
+        if (self.location() != previous || record_history) && !focus_requested {
+            if self.page == Page::Create {
+                ui.focus_input("new-profile-handle");
+            } else {
+                ui.navigation_changed();
+            }
+        }
+
+        if record_history && self.location() != previous {
+            self.back_history.push(previous);
+            self.forward_history.clear();
         }
 
         platform.request_redraw()?;
@@ -340,6 +516,7 @@ fn icon(
     selected: bool,
 ) -> anyhow::Result<bool> {
     ui.push_style(Style {
+        selected,
         font_size: 20,
         padding: 4.0,
         radius: ui.corner_radii().icon,
@@ -348,7 +525,11 @@ fn icon(
         } else {
             ui.theme().text
         },
-        background: selected.then_some(ui.theme().button),
+        background: Some(if selected {
+            ui.theme().button
+        } else {
+            ui.theme().surface
+        }),
         ..ui.style()
     });
 
@@ -376,6 +557,7 @@ fn row_button(
     };
 
     ui.push_style(Style {
+        selected,
         font_size: 16,
         icon_font_size: (glyph == ACCOUNTS || glyph == ACCOUNTS_SELECTED).then_some(28),
         padding: 14.0,
@@ -639,7 +821,7 @@ fn item_list(
             ui,
             gpu,
             if chats {
-                "A little quiet here"
+                "You have no conversations."
             } else {
                 "No profile yet"
             },
@@ -655,7 +837,7 @@ fn item_list(
             if chats {
                 "Your conversations will appear here."
             } else {
-                "Your space for secure conversations starts with a profile."
+                "Create your first profile to begin chatting."
             },
             14,
             false,
@@ -774,17 +956,78 @@ fn item_list(
     Ok(action)
 }
 
+/* we give the history arrows plenty of room to click */
+fn history_controls(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Result<Action> {
+    let can_back = !app.back_history.is_empty() || app.page != Page::Accounts;
+    let mut action = Action::None;
+    for (id, glyph, x, enabled, next) in [
+        ("history-back", BACK, 20.0, can_back, Action::Back),
+        (
+            "history-forward",
+            NEXT,
+            72.0,
+            !app.forward_history.is_empty(),
+            Action::Forward,
+        ),
+    ] {
+        if id == "history-forward" && !enabled {
+            continue;
+        }
+
+        ui.set_position(x, 14.0);
+        let mut color = ui.theme().text;
+        if !enabled {
+            color.a *= 0.3;
+        }
+
+        ui.push_style(Style {
+            font_size: 20,
+            padding: 8.0,
+            hit_padding: 4.0,
+            enabled,
+            color,
+            radius: ui.corner_radii().control,
+            background: Some(ui.theme().background),
+            hover_color: enabled.then_some(ui::widgets::button::highlight(
+                ui.theme().button,
+                ui.theme().button_text,
+            )),
+            hover_text_color: enabled.then_some(ui.theme().button_text),
+            click_color: Some(ui.theme().primary),
+            click_text_color: Some(ui.theme().primary_text),
+            ..ui.style()
+        });
+        ui.push_sizing(Some(44.0), Some(44.0));
+        let clicked = ui.icon_button(gpu, id, glyph);
+        ui.pop_sizing();
+        ui.pop_style();
+        if clicked? && enabled {
+            action = next;
+        }
+    }
+
+    Ok(action)
+}
+
 // The centered logo, name and tagline.
-fn brand_page(ui: &mut Framework, gpu: &mut Renderer, logo: Image) -> anyhow::Result<()> {
+fn brand_page(
+    ui: &mut Framework,
+    gpu: &mut Renderer,
+    logo: Image,
+    first_profile: bool,
+) -> anyhow::Result<Action> {
     let width = ui.div_width();
     let height = ui.div_height();
     let side_padding = (width * 0.12).clamp(24.0, 96.0);
     let content_width = (width - 2.0 * side_padding).clamp(1.0, 640.0);
     let size = 100.0_f32.min(content_width);
     let motivation = "Faith lets you create disposable profiles without creating links to your identity. Talk securely in a fast, native application that just works.";
-    let quote = "When faith is lost, software decays.";
+    let quote = "When faith is abandoned, software decays.";
     let version = concat!("v", env!("CARGO_PKG_VERSION"));
     let mut content_height = size + 32.0 + 12.0 + 12.0 + 20.0;
+    if first_profile {
+        content_height += 24.0 + 48.0;
+    }
     for (text, font_size, font) in [
         ("faith.", 30, Font::Bold),
         (motivation, 15, Font::Regular),
@@ -826,11 +1069,34 @@ fn brand_page(ui: &mut Framework, gpu: &mut Renderer, logo: Image) -> anyhow::Re
     let result = ui.text_centered(gpu, quote, Some(Font::Italic));
     ui.pop_style();
     result?;
+    let mut action = Action::None;
+    if first_profile {
+        ui.space(24.0);
+        let button_width = content_width.min(260.0);
+        let y = ui.position().1;
+        ui.set_position((content_width - button_width) * 0.5, y);
+        ui.push_style(Style {
+            font_size: 16,
+            padding: 12.0,
+            radius: ui.corner_radii().control,
+            background: Some(ui.theme().primary),
+            color: ui.theme().primary_text,
+            center_button_content: true,
+            ..ui.style()
+        });
+        ui.push_sizing(Some(button_width), Some(48.0));
+        let clicked = ui.icon_label_button(gpu, "first-profile", ADD, "Create profile");
+        ui.pop_sizing();
+        ui.pop_style();
+        if clicked? {
+            action = Action::New;
+        }
+    }
     // Keep the installed version quiet and separate from the tagline.
     ui.space(20.0);
     label(ui, gpu, version, 12, false, true, true)?;
     ui.div_end();
-    Ok(())
+    Ok(action)
 }
 
 // The form for creating a local account profile.
@@ -863,7 +1129,19 @@ fn profile_creation_page(
     ui.text(gpu, LOCK, Some(Font::Icons))?;
     ui.pop_style();
     ui.space(20.0);
-    label(ui, gpu, "Create a new profile", 26, true, false, false)?;
+    label(
+        ui,
+        gpu,
+        if has_profiles {
+            "Create a new profile"
+        } else {
+            "Create your first profile"
+        },
+        26,
+        true,
+        false,
+        false,
+    )?;
     ui.space(12.0);
     label(
         ui,
@@ -910,26 +1188,10 @@ fn profile_creation_page(
     let mut action = Action::None;
 
     // Create the profile when the completed button click is valid.
-    if row_button(ui, gpu, "submit-create", ADD, "Create account", false, true)?
+    if row_button(ui, gpu, "submit-create", ADD, "Create profile", false, true)?
         && profiles::valid_alias(&alias)
     {
         action = Action::Create(alias);
-    }
-
-    if has_profiles {
-        ui.space(12.0);
-
-        if row_button(
-            ui,
-            gpu,
-            "cancel-create",
-            BACK,
-            "Back to profiles",
-            false,
-            false,
-        )? {
-            action = Action::CancelCreate;
-        }
     }
 
     end_panel(ui);
@@ -1070,7 +1332,7 @@ fn logged_in_page(
 // Small interface preferences.
 fn misc_settings_page(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Result<Action> {
     let width = (ui.div_width() - 64.0).max(1.0);
-    let height = (ui.div_height() - 72.0).max(1.0);
+    let height = (ui.div_height() - 112.0).max(1.0);
     ui.set_position(32.0, 36.0);
     ui.push_style(Style {
         background: Some(ui.theme().background),
@@ -1158,6 +1420,56 @@ fn misc_settings_page(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyh
         true,
         false,
     )?;
+    ui.space(32.0);
+    label(ui, gpu, "Zoom", 13, true, true, false)?;
+    ui.space(16.0);
+    ui.push_sizing(Some(ui.div_width().min(340.0)), None);
+    let default_zoom = ui.slider(
+        gpu,
+        "settings-default-zoom",
+        "Default zoom",
+        app.default_zoom,
+        ui::widgets::slider::Options {
+            min: 50,
+            max: 200,
+            step: 10,
+            suffix: "%",
+        },
+    )?;
+    ui.space(8.0);
+    label(
+        ui,
+        gpu,
+        "The zoom applied when faith starts.",
+        13,
+        false,
+        true,
+        false,
+    )?;
+    ui.space(24.0);
+    let zoom_step = ui.slider(
+        gpu,
+        "settings-zoom-step",
+        "Zoom step",
+        app.zoom_step,
+        ui::widgets::slider::Options {
+            min: 1,
+            max: 50,
+            step: 1,
+            suffix: "%",
+        },
+    )?;
+    ui.space(8.0);
+    label(
+        ui,
+        gpu,
+        "How much the zoom should change in percent per zoom adjustment.",
+        13,
+        false,
+        true,
+        false,
+    )?;
+    ui.pop_sizing();
     end_panel(ui);
 
     Ok(if let Some(enabled) = change {
@@ -1166,6 +1478,10 @@ fn misc_settings_page(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyh
         Action::Animations(enabled)
     } else if let Some(enabled) = smooth {
         Action::SmoothScrolling(enabled)
+    } else if let Some(step) = zoom_step {
+        Action::ZoomStep(step)
+    } else if let Some(percent) = default_zoom {
+        Action::DefaultZoom(percent)
     } else if let Some(index) = curve {
         Action::AnimationCurve(Curve::ALL[index])
     } else {
@@ -1320,20 +1636,34 @@ fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyh
     end_panel(ui);
     panel(ui, rail + list + 1.0, 0.0, content - 1.0, height, false)?;
 
+    let history_action = history_controls(ui, gpu, app)?;
+    let pane_width = ui.div_width();
+    let pane_height = ui.div_height();
+    panel(
+        ui,
+        0.0,
+        72.0,
+        pane_width,
+        (pane_height - 72.0).max(0.0),
+        false,
+    )?;
+
     // Render the current page in the main content pane.
     let content_action = match app.page {
-        Page::Accounts => {
-            brand_page(ui, gpu, logo)?;
-            Action::None
-        }
+        Page::Accounts => brand_page(ui, gpu, logo, app.profiles.is_empty())?,
 
         Page::Create => profile_creation_page(ui, gpu, !app.profiles.is_empty())?,
         Page::Conversations => logged_in_page(ui, gpu, app, &snapshot)?,
         Page::Settings => settings_page(ui, gpu, app)?,
     };
 
+    end_panel(ui);
     if !matches!(content_action, Action::None) {
         action = content_action;
+    }
+
+    if !matches!(history_action, Action::None) {
+        action = history_action;
     }
 
     if !app.error.is_empty() {
@@ -1351,11 +1681,13 @@ fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyh
     }
 
     // Keep save feedback small and independent of the active settings section.
+    let sliding = ui.slider_dragging();
     let opacity = app
         .saved_at
         .map(|saved| settings::confirmation_opacity(saved, app.animations, app.animation_curve))
         .unwrap_or(0.0);
-    if app.settings_error.is_empty()
+    if !sliding
+        && app.settings_error.is_empty()
         && let Some(deadline) = app.saved_at.and_then(|saved| {
             settings::confirmation_deadline(saved, std::time::Instant::now(), app.animations)
         })
@@ -1369,7 +1701,7 @@ fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyh
         &app.settings_error
     };
 
-    if opacity > 0.0 || !app.settings_error.is_empty() {
+    if (!sliding && opacity > 0.0) || !app.settings_error.is_empty() {
         ui.set_position(28.0, (height - 68.0).max(0.0));
         let mut color = if app.settings_error.is_empty() {
             ui.theme().muted
@@ -1470,6 +1802,8 @@ fn main() -> anyhow::Result<()> {
     ui.set_rounded_corners(preferences.rounded_corners);
     ui.set_animations(preferences.animations, preferences.animation_curve);
     ui.set_smooth_scrolling(preferences.smooth_scrolling);
+    ui.set_zoom_step(preferences.zoom_step);
+    ui.set_startup_zoom(preferences.default_zoom);
 
     // Discover the accounts stored on this machine.
     let profiles = profiles::discover(&root)?;
@@ -1478,8 +1812,9 @@ fn main() -> anyhow::Result<()> {
         profiles,
         selected: None,
         session: None,
-        page: Page::Create,
-        creating_profile: false,
+        page: Page::Accounts,
+        back_history: Vec::new(),
+        forward_history: Vec::new(),
         error: String::new(),
         collapsed: false,
         list_offset: 0,
@@ -1491,6 +1826,8 @@ fn main() -> anyhow::Result<()> {
         animations: preferences.animations,
         animation_curve: preferences.animation_curve,
         smooth_scrolling: preferences.smooth_scrolling,
+        zoom_step: preferences.zoom_step,
+        default_zoom: preferences.default_zoom,
         settings: settings::Store::start(settings_path, platform.waker())?,
         saved_at: None,
         settings_error,
@@ -1518,10 +1855,28 @@ fn main() -> anyhow::Result<()> {
 
     platform.request_redraw()?;
     let mut logo = None;
+    let mut quickshell = quickshell::Shell::default();
 
     // Wait for input or a client notification before drawing again.
     loop {
-        let events = platform.poll_events()?;
+        let mut events = platform.poll_events()?;
+        events.retain(|event| {
+            let requested = matches!(event, WindowEvent::QuickShellRequested)
+                || (!quickshell.is_open()
+                    && !ui.space_reserved()
+                    && matches!(event, WindowEvent::TextInput(text) if text == " "));
+            if requested && !quickshell.is_open() {
+                quickshell.open(&app, ui.zoom_percent(), &mut ui);
+            }
+
+            !requested
+        });
+
+        let modal_frame = quickshell.is_open();
+        ui.set_modal_input(modal_frame);
+        if modal_frame && events.is_empty() {
+            events.push(WindowEvent::RedrawRequested);
+        }
 
         // Handle window shutdown and resizing first.
         for event in &events {
@@ -1572,7 +1927,13 @@ fn main() -> anyhow::Result<()> {
         };
 
         // Draw the shell, then apply any action returned by the widgets.
-        let action = shell(&mut ui, &mut renderer, &app, logo)?;
+        let mut action = shell(&mut ui, &mut renderer, &app, logo)?;
+        if modal_frame {
+            action = quickshell
+                .render(&mut ui, &mut renderer)?
+                .unwrap_or(Action::None);
+        }
+
         ui.end(&mut renderer)?;
         renderer.end_frame()?;
 
@@ -1583,6 +1944,14 @@ fn main() -> anyhow::Result<()> {
             tracing::info!("First UI frame rendered");
         }
 
-        app.act(action, &cli, &platform, &mut ui)?;
+        if modal_frame && !quickshell.is_open() {
+            ui.set_modal_input(false);
+            platform.request_redraw()?;
+        }
+
+        if let Err(error) = app.act(action, &cli, &platform, &mut ui) {
+            app.error = error.to_string();
+            platform.request_redraw()?;
+        }
     }
 }
