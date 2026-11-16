@@ -102,11 +102,12 @@ pub(crate) struct BoxDecoration {
     color: Color,
     border: Option<Color>,
     radius: f32,
+    corners: [bool; 4],
     clip: [f32; 4],
 }
 
 struct ShapeParts {
-    quads: [QuadInstance; 16],
+    quads: [QuadInstance; 64],
     count: usize,
 }
 
@@ -118,7 +119,7 @@ impl ShapeParts {
                 [0.0; 4],
                 Color::rgba(0.0, 0.0, 0.0, 0.0),
                 [0.0; 4],
-            ); 16],
+            ); 64],
             count: 0,
         }
     }
@@ -215,8 +216,11 @@ impl UIRenderer {
         color: Color,
         border: Option<Color>,
         radius: f32,
+        corners: [bool; 4],
     ) -> anyhow::Result<BoxDecoration> {
-        let count = if radius > 0.0 {
+        let count = if radius > 0.0 && corners != [true; 4] {
+            64
+        } else if radius > 0.0 {
             if border.is_some() {
                 15
             } else {
@@ -244,6 +248,7 @@ impl UIRenderer {
             color,
             border,
             radius,
+            corners,
             clip: self.clip(),
         })
     }
@@ -298,6 +303,46 @@ impl UIRenderer {
             .push((layer, [x, y, size, size], pixels));
         self.corners.insert((radius, stroke), corner);
         Ok(corner)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn corner_shape(
+        &mut self,
+        parts: &mut ShapeParts,
+        rect: [f32; 4],
+        radius: f32,
+        corners: [bool; 4],
+        color: Color,
+        stroke: bool,
+        clip: [f32; 4],
+    ) -> anyhow::Result<()> {
+        if corners == [true; 4] || radius <= 0.0 {
+            return self.shape(parts, rect, radius, color, stroke, clip);
+        }
+
+        /* we clip each corner independently without changing its curve or border */
+        let [x, y, w, h] = rect;
+        for (enabled, quadrant) in corners.into_iter().zip([
+            [x, y, w * 0.5, h * 0.5],
+            [x + w * 0.5, y, w * 0.5, h * 0.5],
+            [x + w * 0.5, y + h * 0.5, w * 0.5, h * 0.5],
+            [x, y + h * 0.5, w * 0.5, h * 0.5],
+        ]) {
+            let clip = intersect_clip(clip, quadrant);
+            self.shape(
+                parts,
+                rect,
+                if enabled {
+                    radius
+                } else {
+                    0.0
+                },
+                color,
+                stroke,
+                clip,
+            )?;
+        }
+        Ok(())
     }
 
     fn shape(
@@ -401,6 +446,7 @@ impl UIRenderer {
         &mut self,
         rect: [f32; 4],
         radius: f32,
+        corners: [bool; 4],
         fill: Option<Color>,
         border: Option<Color>,
         clip: [f32; 4],
@@ -411,8 +457,8 @@ impl UIRenderer {
             && fill.a == 1.0
             && border.a == 1.0
         {
-            self.shape(&mut parts, rect, radius, border, false, clip)?;
-            self.shape(
+            self.corner_shape(&mut parts, rect, radius, corners, border, false, clip)?;
+            self.corner_shape(
                 &mut parts,
                 [
                     rect[0] + 1.0,
@@ -421,17 +467,18 @@ impl UIRenderer {
                     (rect[3] - 2.0).max(0.0),
                 ],
                 (radius - 1.0).max(0.0),
+                corners,
                 fill,
                 false,
                 clip,
             )?;
         } else {
             if let Some(fill) = fill {
-                self.shape(&mut parts, rect, radius, fill, false, clip)?;
+                self.corner_shape(&mut parts, rect, radius, corners, fill, false, clip)?;
             }
 
             if let Some(border) = border {
-                self.shape(&mut parts, rect, radius, border, true, clip)?;
+                self.corner_shape(&mut parts, rect, radius, corners, border, true, clip)?;
             }
         }
 
@@ -445,9 +492,20 @@ impl UIRenderer {
         fill: Option<Color>,
         border: Option<Color>,
     ) -> anyhow::Result<()> {
+        self.corner_box(rect, radius, [true; 4], fill, border)
+    }
+
+    pub fn corner_box(
+        &mut self,
+        rect: [f32; 4],
+        radius: f32,
+        corners: [bool; 4],
+        fill: Option<Color>,
+        border: Option<Color>,
+    ) -> anyhow::Result<()> {
         anyhow::ensure!(radius.is_finite(), "invalid corner radius");
 
-        if border.is_none() {
+        if border.is_none() && corners == [true; 4] {
             let Some(color) = fill else {
                 return Ok(());
             };
@@ -475,7 +533,7 @@ impl UIRenderer {
             }
         }
 
-        let parts = self.box_parts(rect, radius, fill, border, self.clip())?;
+        let parts = self.box_parts(rect, radius, corners, fill, border, self.clip())?;
         anyhow::ensure!(
             self.atlas_instances.len() + self.dedicated_instances.len() + parts.count
                 <= self.max_instances,
@@ -714,6 +772,7 @@ impl UIRenderer {
             let parts = self.box_parts(
                 rect,
                 decoration.radius,
+                decoration.corners,
                 Some(decoration.color),
                 decoration.border,
                 decoration.clip,

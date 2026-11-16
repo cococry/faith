@@ -52,6 +52,11 @@ impl Keyboard {
             .state
             .mod_name_is_active(xkb::MOD_NAME_ALT, xkb::STATE_MODS_EFFECTIVE);
 
+        if control && !alt && matches!(sym, 0x0020 | 0xff80) {
+            self.reset();
+            return vec![WindowEvent::QuickShellRequested];
+        }
+
         if control {
             let steps = match sym {
                 0x002b | 0x003d | 0xffab => Some(1.0),

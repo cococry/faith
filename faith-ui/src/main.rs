@@ -5,6 +5,7 @@ mod client;
 mod graphics;
 mod platform;
 mod profiles;
+mod quickshell;
 mod settings;
 mod ui;
 
@@ -58,9 +59,25 @@ struct Location {
     list_offset: usize,
 }
 
+#[derive(Clone)]
 enum Action {
     None,
     Select(usize),
+    OpenProfile(Profile),
+    OpenConversation {
+        profile: Profile,
+        id: faith_client::Id,
+    },
+    OpenSettings {
+        section: SettingsItem,
+        control: Option<&'static str>,
+    },
+    FocusSetting {
+        action: Box<Action>,
+        section: SettingsItem,
+        control: &'static str,
+    },
+    ResetZoom,
     Create(String),
     Choose,
     Back,
@@ -179,12 +196,41 @@ impl App {
         platform: &Platform,
         ui: &mut Framework,
     ) -> anyhow::Result<()> {
+        if let Action::FocusSetting {
+            action,
+            section,
+            control,
+        } = action
+        {
+            self.act(*action, cli, platform, ui)?;
+            return self.act(
+                Action::OpenSettings {
+                    section,
+                    control: Some(control),
+                },
+                cli,
+                platform,
+                ui,
+            );
+        }
+
         // Apply the action after the current frame has finished.
         let previous = self.location();
+        let focus_requested = matches!(
+            action,
+            Action::New
+                | Action::OpenSettings {
+                    control: Some(_),
+                    ..
+                }
+        );
         let record_history = matches!(
             action,
             Action::Select(_)
                 | Action::Create(_)
+                | Action::OpenProfile(_)
+                | Action::OpenConversation { .. }
+                | Action::OpenSettings { .. }
                 | Action::Choose
                 | Action::New
                 | Action::Chats
@@ -193,6 +239,7 @@ impl App {
                 | Action::SettingsItem(_)
         );
         match action {
+            Action::FocusSetting { .. } => unreachable!(),
             Action::None => return Ok(()),
             Action::Back => {
                 let destination = self.back_history.pop().or_else(|| {
@@ -213,6 +260,52 @@ impl App {
                 }
             }
             Action::Select(index) => self.login(self.profiles[index].clone(), cli, platform),
+            Action::OpenProfile(profile) => {
+                anyhow::ensure!(profile.path.is_dir(), "Profile is no longer available");
+                if self
+                    .selected
+                    .as_ref()
+                    .is_none_or(|selected| selected.path != profile.path)
+                {
+                    self.login(profile, cli, platform);
+                } else {
+                    self.page = Page::Conversations;
+                }
+            }
+            Action::OpenConversation { profile, id } => {
+                anyhow::ensure!(profile.path.is_dir(), "Profile is no longer available");
+                if self
+                    .selected
+                    .as_ref()
+                    .is_none_or(|selected| selected.path != profile.path)
+                {
+                    self.login(profile, cli, platform);
+                }
+
+                if let Some(session) = &self.session {
+                    match session.submit(format!("/use {id}")) {
+                        Ok(_) => {
+                            self.conversation = Some(id);
+                            self.page = Page::Conversations;
+                        }
+                        Err(error) => self.error = error.to_string(),
+                    }
+                }
+            }
+            Action::OpenSettings { section, control } => {
+                self.page = Page::Settings;
+                self.settings_item = section;
+                if section == SettingsItem::Theme
+                    && let Err(error) = self.themes.refresh()
+                {
+                    self.error = error.to_string();
+                }
+
+                if let Some(id) = control {
+                    ui.focus_control(id, true);
+                }
+            }
+            Action::ResetZoom => ui.reset_zoom(),
             Action::Create(alias) => match profiles::create(&self.root, &alias) {
                 Ok(profile) => {
                     self.profiles.push(profile.clone());
@@ -250,6 +343,7 @@ impl App {
             Action::New => {
                 self.error.clear();
                 ui.clear_input("new-profile-handle");
+                ui.focus_input("new-profile-handle");
                 self.page = Page::Create;
             }
 
@@ -330,6 +424,14 @@ impl App {
 
                 Err(error) => self.error = format!("{error:#}"),
             },
+        }
+
+        if self.location() != previous && !focus_requested {
+            if self.page == Page::Create {
+                ui.focus_input("new-profile-handle");
+            } else {
+                ui.clear_focus();
+            }
         }
 
         if record_history && self.location() != previous {
@@ -713,7 +815,7 @@ fn item_list(
             ui,
             gpu,
             if chats {
-                "A little quiet here"
+                "You have no conversations."
             } else {
                 "No profile yet"
             },
@@ -910,7 +1012,7 @@ fn brand_page(
     let content_width = (width - 2.0 * side_padding).clamp(1.0, 640.0);
     let size = 100.0_f32.min(content_width);
     let motivation = "Faith lets you create disposable profiles without creating links to your identity. Talk securely in a fast, native application that just works.";
-    let quote = "When faith is lost, software decays.";
+    let quote = "When faith is abandoned, software decays.";
     let version = concat!("v", env!("CARGO_PKG_VERSION"));
     let mut content_height = size + 32.0 + 12.0 + 12.0 + 20.0;
     if first_profile {
@@ -1743,10 +1845,28 @@ fn main() -> anyhow::Result<()> {
 
     platform.request_redraw()?;
     let mut logo = None;
+    let mut quickshell = quickshell::Shell::default();
 
     // Wait for input or a client notification before drawing again.
     loop {
-        let events = platform.poll_events()?;
+        let mut events = platform.poll_events()?;
+        events.retain(|event| {
+            let requested = matches!(event, WindowEvent::QuickShellRequested)
+                || (!quickshell.is_open()
+                    && !ui.space_reserved()
+                    && matches!(event, WindowEvent::TextInput(text) if text == " "));
+            if requested && !quickshell.is_open() {
+                quickshell.open(&app, ui.zoom_percent(), &mut ui);
+            }
+
+            !requested
+        });
+
+        let modal_frame = quickshell.is_open();
+        ui.set_modal_input(modal_frame);
+        if modal_frame && events.is_empty() {
+            events.push(WindowEvent::RedrawRequested);
+        }
 
         // Handle window shutdown and resizing first.
         for event in &events {
@@ -1797,7 +1917,13 @@ fn main() -> anyhow::Result<()> {
         };
 
         // Draw the shell, then apply any action returned by the widgets.
-        let action = shell(&mut ui, &mut renderer, &app, logo)?;
+        let mut action = shell(&mut ui, &mut renderer, &app, logo)?;
+        if modal_frame {
+            action = quickshell
+                .render(&mut ui, &mut renderer)?
+                .unwrap_or(Action::None);
+        }
+
         ui.end(&mut renderer)?;
         renderer.end_frame()?;
 
@@ -1808,6 +1934,14 @@ fn main() -> anyhow::Result<()> {
             tracing::info!("First UI frame rendered");
         }
 
-        app.act(action, &cli, &platform, &mut ui)?;
+        if modal_frame && !quickshell.is_open() {
+            ui.set_modal_input(false);
+            platform.request_redraw()?;
+        }
+
+        if let Err(error) = app.act(action, &cli, &platform, &mut ui) {
+            app.error = error.to_string();
+            platform.request_redraw()?;
+        }
     }
 }

@@ -22,6 +22,7 @@ pub enum WindowEvent {
     /// UI zoom gesture steps; positive values zoom in.
     Zoom(f64),
     RedrawRequested,
+    QuickShellRequested,
     Resized {
         width: u32,
         height: u32,
