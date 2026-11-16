@@ -2,7 +2,7 @@
 
 
 > [!WARNING]
-> Faith is in active pre-alpha development and is, from a user's point of view, currently unusable for its intended purpose.
+> faith is in active pre-alpha development and is, from a user's point of view, currently unusable for its intended purpose.
 >  However, this will change soon™.
 <img align="left" style="width:200px" src="https://github.com/cococry/faith/blob/main/assets/logo.png" width="200px">
 
@@ -19,7 +19,7 @@ and shaped glyphs.
 The user interface is rendered through an optimized rendering backend abstraction over Vulkan and OpenGL. 
 Windowing is handled by the implemented backends, which currently include **X11** and **Wayland**.
 
-Faith uses a **custom immediate-mode UI framework** whose rendering is event-driven to limit power consumption.
+faith uses a **custom immediate-mode UI framework** whose rendering is event-driven to limit power consumption.
 
 
 The ***faith*** [<ins>server</ins>](https://github.com/cococry/faith/tree/main/faith-server) is designed around security & low latency. It is written from scratch in C,
