@@ -1,4 +1,5 @@
 pub mod animation;
+mod focus;
 pub mod framework;
 pub mod quad;
 pub mod renderer;

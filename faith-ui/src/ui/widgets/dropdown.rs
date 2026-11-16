@@ -3,6 +3,7 @@ use crate::{
     graphics::FontHandle,
     platform::{
         WindowEvent,
+        event::Key,
         mouse::{CursorPosition, MouseButton},
     },
     ui::scroll::contains,
@@ -18,6 +19,8 @@ pub const ROW_HEIGHT: f32 = 38.0;
 pub struct State {
     pub open: bool,
     header: button::State,
+    cursor: Option<usize>,
+    pub reveal: bool,
     options: Arc<[String]>,
 }
 
@@ -56,6 +59,79 @@ pub fn popup_bounds(header: Bounds, count: usize, window: [f32; 2]) -> Bounds {
 }
 
 impl State {
+    pub fn keyboard(
+        &mut self,
+        focused: bool,
+        selected: usize,
+        count: usize,
+        events: &[WindowEvent],
+    ) -> (Option<usize>, bool) {
+        if self.open && self.cursor.is_none() {
+            self.cursor = Some(selected);
+            self.reveal = true;
+        }
+        let mut choice = None;
+        let mut unfocus = false;
+        for event in events {
+            if !focused {
+                break;
+            }
+            match event {
+                WindowEvent::TextInput(text) if text == " " => {
+                    self.open = !self.open;
+                    if self.open {
+                        self.cursor = Some(selected);
+                        self.reveal = true;
+                    }
+                }
+                WindowEvent::KeyPressed {
+                    key: Key::Enter, ..
+                } => {
+                    if self.open {
+                        choice = self.cursor;
+                        self.open = false;
+                    } else {
+                        self.open = true;
+                        self.cursor = Some(selected);
+                        self.reveal = true;
+                    }
+                }
+                WindowEvent::KeyPressed {
+                    key: Key::Escape, ..
+                } => {
+                    if self.open {
+                        self.open = false;
+                    } else {
+                        unfocus = true;
+                    }
+                }
+                WindowEvent::KeyPressed { key, .. } if self.open => {
+                    let cursor = self.cursor.unwrap_or(selected).min(count - 1);
+                    let next = match key {
+                        Key::Down => (cursor + 1) % count,
+                        Key::Up => (cursor + count - 1) % count,
+                        Key::Home => 0,
+                        Key::End => count - 1,
+                        Key::PageDown => (cursor + 5).min(count - 1),
+                        Key::PageUp => cursor.saturating_sub(5),
+                        _ => continue,
+                    };
+                    self.cursor = Some(next);
+                    self.reveal = true;
+                }
+                _ => {}
+            }
+        }
+        if !self.open {
+            self.cursor = None;
+        }
+        (choice, unfocus)
+    }
+
+    pub fn highlighted(&self, selected: usize) -> usize {
+        self.cursor.unwrap_or(selected)
+    }
+
     pub fn options(&mut self, options: &[&str]) -> Arc<[String]> {
         if self.options.len() != options.len()
             || self.options.iter().zip(options).any(|(a, b)| a != b)
@@ -118,6 +194,8 @@ pub struct Popup {
     pub bounds: Bounds,
     pub options: Arc<[String]>,
     pub selected: usize,
+    pub highlighted: usize,
+    pub reveal: bool,
     pub font: FontHandle,
     pub icons: FontHandle,
     pub font_size: u32,

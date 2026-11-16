@@ -1,4 +1,5 @@
 use super::animation::{Curve, Scheduler, Transition};
+use super::focus::{Control, Kind as FocusKind, Navigation};
 use super::scroll::{self, Areas, PrepareOptions, View};
 use super::theme::{CornerRadii, Theme};
 use super::{
@@ -11,7 +12,7 @@ use super::{
     },
 };
 use std::hash::{Hash, Hasher};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::{
     graphics::{Color, FontHandle, GraphicsDevice},
@@ -33,10 +34,10 @@ pub struct Style {
     pub icon_font_size: Option<u32>,
     pub color: Color,
     pub background: Option<Color>,
-    /// Button background while hovered; defaults to a 5% darker background.
+    /// Button background while hovered; defaults to a 5% foreground tint.
     pub hover_color: Option<Color>,
     pub hover_text_color: Option<Color>,
-    /// Background while held inside; defaults to 5% darker than hover.
+    /// Background while held inside; defaults to an additional foreground tint.
     pub click_color: Option<Color>,
     pub click_text_color: Option<Color>,
     pub border_color: Option<Color>,
@@ -50,6 +51,9 @@ pub struct Style {
     pub radius: f32,
     /// Rounded corners clockwise from top-left; false keeps a corner square.
     pub rounded_corners: [bool; 4],
+    pub enabled: bool,
+    /// Prefer this selected control when restoring keyboard focus.
+    pub selected: bool,
 }
 
 impl Default for Style {
@@ -70,6 +74,8 @@ impl Default for Style {
             hit_padding: 0.0,
             radius: 0.0,
             rounded_corners: [true; 4],
+            enabled: true,
+            selected: false,
         }
     }
 }
@@ -224,6 +230,9 @@ pub struct Framework {
     inputs: HashMap<String, InputField>,
     sliders: HashMap<String, slider::State>,
     focus_order: Vec<String>,
+    navigation: Navigation,
+    keyboard_clicks: HashSet<String>,
+    keyboard_presses: HashMap<String, Instant>,
     checkbox_ids: HashSet<String>,
     focus_reveals: Vec<(u64, Bounds)>,
     reveal_focus: bool,
@@ -288,6 +297,9 @@ impl Framework {
             inputs: HashMap::new(),
             sliders: HashMap::new(),
             focus_order: Vec::new(),
+            navigation: Navigation::default(),
+            keyboard_clicks: HashSet::new(),
+            keyboard_presses: HashMap::new(),
             checkbox_ids: HashSet::new(),
             focus_reveals: Vec::new(),
             reveal_focus: false,
@@ -316,15 +328,84 @@ impl Framework {
             || self
                 .focused
                 .as_ref()
-                .is_some_and(|id| self.checkbox_ids.contains(id))
+                .is_some_and(|id| self.checkbox_ids.contains(id) || self.dropdowns.contains_key(id))
     }
 
-    fn register_control(&mut self, id: &str, bounds: Bounds) {
+    pub fn navigation_changed(&mut self) {
+        self.navigation.pending = true;
+        self.clear_focus();
+    }
+
+    fn register_control(&mut self, id: &str, bounds: Bounds, kind: FocusKind, selected: bool) {
         self.focus_order.push(id.to_owned());
+        if !self.modal_input && !self.overlay {
+            self.navigation.controls.push(Control {
+                id: id.to_owned(),
+                bounds,
+                kind,
+                selected,
+            });
+        }
         if self.reveal_focus && self.focused.as_deref() == Some(id) {
             self.focus_reveals
                 .push((self.layouts.last().unwrap().id, bounds));
         }
+    }
+
+    fn press_keyboard_button(&mut self, id: String) {
+        self.keyboard_clicks.insert(id.clone());
+        self.keyboard_presses
+            .insert(id, self.frame_time + Duration::from_millis(120));
+    }
+
+    fn button_response(
+        &mut self,
+        key: (String, usize),
+        bounds: Bounds,
+        enabled: bool,
+        selected: bool,
+    ) -> button::Response {
+        let id = format!("button:{}:{}", key.0, key.1);
+        if !enabled {
+            self.buttons.insert(key, button::State::default());
+            let pressed = if let Some(&until) = self.keyboard_presses.get(&id) {
+                self.animate_until(until);
+                true
+            } else {
+                false
+            };
+            return button::Response {
+                clicked: false,
+                hovered: false,
+                pressed,
+            };
+        }
+        self.register_control(&id, bounds, FocusKind::Button, selected);
+        let hit = self.hit_bounds(bounds);
+        let mut response =
+            self.buttons
+                .entry(key)
+                .or_default()
+                .update(hit, self.batch_pointer, &self.events);
+        if response.hovered
+            && self.events.iter().any(|event| {
+                matches!(
+                    event,
+                    WindowEvent::MouseButtonPressed {
+                        button: MouseButton::Left
+                    }
+                )
+            })
+        {
+            self.focused = Some(id.clone());
+        }
+        response.clicked |= self.keyboard_clicks.contains(&id);
+        response.hovered |= self.focused.as_deref() == Some(&id);
+        if let Some(&until) = self.keyboard_presses.get(&id) {
+            response.pressed = true;
+            self.animate_until(until);
+        }
+        response
     }
 
     pub fn clear_focus(&mut self) {
@@ -405,9 +486,7 @@ impl Framework {
             width: layout.bounds.width,
             height,
         };
-        if self.scrolls.reveal(layout.id, bounds, self.frame_time) {
-            self.animate_until(self.frame_time);
-        }
+        self.focus_reveals.push((layout.id, bounds));
     }
 
     pub fn set_zoom_step(&mut self, step: u32) {
@@ -642,6 +721,9 @@ impl Framework {
                 Some(event)
             })
             .collect();
+        self.keyboard_clicks.clear();
+        self.keyboard_presses
+            .retain(|_, until| self.frame_time < *until);
         let mut pointer = self.pointer;
         for event in &mut events {
             match event {
@@ -649,24 +731,45 @@ impl Framework {
                     pointer = Some(*position)
                 }
                 WindowEvent::MouseLeft | WindowEvent::MouseCancelled => pointer = None,
-                WindowEvent::FocusNext { backwards }
-                    if !self.modal_input
-                        && self.active_dropdown.is_none()
-                        && !self.focus_order.is_empty() =>
-                {
-                    let count = self.focus_order.len();
-                    let current = self
-                        .focused
-                        .as_ref()
-                        .and_then(|id| self.focus_order.iter().position(|item| item == id));
-                    let next = match (current, *backwards) {
-                        (Some(index), true) => (index + count - 1) % count,
-                        (Some(index), false) => (index + 1) % count,
-                        (None, true) => count - 1,
-                        (None, false) => 0,
-                    };
-                    self.focused = Some(self.focus_order[next].clone());
+                WindowEvent::FocusNext { backwards } if !self.modal_input => {
+                    if let Some(id) = self.active_dropdown.take()
+                        && let Some(state) = self.dropdowns.get_mut(&id)
+                    {
+                        state.open = false;
+                    }
+                    self.navigation.tab(&mut self.focused, *backwards);
                     self.reveal_focus = true;
+                    *event = WindowEvent::RedrawRequested;
+                }
+                WindowEvent::KeyPressed {
+                    key:
+                        key @ (crate::platform::event::Key::Left | crate::platform::event::Key::Right),
+                    control: true,
+                } if !self.modal_input
+                    && self.active_dropdown.is_none()
+                    && !self.input_focused() =>
+                {
+                    let right = *key == crate::platform::event::Key::Right;
+                    let id = if right {
+                        "button:history-forward:0"
+                    } else {
+                        "button:history-back:0"
+                    };
+                    if self.navigation.control(Some(id)).is_some() {
+                        self.press_keyboard_button(id.to_owned());
+                    }
+                    *event = WindowEvent::RedrawRequested;
+                }
+                WindowEvent::KeyPressed {
+                    key: crate::platform::event::Key::Enter,
+                    ..
+                } if !self.modal_input && self.active_dropdown.is_none() => {
+                    if let Some(control) = self.navigation.control(self.focused.as_deref())
+                        && control.kind == FocusKind::Button
+                    {
+                        self.press_keyboard_button(control.id.clone());
+                        *event = WindowEvent::RedrawRequested;
+                    }
                 }
                 WindowEvent::MouseScrolled { delta }
                     if !self.modal_input && self.active_dropdown.is_none() =>
@@ -690,6 +793,9 @@ impl Framework {
             }
         }
 
+        if !self.modal_input {
+            self.navigation.controls.clear();
+        }
         self.focus_order.clear();
         self.checkbox_ids.clear();
         self.focus_reveals.clear();
@@ -807,16 +913,21 @@ impl Framework {
 
         self.reveal_focus = false;
         self.sliders.retain(|id, _| self.focus_order.contains(id));
-        if self
-            .focused
-            .as_ref()
-            .is_some_and(|id| !self.focus_order.contains(id))
+        if self.modal_input
+            && self
+                .focused
+                .as_ref()
+                .is_some_and(|id| !self.focus_order.contains(id))
         {
             self.focused = None;
         }
 
         self.has_rendered = true;
         self.render_zoom_indicator(gpu)?;
+        if !self.modal_input && self.navigation.finish(&mut self.focused) {
+            self.reveal_focus = true;
+            self.animate_until(self.frame_time);
+        }
         self.transitions.retain(|_, transition| transition.seen);
         self.scheduler.schedule(self.deadline);
         self.ui_renderer.end(gpu)
@@ -1295,7 +1406,7 @@ impl Framework {
             .unwrap_or(self.div_width())
             .max(1.0);
         let bounds = self.place(width, label_metrics.height + 50.0);
-        self.register_control(id, bounds);
+        self.register_control(id, bounds, FocusKind::Slider, false);
 
         let visible = self.visible(bounds);
         let track = Bounds {
@@ -1431,7 +1542,7 @@ impl Framework {
             },
         )?;
         let bounds = self.place(width, layout.height.max(20.0) + 12.0);
-        self.register_control(id, bounds);
+        self.register_control(id, bounds, FocusKind::Checkbox, false);
         self.checkbox_ids.insert(id.to_owned());
         let occurrence = self.button_occurrences.entry(id.to_owned()).or_default();
         let key = (id.to_owned(), *occurrence);
@@ -1543,7 +1654,7 @@ impl Framework {
             self.div_width() - 2.0 * style.margin,
             metrics.height + 2.0 * style.padding,
         );
-        self.register_control(id, bounds);
+        self.register_control(id, bounds, FocusKind::Dropdown, false);
         let window = self.layouts.first().unwrap().bounds;
         let popup = dropdown::popup_bounds(bounds, options.len(), [window.width, window.height]);
 
@@ -1557,6 +1668,32 @@ impl Framework {
         let visible = self.visible(bounds);
         let state = self.dropdowns.entry(id.to_owned()).or_default();
         let response = state.update(hit, popup, self.batch_pointer, events);
+        for event in events {
+            if matches!(
+                event,
+                WindowEvent::MouseButtonPressed {
+                    button: MouseButton::Left
+                }
+            ) {
+                if response.hovered {
+                    self.focused = Some(id.to_owned());
+                } else if !state.open && self.focused.as_deref() == Some(id) {
+                    self.focused = None;
+                }
+            }
+        }
+        let (keyboard_choice, unfocus) = state.keyboard(
+            self.focused.as_deref() == Some(id),
+            selected,
+            options.len(),
+            events,
+        );
+        if unfocus {
+            self.focused = None;
+        }
+        if let Some(index) = keyboard_choice {
+            self.dropdown_selection = Some((id.to_owned(), index));
+        }
 
         if !visible {
             state.open = false;
@@ -1570,6 +1707,8 @@ impl Framework {
                 bounds: popup,
                 options: state.options(options),
                 selected,
+                highlighted: state.highlighted(selected),
+                reveal: std::mem::take(&mut state.reveal),
                 font,
                 icons,
                 font_size: style.font_size,
@@ -1598,6 +1737,27 @@ impl Framework {
         let style = button::appearance(style, response.hovered, response.pressed);
         let style = self.animate_style((format!("dropdown:{id}"), 0), style);
         self.paint_style(bounds, style)?;
+        if self.focused.as_deref() == Some(id) {
+            let radius = if self.rounded_corners {
+                style.radius
+            } else {
+                0.0
+            };
+            for inset in [0.0, 1.0] {
+                self.ui_renderer.corner_box(
+                    [
+                        bounds.x + inset,
+                        bounds.y + inset,
+                        (bounds.width - 2.0 * inset).max(0.0),
+                        (bounds.height - 2.0 * inset).max(0.0),
+                    ],
+                    (radius - inset).max(0.0),
+                    style.rounded_corners,
+                    None,
+                    Some(self.theme.primary),
+                )?;
+            }
+        }
         self.ui_renderer.push_clip(content_clip(bounds, style));
         self.text_renderer.color = style.color;
         let result = (|| -> anyhow::Result<()> {
@@ -1649,6 +1809,10 @@ impl Framework {
             self.zoom_indicator.show(now);
         }
 
+        if self.keyboard_clicks.contains("zoom-reset") {
+            self.reset_zoom();
+            self.animate_until(self.frame_time);
+        }
         let label = format!("{:.0}%", self.zoom * 100.0);
         let font = self.font_at(Font::Regular, 12)?;
         let metrics = self.text_renderer.measure(&label, font)?;
@@ -1662,6 +1826,9 @@ impl Framework {
             height: window.height - (y - 12.0).max(0.0),
         };
         self.zoom_hit = (self.zoom != 1.0).then_some(hit);
+        if self.zoom != 1.0 {
+            self.register_control("zoom-reset", hit, FocusKind::Button, false);
+        }
         let hovered = self.zoom_hit.is_some_and(|bounds| {
             !self.modal_input
                 && self.active_dropdown.is_none()
@@ -1669,6 +1836,7 @@ impl Framework {
                     .pointer
                     .is_some_and(|pointer| contains(bounds, pointer))
         });
+        let hovered = hovered || self.focused.as_deref() == Some("zoom-reset");
         let Some((opacity, next)) =
             self.zoom_indicator
                 .sample(now, hovered, self.animations, self.curve)
@@ -1759,6 +1927,9 @@ impl Framework {
                 },
             )?;
 
+            if popup.reveal {
+                self.reveal_row(popup.highlighted, dropdown::ROW_HEIGHT);
+            }
             let rows = self.visible_rows(dropdown::ROW_HEIGHT, popup.options.len());
             let end = rows.end;
             self.space(rows.start as f32 * dropdown::ROW_HEIGHT);
@@ -1782,8 +1953,8 @@ impl Framework {
                 );
                 let style = Style {
                     color: self.theme.text,
-                    background: (response.hovered || index == popup.selected)
-                        .then_some(self.theme.button),
+                    background: (response.hovered || index == popup.highlighted)
+                        .then_some(button::highlight(self.theme.button, self.theme.text)),
                     radius: self.corner_radii().row,
                     ..self.base_style()
                 };
@@ -1872,7 +2043,8 @@ impl Framework {
                 .update(hit, self.batch_pointer, &self.events);
         let highlighted = row.selected;
         let style = Style {
-            background: highlighted.then_some(self.theme.button),
+            background: highlighted
+                .then_some(button::highlight(self.theme.button, self.theme.button_text)),
             color: if highlighted {
                 self.theme.button_text
             } else {
@@ -1997,12 +2169,7 @@ impl Framework {
         let occurrence = self.button_occurrences.entry(id.to_owned()).or_default();
         let key = (id.to_owned(), *occurrence);
         *occurrence += 1;
-        let hit = self.hit_bounds(b);
-        let response = self.buttons.entry(key.clone()).or_default().update(
-            hit,
-            self.batch_pointer,
-            &self.events,
-        );
+        let response = self.button_response(key.clone(), b, s.enabled, s.selected);
         if !self.visible(b) {
             return Ok(response.clicked);
         }
@@ -2097,9 +2264,7 @@ impl Framework {
         let occurrence = self.button_occurrences.entry(label.into()).or_default();
         let key = (label.to_owned(), *occurrence);
         *occurrence += 1;
-        let hit = self.hit_bounds(b);
-        let state = self.buttons.entry(key.clone()).or_default();
-        let response = state.update(hit, self.batch_pointer, &self.events);
+        let response = self.button_response(key.clone(), b, s.enabled, s.selected);
         if !self.visible(b) {
             return Ok(response.clicked);
         }
@@ -2166,7 +2331,7 @@ impl Framework {
         let hit = self.hit_bounds(b);
         let visible = self.visible(b);
         if visible {
-            self.focus_order.push(id.to_owned());
+            self.register_control(id, b, FocusKind::Input, false);
         }
 
         let field = self

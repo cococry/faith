@@ -183,12 +183,12 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: DEFAULT_ID.to_owned(),
-            rounded_corners: false,
+            rounded_corners: true,
             animations: true,
             animation_curve: Curve::default(),
-            smooth_scrolling: true,
+            smooth_scrolling: false,
             zoom_step: 10,
-            default_zoom: 100,
+            default_zoom: 110,
         }
     }
 }

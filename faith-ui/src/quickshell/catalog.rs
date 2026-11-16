@@ -49,8 +49,6 @@ impl Entry {
             Action::Rounded(_) => Some((SettingsItem::Misc, "settings-rounded-corners")),
             Action::Animations(_) => Some((SettingsItem::Misc, "settings-animations")),
             Action::SmoothScrolling(_) => Some((SettingsItem::Misc, "settings-smooth-scrolling")),
-            Action::AnimationCurve(_) => Some((SettingsItem::Misc, "settings-animation-curve")),
-            Action::Theme(_) => Some((SettingsItem::Theme, "settings-theme-dropdown")),
             Action::ZoomStep(_) => Some((SettingsItem::Misc, "settings-zoom-step")),
             Action::DefaultZoom(_) => Some((SettingsItem::Misc, "settings-default-zoom")),
             _ => None,

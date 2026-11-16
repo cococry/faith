@@ -201,12 +201,14 @@ impl Shell {
             } else {
                 matched.score + target.priority.min(200) / 5
             };
-            /* we prefer the picker for the generic theme query, even from settings */
-            let preference = if normalized == "theme" && entry.id == "select-theme" {
-                300
-            } else {
-                0
-            };
+            /* we prefer themes for generic theme and selector queries, even from settings */
+            let generic_selector = !normalized.is_empty() && "selector".starts_with(&normalized);
+            let preference =
+                if entry.id == "select-theme" && (normalized == "theme" || generic_selector) {
+                    300
+                } else {
+                    0
+                };
             let mut title = entry.label.clone();
             let mut parent = entry;
             for &index in &matched.path {
@@ -424,7 +426,10 @@ impl Shell {
                 font_size: 20,
                 padding: 10.0,
                 background: Some(ui.theme().surface),
-                hover_color: Some(ui.theme().button),
+                hover_color: Some(crate::ui::widgets::button::highlight(
+                    ui.theme().button,
+                    ui.theme().button_text,
+                )),
                 hover_text_color: Some(ui.theme().button_text),
                 click_color: Some(ui.theme().primary),
                 click_text_color: Some(ui.theme().primary_text),

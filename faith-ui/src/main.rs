@@ -426,11 +426,11 @@ impl App {
             },
         }
 
-        if self.location() != previous && !focus_requested {
+        if (self.location() != previous || record_history) && !focus_requested {
             if self.page == Page::Create {
                 ui.focus_input("new-profile-handle");
             } else {
-                ui.clear_focus();
+                ui.navigation_changed();
             }
         }
 
@@ -516,6 +516,7 @@ fn icon(
     selected: bool,
 ) -> anyhow::Result<bool> {
     ui.push_style(Style {
+        selected,
         font_size: 20,
         padding: 4.0,
         radius: ui.corner_radii().icon,
@@ -524,7 +525,11 @@ fn icon(
         } else {
             ui.theme().text
         },
-        background: selected.then_some(ui.theme().button),
+        background: Some(if selected {
+            ui.theme().button
+        } else {
+            ui.theme().surface
+        }),
         ..ui.style()
     });
 
@@ -552,6 +557,7 @@ fn row_button(
     };
 
     ui.push_style(Style {
+        selected,
         font_size: 16,
         icon_font_size: (glyph == ACCOUNTS || glyph == ACCOUNTS_SELECTED).then_some(28),
         padding: 14.0,
@@ -831,7 +837,7 @@ fn item_list(
             if chats {
                 "Your conversations will appear here."
             } else {
-                "Your space for secure conversations starts with a profile."
+                "Create your first profile to begin chatting."
             },
             14,
             false,
@@ -978,13 +984,17 @@ fn history_controls(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow
             font_size: 20,
             padding: 8.0,
             hit_padding: 4.0,
+            enabled,
             color,
             radius: ui.corner_radii().control,
             background: Some(ui.theme().background),
-            hover_color: enabled.then_some(ui.theme().button),
+            hover_color: enabled.then_some(ui::widgets::button::highlight(
+                ui.theme().button,
+                ui.theme().button_text,
+            )),
             hover_text_color: enabled.then_some(ui.theme().button_text),
-            click_color: enabled.then_some(ui.theme().primary),
-            click_text_color: enabled.then_some(ui.theme().primary_text),
+            click_color: Some(ui.theme().primary),
+            click_text_color: Some(ui.theme().primary_text),
             ..ui.style()
         });
         ui.push_sizing(Some(44.0), Some(44.0));
