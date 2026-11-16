@@ -7,6 +7,8 @@ pub enum Key {
     Delete,
     Left,
     Right,
+    Up,
+    Down,
     Home,
     End,
     Escape,
@@ -17,7 +19,7 @@ pub enum Key {
 #[derive(Debug, Clone, PartialEq)]
 pub enum WindowEvent {
     CloseRequested,
-    /// UI zoom steps of ten percentage points; positive values zoom in.
+    /// UI zoom gesture steps; positive values zoom in.
     Zoom(f64),
     RedrawRequested,
     Resized {
@@ -31,6 +33,9 @@ pub enum WindowEvent {
         control: bool,
     },
     FocusChanged(bool),
+    FocusNext {
+        backwards: bool,
+    },
     MouseEntered {
         position: CursorPosition,
     },

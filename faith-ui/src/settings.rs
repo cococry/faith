@@ -28,13 +28,26 @@ pub struct Settings {
     pub animations: bool,
     pub animation_curve: Curve,
     pub smooth_scrolling: bool,
+    pub zoom_step: u32,
+    pub default_zoom: u32,
 }
 
 impl Settings {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         match fs::read(path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .with_context(|| format!("Could not read settings from {}", path.display())),
+            Ok(bytes) => {
+                let mut settings: Self = serde_json::from_slice(&bytes)
+                    .with_context(|| format!("Could not read settings from {}", path.display()))?;
+                settings.zoom_step = settings.zoom_step.clamp(1, 50);
+                settings.default_zoom = crate::ui::widgets::slider::Options {
+                    min: 50,
+                    max: 200,
+                    step: 10,
+                    suffix: "%",
+                }
+                .snap(settings.default_zoom as f64);
+                Ok(settings)
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(error) => Err(error).context("Could not load settings"),
         }
@@ -174,6 +187,8 @@ impl Default for Settings {
             animations: true,
             animation_curve: Curve::default(),
             smooth_scrolling: true,
+            zoom_step: 10,
+            default_zoom: 100,
         }
     }
 }

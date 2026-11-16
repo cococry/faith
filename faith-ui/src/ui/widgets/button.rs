@@ -71,6 +71,14 @@ pub fn appearance(mut style: Style, hovered: bool, pressed: bool) -> Style {
         darken(style.color, change.min(1.0))
     };
 
+    if let Some(color) = if pressed {
+        style.click_text_color.or(style.hover_text_color)
+    } else {
+        style.hover_text_color
+    } {
+        style.color = color;
+    }
+
     style
 }
 

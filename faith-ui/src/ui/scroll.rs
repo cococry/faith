@@ -1,7 +1,7 @@
 use std::{collections::HashMap, time::Instant};
 
 use super::{
-    animation::{Curve, DURATION},
+    animation::{Curve, DURATION, Hover},
     widgets::input::Bounds,
 };
 use crate::platform::{
@@ -11,6 +11,10 @@ use crate::platform::{
 
 pub const BAR: f32 = 10.0;
 const LINE: f32 = 38.0;
+
+pub fn thickness(expansion: f32) -> f32 {
+    BAR - 4.0 * (1.0 - expansion)
+}
 
 pub struct PrepareOptions {
     pub axes: [bool; 2],
@@ -85,20 +89,21 @@ impl View {
             .max(18.0)
             .min(length);
         let position = (length - size) * self.offset[axis] / self.maximum[axis];
-        let inset = 2.0 * (1.0 - self.expansion[axis]);
+        let thickness = thickness(self.expansion[axis]);
+        let inset = (BAR - thickness) * 0.5;
 
         Some(if axis == 0 {
             Bounds {
                 x: track.x + position,
                 y: track.y + inset,
                 width: size,
-                height: BAR - 2.0 * inset,
+                height: thickness,
             }
         } else {
             Bounds {
                 x: track.x + inset,
                 y: track.y + position,
-                width: BAR - 2.0 * inset,
+                width: thickness,
                 height: size,
             }
         })
@@ -111,9 +116,7 @@ struct State {
     target: [f32; 2],
     from: [f32; 2],
     start: Option<Instant>,
-    hovered: [bool; 2],
-    hover_from: [f32; 2],
-    hover_start: [Option<Instant>; 2],
+    hover: [Hover; 2],
 }
 
 impl State {
@@ -130,9 +133,7 @@ impl State {
             target: [0.0; 2],
             from: [0.0; 2],
             start: None,
-            hovered: [false; 2],
-            hover_from: [0.0; 2],
-            hover_start: [None; 2],
+            hover: [Hover::default(); 2],
         }
     }
 
@@ -140,30 +141,9 @@ impl State {
         let mut active = false;
 
         for (axis, hovered) in hovered.into_iter().enumerate() {
-            if let Some(start) = self.hover_start[axis] {
-                let t = now.saturating_duration_since(start).as_secs_f32() / DURATION.as_secs_f32();
-                let target = f32::from(self.hovered[axis]);
-                self.view.expansion[axis] =
-                    self.hover_from[axis] + (target - self.hover_from[axis]) * curve.sample(t);
-
-                if t >= 1.0 {
-                    self.view.expansion[axis] = target;
-                    self.hover_start[axis] = None;
-                }
-            }
-
-            if hovered != self.hovered[axis] {
-                self.hover_from[axis] = self.view.expansion[axis];
-                self.hovered[axis] = hovered;
-                self.hover_start[axis] = Some(now);
-            }
-
-            if !enabled {
-                self.view.expansion[axis] = f32::from(hovered);
-                self.hover_start[axis] = None;
-            }
-
-            active |= self.hover_start[axis].is_some();
+            let (expansion, animating) = self.hover[axis].update(hovered, now, enabled, curve);
+            self.view.expansion[axis] = expansion;
+            active |= animating;
         }
 
         active
@@ -305,6 +285,28 @@ pub struct Areas {
 }
 
 impl Areas {
+    pub fn reveal(&mut self, id: u64, bounds: Bounds, now: Instant) -> bool {
+        let Some(state) = self.states.get_mut(&id) else {
+            return false;
+        };
+
+        let viewport = state.view.viewport;
+        let mut target = state.view.offset;
+        if bounds.y < viewport.y {
+            target[1] += bounds.y - viewport.y;
+        } else if bounds.y + bounds.height > viewport.y + viewport.height {
+            target[1] += bounds.y + bounds.height - viewport.y - viewport.height;
+        }
+
+        target[1] = target[1].clamp(0.0, state.view.maximum[1]);
+        if target == state.view.offset {
+            return false;
+        }
+
+        state.move_to(target, now, false, Curve::default());
+        true
+    }
+
     /// Old hit regions and drag geometry cannot be used after a scale change.
     pub fn invalidate_layout(&mut self) {
         self.regions.clear();
