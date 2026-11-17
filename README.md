@@ -1,6 +1,5 @@
 # faith
 
-
 > [!WARNING]
 > faith is in active pre-alpha development and is, from a user's point of view, currently unusable for its intended purpose.
 >  However, this will change soon™.
@@ -24,6 +23,9 @@ faith uses a **custom immediate-mode UI framework** whose rendering is event-dri
 
 The ***faith*** [<ins>server</ins>](https://github.com/cococry/faith/tree/main/faith-server) is designed around security & low latency. It is written from scratch in C,
 supports concurrent networking, implements a custom binary protocol and uses TLS for wire security.
+
+![faith UI (dark)](assets/faith-ui.png#gh-dark-mode-only)
+![faith UI (light)](assets/faith-ui-light.png#gh-light-mode-only)
 
 ## Current features 
 
