@@ -39,6 +39,9 @@ supports concurrent networking, implements a custom binary protocol and uses TLS
 - Ligatures and text shaping with HarfBuzz
 - Multidirectional text paragraphs
 - Paragraph layouting engine
+- Event-driven immediate-mode UI framework
+- Style & Layout animations
+- Optimized rounded corners
 
 **Network related:**
 - Concurrent server written in C
