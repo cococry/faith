@@ -595,14 +595,18 @@ fn row_button(
         padding: 14.0,
         hit_padding: 5.0,
         radius: ui.corner_radii().row,
-        color: if primary {
+        color: if !ui.style().enabled {
+            ui.theme().muted
+        } else if primary {
             ui.theme().primary_text
         } else if selected {
             ui.theme().selected_icon
         } else {
             ui.theme().button_text
         },
-        background: Some(if primary {
+        background: Some(if !ui.style().enabled {
+            ui.theme().button
+        } else if primary {
             ui.theme().primary
         } else if selected {
             ui.theme().button
@@ -1221,10 +1225,15 @@ fn profile_creation_page(
     ui.space(24.0);
     let mut action = Action::None;
 
-    // Create the profile when the completed button click is valid.
-    if row_button(ui, gpu, "submit-create", ADD, "Create profile", false, true)?
-        && profiles::valid_alias(&alias)
-    {
+    // Empty or invalid handles cannot be submitted by mouse or keyboard.
+    let can_create = profiles::valid_alias(&alias);
+    ui.push_style(Style {
+        enabled: can_create,
+        ..ui.style()
+    });
+    let clicked = row_button(ui, gpu, "submit-create", ADD, "Create profile", false, true);
+    ui.pop_style();
+    if clicked? && can_create {
         action = Action::Create(alias);
     }
 
@@ -2043,6 +2052,7 @@ fn main() -> anyhow::Result<()> {
         }
 
         ui.end(&mut renderer)?;
+        platform.set_cursor(ui.cursor_icon())?;
         renderer.end_frame()?;
 
         if first_frame {

@@ -132,7 +132,21 @@ impl PlatformWaker {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CursorIcon {
+    #[default]
+    Default,
+    Text,
+}
+
 impl Platform {
+    pub fn set_cursor(&mut self, cursor: CursorIcon) -> anyhow::Result<()> {
+        match self {
+            Self::X11(platform) => platform.set_cursor(cursor),
+            Self::Wayland(platform) => platform.set_cursor(cursor),
+        }
+    }
+
     /// Creates a new platform window using the
     /// configured backend.
     ///

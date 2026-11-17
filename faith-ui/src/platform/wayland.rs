@@ -23,6 +23,10 @@ use wayland_client::{
     },
 };
 
+use super::window::CursorIcon;
+use wayland_protocols::wp::cursor_shape::v1::client::{
+    wp_cursor_shape_device_v1, wp_cursor_shape_manager_v1,
+};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
 use nix::unistd::read;
@@ -58,6 +62,10 @@ pub struct WaylandState {
     seat_name: Option<u32>,
     keyboard_proxy: Option<wl_keyboard::WlKeyboard>,
     pointer_proxy: Option<wl_pointer::WlPointer>,
+    cursor_manager: Option<wp_cursor_shape_manager_v1::WpCursorShapeManagerV1>,
+    cursor_device: Option<wp_cursor_shape_device_v1::WpCursorShapeDeviceV1>,
+    cursor_serial: Option<u32>,
+    cursor: CursorIcon,
     pointer_scroll: PointerScroll,
     keyboard: Option<Keyboard>,
     repeat: KeyRepeat,
@@ -116,6 +124,27 @@ impl WaylandWaker {
 }
 
 impl WaylandState {
+    fn apply_cursor(&self) {
+        if let (Some(device), Some(serial)) = (&self.cursor_device, self.cursor_serial) {
+            device.set_shape(
+                serial,
+                match self.cursor {
+                    CursorIcon::Default => wp_cursor_shape_device_v1::Shape::Default,
+                    CursorIcon::Text => wp_cursor_shape_device_v1::Shape::Text,
+                },
+            );
+        }
+    }
+
+    fn create_cursor_device(&mut self, qh: &QueueHandle<Self>) {
+        if self.cursor_device.is_none()
+            && let (Some(manager), Some(pointer)) = (&self.cursor_manager, &self.pointer_proxy)
+        {
+            self.cursor_device = Some(manager.get_pointer(pointer, qh, ()));
+            self.apply_cursor();
+        }
+    }
+
     fn update_scale(&mut self) {
         let scale = self
             .output_scales
@@ -163,6 +192,10 @@ impl WaylandState {
     }
 
     fn remove_pointer(&mut self) {
+        self.cursor_serial = None;
+        if let Some(device) = self.cursor_device.take() {
+            device.destroy();
+        }
         if let Some(pointer) = self.pointer_proxy.take() {
             if pointer.version() >= 3 {
                 pointer.release();
@@ -225,6 +258,17 @@ impl Dispatch<wl_registry::WlRegistry, WaylandHandler> for WaylandState {
         } = event
         {
             match interface.as_str() {
+                "wp_cursor_shape_manager_v1" => {
+                    state.cursor_manager = Some(
+                        registry.bind::<wp_cursor_shape_manager_v1::WpCursorShapeManagerV1, _, _>(
+                            name,
+                            1,
+                            qh,
+                            (),
+                        ),
+                    );
+                    state.create_cursor_device(qh);
+                }
                 "wl_output" => {
                     let output = registry.bind::<wl_output::WlOutput, _, _>(
                         name,
@@ -337,6 +381,7 @@ impl Dispatch<wl_seat::WlSeat, WaylandHandler> for WaylandState {
             if caps.contains(wl_seat::Capability::Pointer) {
                 if state.pointer_proxy.is_none() {
                     state.pointer_proxy = Some(seat.get_pointer(qh, WaylandHandler));
+                    state.create_cursor_device(qh);
                 }
             } else {
                 state.remove_pointer();
@@ -614,6 +659,15 @@ impl Dispatch<xdg_toplevel::XdgToplevel, WaylandHandler> for WaylandState {
 }
 
 impl WaylandPlatform {
+    pub fn set_cursor(&mut self, cursor: CursorIcon) -> anyhow::Result<()> {
+        if self.state.cursor != cursor {
+            self.state.cursor = cursor;
+            self.state.apply_cursor();
+            self.conn.flush()?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn frame_timing(&self) -> &super::window::FrameTiming {
         &self.state.frame_timing
     }
@@ -644,6 +698,10 @@ impl WaylandPlatform {
             seat_name: None,
             keyboard_proxy: None,
             pointer_proxy: None,
+            cursor_manager: None,
+            cursor_device: None,
+            cursor_serial: None,
+            cursor: CursorIcon::Default,
             pointer_scroll: PointerScroll::default(),
             keyboard: None,
             repeat: KeyRepeat::default(),
@@ -971,11 +1029,14 @@ impl Dispatch<wl_pointer::WlPointer, WaylandHandler> for WaylandState {
 
         match event {
             wl_pointer::Event::Enter {
+                serial,
                 surface,
                 surface_x,
                 surface_y,
                 ..
             } if state.surface.as_ref() == Some(&surface) => {
+                state.cursor_serial = Some(serial);
+                state.apply_cursor();
                 state.pending_events.push(WindowEvent::MouseEntered {
                     position: CursorPosition {
                         x: surface_x,
@@ -985,6 +1046,7 @@ impl Dispatch<wl_pointer::WlPointer, WaylandHandler> for WaylandState {
             }
 
             wl_pointer::Event::Leave { .. } => {
+                state.cursor_serial = None;
                 state.pending_events.push(WindowEvent::MouseLeft);
                 // Wayland ends pointer focus only after the implicit grab ends.
                 state.pending_events.push(WindowEvent::MouseCancelled);
@@ -1065,3 +1127,6 @@ impl Dispatch<wl_pointer::WlPointer, WaylandHandler> for WaylandState {
         }
     }
 }
+
+wayland_client::delegate_noop!(WaylandState: ignore wp_cursor_shape_manager_v1::WpCursorShapeManagerV1);
+wayland_client::delegate_noop!(WaylandState: ignore wp_cursor_shape_device_v1::WpCursorShapeDeviceV1);
