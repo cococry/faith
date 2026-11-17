@@ -285,6 +285,19 @@ pub struct Areas {
 }
 
 impl Areas {
+    pub fn reset(&mut self, id: u64) -> [f32; 2] {
+        let Some(state) = self.states.get_mut(&id) else {
+            return [0.0; 2];
+        };
+
+        let offset = state.view.offset;
+        state.view.offset = [0.0; 2];
+        state.target = [0.0; 2];
+        state.from = [0.0; 2];
+        state.start = None;
+        offset
+    }
+
     pub fn reveal(&mut self, id: u64, bounds: Bounds, now: Instant) -> bool {
         let Some(state) = self.states.get_mut(&id) else {
             return false;
@@ -540,5 +553,32 @@ impl Areas {
             || (axes[1] && old.viewport.height != state.view.viewport.height)
             || old.offset != state.view.offset;
         (state.view, changed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resetting_results_cancels_pending_scroll() {
+        let now = Instant::now();
+        let bounds = Bounds {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 100.0,
+        };
+        let mut state = State::new(bounds);
+        state.extent = [300.0, 800.0];
+        state.configure(bounds, [false, true]);
+        state.move_to([0.0, 200.0], now, true, Curve::Linear);
+        state.tick(now + DURATION / 2, true, Curve::Linear);
+        let mut areas = Areas::default();
+        areas.states.insert(1, state);
+        assert!(areas.reset(1)[1] > 0.0);
+        let state = areas.states.get_mut(&1).unwrap();
+        assert!(!state.tick(now + DURATION * 2, true, Curve::Linear));
+        assert_eq!(state.view.offset, [0.0; 2]);
     }
 }

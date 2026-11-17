@@ -18,6 +18,7 @@ pub const ROW_HEIGHT: f32 = 38.0;
 #[derive(Default)]
 pub struct State {
     pub open: bool,
+    pub presence: crate::ui::animation::Presence,
     header: button::State,
     cursor: Option<usize>,
     pub reveal: bool,
@@ -199,4 +200,6 @@ pub struct Popup {
     pub font: FontHandle,
     pub icons: FontHandle,
     pub font_size: u32,
+    pub presence: f32,
+    pub interactive: bool,
 }
