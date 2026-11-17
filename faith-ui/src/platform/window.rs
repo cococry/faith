@@ -54,13 +54,13 @@ impl Default for FrameTiming {
 
 impl FrameTiming {
     pub fn set_refresh_millihz(&self, refresh: u64) {
-        if let Some(interval) = 1_000_000_000_000u64.checked_div(refresh) {
-            if self.0.swap(interval, Ordering::Relaxed) != interval {
-                info!(
-                    "Using {:.2} Hz refresh rate for UI animations.",
-                    refresh as f64 / 1_000.0
-                );
-            }
+        if let Some(interval) = 1_000_000_000_000u64.checked_div(refresh)
+            && self.0.swap(interval, Ordering::Relaxed) != interval
+        {
+            info!(
+                "Using {:.2} Hz refresh rate for UI animations.",
+                refresh as f64 / 1_000.0
+            );
         }
     }
 
