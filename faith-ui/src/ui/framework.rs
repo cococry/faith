@@ -1,4 +1,4 @@
-use super::animation::{Curve, Scheduler, Transition};
+use super::animation::{Curve, MORPH_DURATION, Motion, Presence, Scheduler, Transition};
 use super::focus::{Control, Kind as FocusKind, Navigation};
 use super::scroll::{self, Areas, PrepareOptions, View};
 use super::theme::{CornerRadii, Theme};
@@ -54,6 +54,8 @@ pub struct Style {
     pub enabled: bool,
     /// Prefer this selected control when restoring keyboard focus.
     pub selected: bool,
+    /* siblings in this group share one moving selection background */
+    pub selection_group: Option<&'static str>,
 }
 
 impl Default for Style {
@@ -76,6 +78,7 @@ impl Default for Style {
             rounded_corners: [true; 4],
             enabled: true,
             selected: false,
+            selection_group: None,
         }
     }
 }
@@ -128,6 +131,7 @@ struct Layout {
     inline: bool,
     id: u64,
     children: usize,
+    widgets: u64,
 }
 
 impl Layout {
@@ -143,6 +147,7 @@ impl Layout {
             inline: false,
             id: 0,
             children: 0,
+            widgets: 0,
         }
     }
 
@@ -199,8 +204,14 @@ pub struct Framework {
     theme_transition: Option<(Theme, Theme, Instant)>,
     theme_animating: bool,
     animations: bool,
+    layout_morphing: bool,
+    layout_resized: bool,
     curve: Curve,
     transitions: HashMap<(String, usize), Transition>,
+    motions: HashMap<(u64, u64), Motion<4>>,
+    selection_slots: HashMap<(u64, &'static str), Option<super::renderer::BoxDecoration>>,
+    overlay_mark: (usize, usize),
+    overlay_opacity: f32,
     scheduler: Scheduler,
     frame_time: Instant,
     has_rendered: bool,
@@ -210,7 +221,7 @@ pub struct Framework {
     dropdown_seen: HashSet<String>,
     active_dropdown: Option<String>,
     dropdown_events: Vec<WindowEvent>,
-    pending_popup: Option<dropdown::Popup>,
+    pending_popups: Vec<dropdown::Popup>,
     dropdown_selection: Option<(String, usize)>,
     scrolls: Areas,
     scrollbars: Vec<(View, Bounds)>,
@@ -237,6 +248,7 @@ pub struct Framework {
     focus_reveals: Vec<(u64, Bounds)>,
     reveal_focus: bool,
     focused: Option<String>,
+    keyboard_focus_visible: bool,
     events: Vec<WindowEvent>,
     pointer: Option<CursorPosition>,
     batch_pointer: Option<CursorPosition>,
@@ -266,8 +278,14 @@ impl Framework {
             theme_transition: None,
             theme_animating: false,
             animations: true,
+            layout_morphing: false,
+            layout_resized: false,
             curve: Curve::default(),
             transitions: HashMap::new(),
+            motions: HashMap::new(),
+            selection_slots: HashMap::new(),
+            overlay_mark: (0, 0),
+            overlay_opacity: 1.0,
             scheduler: Scheduler::new(platform.waker())?,
             frame_time: Instant::now(),
             has_rendered: false,
@@ -277,7 +295,7 @@ impl Framework {
             dropdown_seen: HashSet::new(),
             active_dropdown: None,
             dropdown_events: Vec::new(),
-            pending_popup: None,
+            pending_popups: Vec::new(),
             dropdown_selection: None,
             scrolls: Areas::default(),
             scrollbars: Vec::new(),
@@ -304,6 +322,7 @@ impl Framework {
             focus_reveals: Vec::new(),
             reveal_focus: false,
             focused: None,
+            keyboard_focus_visible: false,
             events: vec![],
             pointer: None,
             batch_pointer: None,
@@ -400,7 +419,7 @@ impl Framework {
             self.focused = Some(id.clone());
         }
         response.clicked |= self.keyboard_clicks.contains(&id);
-        response.hovered |= self.focused.as_deref() == Some(&id);
+        response.hovered |= self.keyboard_focus_visible && self.focused.as_deref() == Some(&id);
         if let Some(&until) = self.keyboard_presses.get(&id) {
             response.pressed = true;
             self.animate_until(until);
@@ -468,17 +487,194 @@ impl Framework {
         self.styles.push(self.base_style());
         self.sizing.push((None, None));
         self.overlay = true;
+        self.overlay_mark = self.ui_renderer.mark();
+        self.overlay_opacity = 1.0;
         Ok(())
     }
 
-    pub fn end_overlay(&mut self) {
+    pub fn begin_passive_overlay(&mut self) -> anyhow::Result<()> {
+        let events = std::mem::take(&mut self.modal_events);
+        let result = self.begin_overlay();
+        self.modal_events = events;
+        result
+    }
+
+    pub fn ignore_overlay_input(&mut self) {
+        self.events.clear();
+        self.events.push(WindowEvent::MouseCancelled);
+    }
+
+    pub fn end_overlay(&mut self) -> anyhow::Result<()> {
+        self.render_scrollbars()?;
+        self.ui_renderer
+            .fade_since(self.overlay_mark, self.overlay_opacity);
         self.layouts.pop();
         self.styles.pop();
         self.sizing.pop();
         self.overlay = false;
+        Ok(())
+    }
+
+    pub fn overlay_opacity(&mut self, opacity: f32) {
+        self.overlay_opacity = opacity.clamp(0.0, 1.0);
+    }
+
+    pub fn presence(&mut self, presence: &mut Presence, open: bool) -> f32 {
+        let (value, active) = presence.update(
+            open,
+            self.frame_time,
+            self.animations && !self.layout_resized,
+        );
+
+        if active {
+            self.animate_until(self.frame_time);
+        }
+
+        value
+    }
+
+    /* we draw above the page with modal input reserved while the menu is open;
+     * choosing an item returns its index and closes the menu */
+    pub fn popup<G: GraphicsDevice>(
+        &mut self,
+        gpu: &mut G,
+        id: &str,
+        state: &mut super::widgets::popup::State,
+        items: &[super::widgets::popup::Item<'_>],
+    ) -> anyhow::Result<Option<usize>> {
+        use super::widgets::popup::ROW_HEIGHT;
+        use crate::platform::event::Key;
+        if !state.is_visible() {
+            return Ok(None);
+        }
+        if items.is_empty() {
+            state.close();
+            return Ok(None);
+        }
+        if state.is_open() {
+            self.begin_overlay()?;
+        } else {
+            self.begin_passive_overlay()?;
+        }
+        let result = (|| -> anyhow::Result<Option<usize>> {
+            self.push_style(Style {
+                font_size: 14,
+                ..self.style()
+            });
+            let mut width = 200.0f32;
+            for item in items {
+                width = width.max(self.text_size(item.label, None)?.0 + 64.0);
+            }
+            self.pop_style();
+            let bounds = state.bounds(width, items.len(), self.layouts[0].bounds);
+            let mut choice = None;
+            let mut pointer = self.batch_pointer;
+            for event in &self.events {
+                match event {
+                    WindowEvent::MouseEntered { position }
+                    | WindowEvent::MouseMoved { position } => {
+                        pointer = Some(*position);
+                        state.cursor = None;
+                    }
+                    WindowEvent::MouseLeft => pointer = None,
+                    WindowEvent::MouseButtonPressed { .. }
+                        if !pointer.is_some_and(|p| contains(bounds, p)) =>
+                    {
+                        state.close()
+                    }
+                    WindowEvent::FocusChanged(false) => state.close(),
+                    WindowEvent::KeyPressed {
+                        key: Key::Escape, ..
+                    } => state.close(),
+                    WindowEvent::KeyPressed { key: Key::Down, .. }
+                    | WindowEvent::FocusNext { backwards: false } => {
+                        state.cursor = Some(state.cursor.map_or(0, |i| (i + 1) % items.len()));
+                    }
+                    WindowEvent::KeyPressed { key: Key::Up, .. }
+                    | WindowEvent::FocusNext { backwards: true } => {
+                        state.cursor = Some(
+                            state
+                                .cursor
+                                .map_or(items.len() - 1, |i| (i + items.len() - 1) % items.len()),
+                        );
+                    }
+                    WindowEvent::KeyPressed { key: Key::Home, .. } => state.cursor = Some(0),
+                    WindowEvent::KeyPressed { key: Key::End, .. } => {
+                        state.cursor = Some(items.len() - 1)
+                    }
+                    WindowEvent::KeyPressed {
+                        key: Key::Enter, ..
+                    } => choice = state.cursor,
+                    _ => {}
+                }
+            }
+            if !state.is_open() {
+                self.ignore_overlay_input();
+            }
+
+            let open = state.is_open();
+            let presence = self.presence(&mut state.presence, open);
+            self.overlay_opacity(presence);
+            self.set_position(bounds.x, bounds.y);
+            self.push_style(Style {
+                padding: 4.0,
+                background: Some(self.theme.surface),
+                border_color: Some(self.theme.border),
+                radius: self.corner_radii().popup,
+                ..self.base_style()
+            });
+            self.div_begin_reveal(
+                id,
+                DivOptions {
+                    width: Some(bounds.width),
+                    height: Some(bounds.height),
+                    ..Default::default()
+                },
+                presence,
+            )?;
+            for (index, item) in items.iter().enumerate() {
+                self.push_style(Style {
+                    font_size: 14,
+                    icon_font_size: Some(18),
+                    padding: 10.0,
+                    color: self.theme.text,
+                    background: (state.cursor == Some(index))
+                        .then_some(button::highlight(self.theme.button, self.theme.text)),
+                    border_color: None,
+                    radius: self.corner_radii().row,
+                    ..self.base_style()
+                });
+                self.push_sizing(Some(self.div_width()), Some(ROW_HEIGHT));
+                let clicked = self.icon_label_button(
+                    gpu,
+                    &format!("popup:{id}:{index}"),
+                    item.icon,
+                    item.label,
+                )?;
+                self.pop_sizing();
+                self.pop_style();
+                if clicked {
+                    choice = Some(index);
+                }
+            }
+            self.div_end();
+            self.pop_style();
+            if choice.is_some() {
+                state.close();
+                self.animate_until(self.frame_time);
+            }
+            Ok(choice)
+        })();
+        self.end_overlay()?;
+        result
     }
 
     pub fn reveal_row(&mut self, index: usize, height: f32) {
+        if index == 0 {
+            self.reset_scroll();
+            return;
+        }
+
         let layout = self.layouts.last().unwrap();
         let bounds = Bounds {
             x: layout.bounds.x,
@@ -487,6 +683,24 @@ impl Framework {
             height,
         };
         self.focus_reveals.push((layout.id, bounds));
+    }
+
+    /* a fresh result list starts at zero, including any scroll still in flight */
+    pub fn reset_scroll(&mut self) {
+        let Some(id) = self.divs.last().and_then(|div| div.scroll_id) else {
+            return;
+        };
+
+        let offset = self.scrolls.reset(id);
+        let layout = self.layouts.last_mut().unwrap();
+        layout.bounds.x += offset[0];
+        layout.bounds.y += offset[1];
+        layout.x += offset[0];
+        layout.y += offset[1];
+        layout.row_y += offset[1];
+        layout.bottom += offset[1];
+        layout.right += offset[0];
+        layout.extent_right += offset[0];
     }
 
     pub fn set_zoom_step(&mut self, step: u32) {
@@ -540,6 +754,14 @@ impl Framework {
         }
     }
 
+    pub fn set_layout_morphing(&mut self, enabled: bool) {
+        self.layout_morphing = enabled;
+    }
+
+    fn morphing(&self) -> bool {
+        self.animations && self.layout_morphing && !self.layout_resized
+    }
+
     pub fn animate_until(&mut self, at: Instant) {
         let next = self.scheduler.next_frame(self.frame_time).max(at);
         self.deadline = Some(self.deadline.map_or(next, |old| old.min(next)));
@@ -562,6 +784,93 @@ impl Framework {
         }
 
         style
+    }
+
+    fn animate_bounds(&mut self, key: (u64, u64), bounds: Bounds, origin: Bounds) -> Bounds {
+        let enabled = self.morphing();
+        let target = [
+            bounds.x - origin.x,
+            bounds.y - origin.y,
+            bounds.width,
+            bounds.height,
+        ];
+        let initial = if enabled && self.has_rendered {
+            [
+                target[0] + target[2] * 0.03,
+                target[1] + target[3] * 0.03,
+                target[2] * 0.94,
+                target[3] * 0.94,
+            ]
+        } else {
+            target
+        };
+        let motion = self
+            .motions
+            .entry(key)
+            .or_insert_with(|| Motion::new(initial, self.frame_time));
+        let (value, active) = motion.update(
+            target,
+            self.frame_time,
+            Curve::Cubic,
+            enabled,
+            MORPH_DURATION,
+        );
+
+        if active {
+            self.animate_until(self.frame_time);
+        }
+
+        Bounds {
+            x: origin.x + value[0],
+            y: origin.y + value[1],
+            width: value[2],
+            height: value[3],
+        }
+    }
+
+    /* one reserved background travels between the selected siblings, below their labels */
+    fn selection_style(&mut self, bounds: Bounds, mut style: Style) -> anyhow::Result<Style> {
+        let Some(group) = style.selection_group else {
+            return Ok(style);
+        };
+
+        let layout = *self.layouts.last().unwrap();
+        let key = (layout.id, group);
+
+        if !self.selection_slots.contains_key(&key) {
+            let slot = self.ui_renderer.reserve_box(
+                if style.selected {
+                    style.background.unwrap_or(self.theme.button)
+                } else {
+                    self.theme.button
+                },
+                None,
+                if self.rounded_corners {
+                    style.radius
+                } else {
+                    0.0
+                },
+                style.rounded_corners,
+            )?;
+            self.selection_slots.insert(key, Some(slot));
+        }
+
+        if style.selected {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            group.hash(&mut hasher);
+            let bounds = self.animate_bounds((layout.id, hasher.finish()), bounds, layout.bounds);
+
+            if let Some(slot) = self.selection_slots.get_mut(&key).unwrap().take() {
+                self.ui_renderer
+                    .resolve_box(slot, [bounds.x, bounds.y, bounds.width, bounds.height]);
+            }
+
+            style.background = None;
+        } else if style.background == Some(self.theme.surface) {
+            style.background = None;
+        }
+
+        Ok(style)
     }
 
     pub fn update_animations(&mut self) {
@@ -612,6 +921,9 @@ impl Framework {
 
     pub fn begin(&mut self, platform: &Platform, events: &[WindowEvent]) {
         self.frame_time = Instant::now();
+        self.layout_resized = events
+            .iter()
+            .any(|event| matches!(event, WindowEvent::Resized { .. }));
         self.deadline = None;
 
         if self.theme_transition.is_some() {
@@ -621,6 +933,12 @@ impl Framework {
         for transition in self.transitions.values_mut() {
             transition.seen = false;
         }
+
+        for motion in self.motions.values_mut() {
+            motion.seen = false;
+        }
+
+        self.selection_slots.clear();
 
         let previous_scale = self.scale;
         let mut corner_consumed = false;
@@ -731,7 +1049,9 @@ impl Framework {
                     pointer = Some(*position)
                 }
                 WindowEvent::MouseLeft | WindowEvent::MouseCancelled => pointer = None,
+                WindowEvent::MouseButtonPressed { .. } => self.keyboard_focus_visible = false,
                 WindowEvent::FocusNext { backwards } if !self.modal_input => {
+                    self.keyboard_focus_visible = true;
                     if let Some(id) = self.active_dropdown.take()
                         && let Some(state) = self.dropdowns.get_mut(&id)
                     {
@@ -842,7 +1162,7 @@ impl Framework {
         self.dropdown_events.clone_from(&self.events);
         self.scrollbars.clear();
         self.dropdown_seen.clear();
-        self.pending_popup = None;
+        self.pending_popups.clear();
 
         if self.active_dropdown.is_some() {
             self.events.retain(|event| {
@@ -900,10 +1220,13 @@ impl Framework {
 
         self.render_scrollbars()?;
 
-        if let Some(popup) = self.pending_popup.take() {
+        let mut popups = std::mem::take(&mut self.pending_popups);
+
+        for popup in popups.drain(..) {
             self.render_dropdown_popup(gpu, popup)?;
-            self.render_scrollbars()?;
         }
+
+        self.pending_popups = popups;
 
         self.buttons.retain(|(label, occurrence), _| {
             self.button_occurrences
@@ -929,6 +1252,7 @@ impl Framework {
             self.animate_until(self.frame_time);
         }
         self.transitions.retain(|_, transition| transition.seen);
+        self.motions.retain(|_, motion| motion.seen);
         self.scheduler.schedule(self.deadline);
         self.ui_renderer.end(gpu)
     }
@@ -1029,6 +1353,10 @@ impl Framework {
     }
 
     fn place(&mut self, w: f32, h: f32) -> Bounds {
+        self.place_named(w, h, None)
+    }
+
+    fn place_named(&mut self, w: f32, h: f32, name: Option<&str>) -> Bounds {
         let s = self.style();
         let (sw, sh) = *self.sizing.last().unwrap();
         let l = self.layouts.last_mut().unwrap();
@@ -1037,11 +1365,23 @@ impl Framework {
             l.row_y = l.y;
         }
 
-        l.place(
+        let b = l.place(
             sw.unwrap_or(w).max(0.0),
             sh.unwrap_or(h).max(0.0),
             s.margin.max(0.0),
-        )
+        );
+        let widget = if let Some(name) = name {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            name.hash(&mut hasher);
+            hasher.finish()
+        } else {
+            let index = l.widgets;
+            l.widgets += 1;
+            index
+        };
+        let key = (l.id, widget);
+        let origin = l.bounds;
+        self.animate_bounds(key, b, origin)
     }
 
     fn paint(&mut self, b: Bounds) -> anyhow::Result<()> {
@@ -1064,15 +1404,30 @@ impl Framework {
     }
 
     pub fn div_begin(&mut self, options: DivOptions) -> anyhow::Result<()> {
-        self.div_begin_impl(None, options)
+        self.div_begin_impl(None, options, 1.0)
     }
 
     /* names keep scroll positions stable when surrounding containers change */
     pub fn div_begin_id(&mut self, id: &str, options: DivOptions) -> anyhow::Result<()> {
-        self.div_begin_impl(Some(id), options)
+        self.div_begin_impl(Some(id), options, 1.0)
     }
 
-    fn div_begin_impl(&mut self, name: Option<&str>, options: DivOptions) -> anyhow::Result<()> {
+    /* reveal grows from the center on both axes while the target layout stays stable */
+    pub fn div_begin_reveal(
+        &mut self,
+        id: &str,
+        options: DivOptions,
+        reveal: f32,
+    ) -> anyhow::Result<()> {
+        self.div_begin_impl(Some(id), options, reveal)
+    }
+
+    fn div_begin_impl(
+        &mut self,
+        name: Option<&str>,
+        options: DivOptions,
+        reveal: f32,
+    ) -> anyhow::Result<()> {
         let s = self.style();
         let sizing = *self.sizing.last().unwrap();
         let width = options.width.or(sizing.0).map(|v| v.max(0.0));
@@ -1101,6 +1456,19 @@ impl Framework {
                 (parent.bounds.y + parent.bounds.height - parent.y - 2.0 * margin).max(0.0),
             ),
         };
+        let target = b;
+        let mut b = self.animate_bounds((id, u64::MAX), b, parent.bounds);
+
+        if self.morphing() {
+            let revealed_width =
+                b.width.min(1.0) + (b.width - 1.0).max(0.0) * reveal.clamp(0.0, 1.0);
+            let revealed_height =
+                b.height.min(1.0) + (b.height - 1.0).max(0.0) * reveal.clamp(0.0, 1.0);
+            b.x += (b.width - revealed_width) * 0.5;
+            b.y += (b.height - revealed_height) * 0.5;
+            b.width = revealed_width;
+            b.height = revealed_height;
+        }
 
         let mut decorations = Vec::new();
 
@@ -1118,6 +1486,14 @@ impl Framework {
         }
 
         let outer_clip = self.clip_bounds();
+        let p = s.padding.max(0.0);
+        let visual_content = Bounds {
+            x: b.x + p,
+            y: b.y + p,
+            width: (b.width - 2.0 * p).max(0.0),
+            height: (b.height - 2.0 * p).max(0.0),
+        };
+        let scroll_clip = scroll::intersect(outer_clip, visual_content);
         self.divs.push(OpenDiv {
             bounds: b,
             width,
@@ -1125,15 +1501,14 @@ impl Framework {
             style: s,
             decorations,
             scroll_id: options.scrollable.then_some(id),
-            outer_clip,
+            outer_clip: scroll_clip,
         });
 
-        let p = s.padding.max(0.0);
         let content = Bounds {
             x: b.x + p,
             y: b.y + p,
-            width: (b.width - 2.0 * p).max(0.0),
-            height: (b.height - 2.0 * p).max(0.0),
+            width: (target.width - 2.0 * p).max(0.0),
+            height: (target.height - 2.0 * p).max(0.0),
         };
 
         let (viewport, offset) = if options.scrollable {
@@ -1142,7 +1517,7 @@ impl Framework {
                 content,
                 PrepareOptions {
                     axes: [width.is_some(), height.is_some()],
-                    clip: outer_clip,
+                    clip: scroll_clip,
                     modal: self.overlay,
                     now: self.frame_time,
                     smooth: self.smooth_scrolling,
@@ -1159,24 +1534,27 @@ impl Framework {
         } else {
             (content, [0.0; 2])
         };
+        /* we lay out at the final size so children don't chase their parent's animation */
         let mut layout = Layout::new(Bounds {
             x: viewport.x - offset[0],
             y: viewport.y - offset[1],
-            ..viewport
+            width: viewport.width,
+            height: viewport.height,
         });
         layout.id = id;
         self.layouts.push(layout);
+        let clip_viewport = scroll::intersect(viewport, visual_content);
         // Auto axes are unconstrained until their contents have been measured.
         self.ui_renderer.push_clip([
-            viewport.x,
-            viewport.y,
+            clip_viewport.x,
+            clip_viewport.y,
             if width.is_some() {
-                viewport.width
+                clip_viewport.width
             } else {
                 f32::MAX
             },
             if height.is_some() {
-                viewport.height
+                clip_viewport.height
             } else {
                 f32::MAX
             },
@@ -1197,8 +1575,16 @@ impl Framework {
         let div = self.divs.pop().unwrap();
         let (mut w, mut h) = layout.fitted_size(div.width, div.height, div.style.padding);
         let mut b = Bounds {
-            width: w,
-            height: h,
+            width: if div.width.is_some() {
+                div.bounds.width
+            } else {
+                w
+            },
+            height: if div.height.is_some() {
+                div.bounds.height
+            } else {
+                h
+            },
             ..div.bounds
         };
 
@@ -1253,8 +1639,22 @@ impl Framework {
             }
         }
 
+        if div.width.is_none() || div.height.is_none() {
+            let origin = self.layouts.last().unwrap().bounds;
+            let animated = self.animate_bounds((layout.id, u64::MAX - 1), b, origin);
+
+            if div.width.is_none() {
+                b.width = animated.width;
+            }
+
+            if div.height.is_none() {
+                b.height = animated.height;
+            }
+        }
+
         for decoration in div.decorations {
-            self.ui_renderer.resolve_box(decoration, [b.x, b.y, w, h]);
+            self.ui_renderer
+                .resolve_box(decoration, [b.x, b.y, b.width, b.height]);
         }
 
         let parent = self.layouts.last_mut().unwrap();
@@ -1699,22 +2099,40 @@ impl Framework {
             state.open = false;
         }
         let open = state.open;
+        let (presence, active) = state.presence.update(
+            open,
+            self.frame_time,
+            self.animations && !self.layout_resized,
+        );
 
         if open {
             self.active_dropdown = Some(id.to_owned());
-            self.pending_popup = Some(dropdown::Popup {
+        } else if self.active_dropdown.as_deref() == Some(id) {
+            self.active_dropdown = None;
+        }
+
+        if open || presence > 0.0 {
+            self.pending_popups.push(dropdown::Popup {
                 id: id.to_owned(),
                 bounds: popup,
                 options: state.options(options),
                 selected,
                 highlighted: state.highlighted(selected),
-                reveal: std::mem::take(&mut state.reveal),
+                reveal: if presence >= 1.0 {
+                    std::mem::take(&mut state.reveal)
+                } else {
+                    false
+                },
                 font,
                 icons,
                 font_size: style.font_size,
+                presence,
+                interactive: open,
             });
-        } else if self.active_dropdown.as_deref() == Some(id) {
-            self.active_dropdown = None;
+        }
+
+        if active {
+            self.animate_until(self.frame_time);
         }
 
         let choice = if self
@@ -1904,6 +2322,11 @@ impl Framework {
         popup: dropdown::Popup,
     ) -> anyhow::Result<()> {
         let events = std::mem::replace(&mut self.events, self.dropdown_events.clone());
+        if !popup.interactive {
+            self.ignore_overlay_input();
+        }
+
+        let mark = self.ui_renderer.mark();
         let window = self.layouts[0].bounds;
         self.layouts.push(Layout::new(window));
         self.overlay = true;
@@ -1918,13 +2341,14 @@ impl Framework {
         });
         self.sizing.push((None, None));
         let result = (|| -> anyhow::Result<()> {
-            self.div_begin_id(
+            self.div_begin_reveal(
                 &format!("dropdown:{}", popup.id),
                 DivOptions {
                     width: Some(popup.bounds.width),
                     height: Some(popup.bounds.height),
                     scrollable: true,
                 },
+                popup.presence,
             )?;
 
             if popup.reveal {
@@ -2005,6 +2429,8 @@ impl Framework {
         self.layouts.pop();
         self.overlay = false;
         self.events = events;
+        self.render_scrollbars()?;
+        self.ui_renderer.fade_since(mark, popup.presence);
         result
     }
 
@@ -2023,7 +2449,9 @@ impl Framework {
         height: f32,
     ) -> anyhow::Result<()> {
         let b = self.place(width, height);
-        self.ui_renderer.image(b.x, b.y, b.width, b.height, image)
+        let rect = super::animation::image_bounds([b.x, b.y, b.width, b.height], image.size);
+        self.ui_renderer
+            .image(rect[0], rect[1], rect[2], rect[3], image)
     }
 
     pub fn action_row<G: GraphicsDevice>(
@@ -2032,7 +2460,7 @@ impl Framework {
         id: &str,
         row: ActionRow<'_>,
     ) -> anyhow::Result<button::Response> {
-        let bounds = self.place(self.div_width(), 56.0);
+        let bounds = self.place_named(self.div_width(), 56.0, Some(id));
         let hit = self.hit_bounds(bounds);
         let key = (id.to_owned(), 0);
         self.button_occurrences.insert(id.to_owned(), 1);
@@ -2051,8 +2479,11 @@ impl Framework {
                 self.theme.text
             },
             radius: self.corner_radii().row,
+            selected: row.selected,
+            selection_group: Some("action-rows"),
             ..self.base_style()
         };
+        let style = self.selection_style(bounds, style)?;
         self.paint_style(bounds, style)?;
         let icons = self.font_at(Font::Icons, 20)?;
         let title = self.font_at(Font::Regular, 14)?;
@@ -2153,7 +2584,7 @@ impl Framework {
             10.0
         };
 
-        let b = self.place(
+        let b = self.place_named(
             im.width
                 + gap
                 + lm.width
@@ -2165,6 +2596,7 @@ impl Framework {
                     0.0
                 },
             im.height.max(lm.height) + s.padding * 2.0,
+            Some(id),
         );
         let occurrence = self.button_occurrences.entry(id.to_owned()).or_default();
         let key = (id.to_owned(), *occurrence);
@@ -2174,6 +2606,7 @@ impl Framework {
             return Ok(response.clicked);
         }
 
+        let s = self.selection_style(b, s)?;
         let s = button::appearance(s, response.hovered, response.pressed);
         let s = self.animate_style(key, s);
         self.paint_style(b, s)?;
@@ -2260,7 +2693,11 @@ impl Framework {
         let font = self.font(Font::Regular)?;
         let s = self.style();
         let m = self.text_renderer.measure(label, font)?;
-        let b = self.place(m.width + 2.0 * s.padding, m.height + 2.0 * s.padding);
+        let b = self.place_named(
+            m.width + 2.0 * s.padding,
+            m.height + 2.0 * s.padding,
+            Some(label),
+        );
         let occurrence = self.button_occurrences.entry(label.into()).or_default();
         let key = (label.to_owned(), *occurrence);
         *occurrence += 1;
@@ -2269,6 +2706,7 @@ impl Framework {
             return Ok(response.clicked);
         }
 
+        let s = self.selection_style(b, s)?;
         let s = button::appearance(s, response.hovered, response.pressed);
         let s = self.animate_style(key, s);
         self.paint_style(b, s)?;
@@ -2319,13 +2757,14 @@ impl Framework {
     ) -> anyhow::Result<String> {
         let font = self.font(Font::Regular)?;
         let s = self.style();
-        let b = self.place(
+        let b = self.place_named(
             if self.divs.last().is_some_and(|div| div.width.is_none()) {
                 240.0
             } else {
                 self.div_width() - 2.0 * s.margin
             },
             s.font_size as f32 * 1.5 + 2.0 * s.padding,
+            Some(id),
         );
         let s = self.animate_style((format!("input:{id}"), 0), s);
         let hit = self.hit_bounds(b);

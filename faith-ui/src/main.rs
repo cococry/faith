@@ -62,6 +62,9 @@ struct Location {
 #[derive(Clone)]
 enum Action {
     None,
+    OpenMenu,
+    OpenQuickshell,
+    Quit,
     Select(usize),
     OpenProfile(Profile),
     OpenConversation {
@@ -93,6 +96,7 @@ enum Action {
     SettingsItem(SettingsItem),
     Rounded(bool),
     Animations(bool),
+    LayoutMorphing(bool),
     AnimationCurve(Curve),
     SmoothScrolling(bool),
     ZoomStep(u32),
@@ -117,6 +121,7 @@ struct App {
     settings_item: SettingsItem,
     rounded: bool,
     animations: bool,
+    layout_morphing: bool,
     animation_curve: Curve,
     smooth_scrolling: bool,
     zoom_step: u32,
@@ -156,6 +161,7 @@ impl App {
             theme: self.theme.clone(),
             rounded_corners: self.rounded,
             animations: self.animations,
+            layout_morphing: self.layout_morphing,
             animation_curve: self.animation_curve,
             smooth_scrolling: self.smooth_scrolling,
             zoom_step: self.zoom_step,
@@ -240,7 +246,9 @@ impl App {
         );
         match action {
             Action::FocusSetting { .. } => unreachable!(),
-            Action::None => return Ok(()),
+            Action::None | Action::OpenMenu | Action::OpenQuickshell | Action::Quit => {
+                return Ok(());
+            }
             Action::Back => {
                 let destination = self.back_history.pop().or_else(|| {
                     (self.page != Page::Accounts).then_some(Location {
@@ -391,6 +399,12 @@ impl App {
                 self.save_settings();
             }
 
+            Action::LayoutMorphing(enabled) => {
+                self.layout_morphing = enabled;
+                ui.set_layout_morphing(enabled);
+                self.save_settings();
+            }
+
             Action::ZoomStep(step) => {
                 self.zoom_step = step.clamp(1, 50);
                 ui.set_zoom_step(self.zoom_step);
@@ -446,6 +460,16 @@ impl App {
 
 // A pane with its own layout and clipping region.
 fn panel(ui: &mut Framework, x: f32, y: f32, w: f32, h: f32, surface: bool) -> anyhow::Result<()> {
+    panel_named(ui, None, [x, y, w, h], surface)
+}
+
+fn panel_named(
+    ui: &mut Framework,
+    id: Option<&str>,
+    bounds: [f32; 4],
+    surface: bool,
+) -> anyhow::Result<()> {
+    let [x, y, w, h] = bounds;
     ui.set_position(x, y);
     ui.push_style(Style {
         background: Some(if surface {
@@ -456,11 +480,17 @@ fn panel(ui: &mut Framework, x: f32, y: f32, w: f32, h: f32, surface: bool) -> a
         ..ui.style()
     });
 
-    ui.div_begin(DivOptions {
+    let options = DivOptions {
         width: Some(w.max(0.0)),
         height: Some(h.max(0.0)),
         ..Default::default()
-    })?;
+    };
+
+    if let Some(id) = id {
+        ui.div_begin_id(id, options)?;
+    } else {
+        ui.div_begin(options)?;
+    }
 
     Ok(())
 }
@@ -517,6 +547,7 @@ fn icon(
 ) -> anyhow::Result<bool> {
     ui.push_style(Style {
         selected,
+        selection_group: id.starts_with("nav-").then_some("navigation"),
         font_size: 20,
         padding: 4.0,
         radius: ui.corner_radii().icon,
@@ -558,6 +589,7 @@ fn row_button(
 
     ui.push_style(Style {
         selected,
+        selection_group: (!primary).then_some("list-selection"),
         font_size: 16,
         icon_font_size: (glyph == ACCOUNTS || glyph == ACCOUNTS_SELECTED).then_some(28),
         padding: 14.0,
@@ -715,7 +747,9 @@ fn list_header(
     label(ui, gpu, title, 20, true, false, false)?;
     ui.pop_sizing();
     ui.set_position(width - 52.0, 16.0);
-    let _ = icon(ui, gpu, "list-more", MORE, false)?;
+    if icon(ui, gpu, "list-more", MORE, false)? {
+        action = Action::OpenMenu;
+    }
     ui.div_end();
     ui.space(38.0);
     Ok((action, ui.position().1))
@@ -1369,17 +1403,42 @@ fn misc_settings_page(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyh
         app.rounded,
     )?;
     ui.space(8.0);
+    ui.push_sizing(Some(ui.div_width().min(340.0)), None);
     label(
         ui,
         gpu,
-        "Adds rounded corners to elements in the interface.",
+        "Adds rounded corners to elements in the interface. When enabled, you can also enable layout morphing.",
         13,
         false,
         true,
         false,
     )?;
+    ui.pop_sizing();
     ui.space(24.0);
     let animations = ui.checkbox(gpu, "settings-animations", "UI animations", app.animations)?;
+    let layout_morphing = if app.animations {
+        ui.space(8.0);
+        let y = ui.position().1;
+        ui.set_position(20.0, y);
+        ui.div_begin_id(
+            "animation-details",
+            DivOptions {
+                width: Some((ui.div_width() - 20.0).max(1.0)),
+                ..Default::default()
+            },
+        )?;
+        let change = ui.checkbox(
+            gpu,
+            "settings-layout-morphing",
+            "Layout morphing animations",
+            app.layout_morphing,
+        )?;
+        ui.div_end();
+        change
+    } else {
+        None
+    };
+
     ui.space(16.0);
     label(ui, gpu, "Animation interpolation", 13, true, true, false)?;
     ui.space(10.0);
@@ -1476,6 +1535,8 @@ fn misc_settings_page(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyh
         Action::Rounded(enabled)
     } else if let Some(enabled) = animations {
         Action::Animations(enabled)
+    } else if let Some(enabled) = layout_morphing {
+        Action::LayoutMorphing(enabled)
     } else if let Some(enabled) = smooth {
         Action::SmoothScrolling(enabled)
     } else if let Some(step) = zoom_step {
@@ -1598,14 +1659,20 @@ fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyh
         .map_or_else(client::Snapshot::default, |s| s.snapshot());
     let mut action = Action::None;
 
-    // Draw the rail only while it is expanded.
-    if !app.collapsed {
-        panel(ui, 0.0, 0.0, rail, height, true)?;
+    /* we keep the rail's identity while its width shrinks to zero */
+    panel_named(ui, Some("navigation-rail"), [0.0, 0.0, rail, height], true)?;
+
+    if ui.div_width() > 0.5 {
+        ui.push_style(Style {
+            enabled: !app.collapsed,
+            ..ui.style()
+        });
         action = navigation(ui, gpu, app, height)?;
-        end_panel(ui);
+        ui.pop_style();
     }
 
-    panel(ui, rail, 0.0, list, height, true)?;
+    end_panel(ui);
+    panel_named(ui, Some("item-list"), [rail, 0.0, list, height], true)?;
 
     // Settings has its own list beside profiles and conversations.
     let list_action = if app.page == Page::Settings {
@@ -1619,7 +1686,12 @@ fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyh
     }
 
     end_panel(ui);
-    panel(ui, rail + list, 0.0, 1.0, height, true)?;
+    panel_named(
+        ui,
+        Some("pane-separator"),
+        [rail + list, 0.0, 1.0, height],
+        true,
+    )?;
     ui.push_style(Style {
         background: Some(ui.theme().separator),
         ..ui.style()
@@ -1634,7 +1706,12 @@ fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyh
     ui.div_end();
     ui.pop_style();
     end_panel(ui);
-    panel(ui, rail + list + 1.0, 0.0, content - 1.0, height, false)?;
+    panel_named(
+        ui,
+        Some("content-pane"),
+        [rail + list + 1.0, 0.0, content - 1.0, height],
+        false,
+    )?;
 
     let history_action = history_controls(ui, gpu, app)?;
     let pane_width = ui.div_width();
@@ -1801,6 +1878,7 @@ fn main() -> anyhow::Result<()> {
     ui.set_theme(colors);
     ui.set_rounded_corners(preferences.rounded_corners);
     ui.set_animations(preferences.animations, preferences.animation_curve);
+    ui.set_layout_morphing(preferences.layout_morphing);
     ui.set_smooth_scrolling(preferences.smooth_scrolling);
     ui.set_zoom_step(preferences.zoom_step);
     ui.set_startup_zoom(preferences.default_zoom);
@@ -1824,6 +1902,7 @@ fn main() -> anyhow::Result<()> {
         settings_item: SettingsItem::Theme,
         rounded: preferences.rounded_corners,
         animations: preferences.animations,
+        layout_morphing: preferences.layout_morphing,
         animation_curve: preferences.animation_curve,
         smooth_scrolling: preferences.smooth_scrolling,
         zoom_step: preferences.zoom_step,
@@ -1856,6 +1935,7 @@ fn main() -> anyhow::Result<()> {
     platform.request_redraw()?;
     let mut logo = None;
     let mut quickshell = quickshell::Shell::default();
+    let mut popup = ui::widgets::popup::State::default();
 
     // Wait for input or a client notification before drawing again.
     loop {
@@ -1866,6 +1946,7 @@ fn main() -> anyhow::Result<()> {
                     && !ui.space_reserved()
                     && matches!(event, WindowEvent::TextInput(text) if text == " "));
             if requested && !quickshell.is_open() {
+                popup.close();
                 quickshell.open(&app, ui.zoom_percent(), &mut ui);
             }
 
@@ -1873,7 +1954,8 @@ fn main() -> anyhow::Result<()> {
         });
 
         let modal_frame = quickshell.is_open();
-        ui.set_modal_input(modal_frame);
+        let popup_frame = popup.is_open();
+        ui.set_modal_input(modal_frame || popup.is_open());
         if modal_frame && events.is_empty() {
             events.push(WindowEvent::RedrawRequested);
         }
@@ -1928,10 +2010,36 @@ fn main() -> anyhow::Result<()> {
 
         // Draw the shell, then apply any action returned by the widgets.
         let mut action = shell(&mut ui, &mut renderer, &app, logo)?;
-        if modal_frame {
-            action = quickshell
-                .render(&mut ui, &mut renderer)?
-                .unwrap_or(Action::None);
+        if quickshell.is_visible() {
+            let shell_action = quickshell.render(&mut ui, &mut renderer)?;
+
+            if modal_frame {
+                action = shell_action.unwrap_or(Action::None);
+            }
+        }
+        if popup.is_visible() {
+            use ui::widgets::popup::Item;
+            if let Some(index) = ui.popup(
+                &mut renderer,
+                "header-menu",
+                &mut popup,
+                &[
+                    Item {
+                        icon: "",
+                        label: "Open Quickshell",
+                    },
+                    Item {
+                        icon: "\u{ea76}",
+                        label: "Quit faith",
+                    },
+                ],
+            )? {
+                action = if index == 0 {
+                    Action::OpenQuickshell
+                } else {
+                    Action::Quit
+                };
+            }
         }
 
         ui.end(&mut renderer)?;
@@ -1944,8 +2052,30 @@ fn main() -> anyhow::Result<()> {
             tracing::info!("First UI frame rendered");
         }
 
-        if modal_frame && !quickshell.is_open() {
+        if !quickshell.is_open() && !popup.is_open() {
             ui.set_modal_input(false);
+        }
+
+        match action {
+            Action::OpenMenu => {
+                ui.set_modal_input(false);
+                popup.open(
+                    ui.pointer_position()
+                        .unwrap_or(platform::mouse::CursorPosition { x: 24.0, y: 56.0 }),
+                );
+                platform.request_redraw()?;
+                continue;
+            }
+            Action::OpenQuickshell => {
+                ui.set_modal_input(false);
+                quickshell.open(&app, ui.zoom_percent(), &mut ui);
+                platform.request_redraw()?;
+                continue;
+            }
+            Action::Quit => return Ok(()),
+            _ => {}
+        }
+        if (modal_frame && !quickshell.is_open()) || (popup_frame && !popup.is_open()) {
             platform.request_redraw()?;
         }
 

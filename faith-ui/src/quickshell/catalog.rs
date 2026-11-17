@@ -48,6 +48,7 @@ impl Entry {
         let setting = match &command {
             Action::Rounded(_) => Some((SettingsItem::Misc, "settings-rounded-corners")),
             Action::Animations(_) => Some((SettingsItem::Misc, "settings-animations")),
+            Action::LayoutMorphing(_) => Some((SettingsItem::Misc, "settings-layout-morphing")),
             Action::SmoothScrolling(_) => Some((SettingsItem::Misc, "settings-smooth-scrolling")),
             Action::ZoomStep(_) => Some((SettingsItem::Misc, "settings-zoom-step")),
             Action::DefaultZoom(_) => Some((SettingsItem::Misc, "settings-default-zoom")),
@@ -163,6 +164,25 @@ impl Entry {
 
 pub fn build(app: &App, zoom: u32) -> Vec<Entry> {
     let mut entries = vec![
+        Entry::new(
+            "open-menu",
+            "Open application menu",
+            Kind::Navigation,
+            Action::OpenMenu,
+        )
+        .search("application menu", &["ellipsis more popup commands"])
+        .detail("Application"),
+        Entry::new(
+            "open-quickshell",
+            "Open Quickshell",
+            Kind::Navigation,
+            Action::OpenQuickshell,
+        )
+        .search("quickshell", &["finder commands search space"])
+        .detail("Application"),
+        Entry::new("quit-faith", "Quit faith", Kind::Navigation, Action::Quit)
+            .search("quit faith", &["exit close application"])
+            .detail("Application"),
         Entry::new(
             "profiles",
             "Go to profiles",
@@ -320,6 +340,11 @@ pub fn build(app: &App, zoom: u32) -> Vec<Entry> {
                 ),
                 &[
                     "toggle interface settings",
+                    if id == "animations" {
+                        "layout motion morph warp transitions fade quickshell selection interpolation"
+                    } else {
+                        ""
+                    },
                     if current {
                         "turn off"
                     } else {
@@ -328,6 +353,26 @@ pub fn build(app: &App, zoom: u32) -> Vec<Entry> {
                 ],
             )
             .detail("Settings · Misc"),
+        );
+    }
+
+    if app.animations {
+        entries.push(
+            Entry::new(
+                "layout-morphing",
+                if app.layout_morphing {
+                    "Disable layout morphing animations"
+                } else {
+                    "Enable layout morphing animations"
+                },
+                Kind::Settings,
+                Action::LayoutMorphing(!app.layout_morphing),
+            )
+            .search(
+                "layout morphing animations",
+                &["warp geometry movement resize position animation interpolation toggle"],
+            )
+            .detail("Settings · Misc · UI animations"),
         );
     }
 

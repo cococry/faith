@@ -26,6 +26,7 @@ pub struct Settings {
     pub rounded_corners: bool,
     #[serde(default = "animations_default")]
     pub animations: bool,
+    pub layout_morphing: bool,
     pub animation_curve: Curve,
     pub smooth_scrolling: bool,
     pub zoom_step: u32,
@@ -185,6 +186,7 @@ impl Default for Settings {
             theme: DEFAULT_ID.to_owned(),
             rounded_corners: true,
             animations: true,
+            layout_morphing: false,
             animation_curve: Curve::default(),
             smooth_scrolling: false,
             zoom_step: 10,
@@ -202,5 +204,22 @@ pub fn confirmation_deadline(saved: Instant, now: Instant, enabled: bool) -> Opt
         Some(end)
     } else {
         Some((saved + VISIBLE - FADE).max(now))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layout_morphing_is_opt_in_and_persists_independently() {
+        let mut settings: Settings = serde_json::from_str("{}").unwrap();
+        assert!(!settings.layout_morphing);
+        settings.animations = false;
+        settings.layout_morphing = true;
+        let saved = serde_json::to_string(&settings).unwrap();
+        let restored: Settings = serde_json::from_str(&saved).unwrap();
+        assert!(!restored.animations);
+        assert!(restored.layout_morphing);
     }
 }

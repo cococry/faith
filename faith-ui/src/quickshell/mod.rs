@@ -116,6 +116,7 @@ struct Level {
 #[derive(Default)]
 pub struct Shell {
     open: bool,
+    presence: crate::ui::animation::Presence,
     entries: Vec<Entry>,
     context: Option<Context>,
     query: String,
@@ -131,6 +132,10 @@ pub struct Shell {
 impl Shell {
     pub fn is_open(&self) -> bool {
         self.open
+    }
+
+    pub fn is_visible(&self) -> bool {
+        self.open || self.presence.visible()
     }
 
     pub fn open(&mut self, app: &App, zoom: u32, ui: &mut Framework) {
@@ -302,7 +307,14 @@ impl Shell {
         ui: &mut Framework,
         gpu: &mut Renderer,
     ) -> anyhow::Result<Option<Action>> {
-        ui.begin_overlay()?;
+        if self.open {
+            ui.begin_overlay()?;
+        } else {
+            ui.begin_passive_overlay()?;
+        }
+
+        let mut presence = ui.presence(&mut self.presence, self.open);
+        ui.overlay_opacity(presence);
         if !self.levels.is_empty()
             && ui.events().iter().any(|event| {
                 matches!(
@@ -315,11 +327,10 @@ impl Shell {
             })
         {
             self.back(ui);
-            ui.end_overlay();
+            ui.end_overlay()?;
             return Ok(None);
         }
         let width = (ui.div_width() - 32.0).clamp(1.0, 640.0);
-        let top = 0.0;
         let count = self.results.len().max(1);
         let rows = (((ui.div_height() - 72.0) / ROW).floor().max(1.0) as usize)
             .min(8)
@@ -349,6 +360,7 @@ impl Shell {
         } + list_height
             + bottom_inset;
         let x = ((ui.div_width() - width) * 0.5).max(0.0);
+        let top = ((ui.div_height() - height) * 0.5).max(0.0);
         let pointer = ui.pointer_position();
         let outside = pointer.is_some_and(|p| {
             p.x < x as f64
@@ -382,9 +394,10 @@ impl Shell {
             });
             if !escape || !self.back(ui) {
                 self.open = false;
+                ui.ignore_overlay_input();
+                presence = ui.presence(&mut self.presence, false);
+                ui.overlay_opacity(presence);
             }
-            ui.end_overlay();
-            return Ok(None);
         }
 
         ui.set_position(x, top);
@@ -393,14 +406,18 @@ impl Shell {
             background: Some(ui.theme().surface),
             border_color: Some(ui.theme().border),
             radius: ui.corner_radii().popup,
-            rounded_corners: [false, false, true, true],
+            rounded_corners: [true; 4],
             ..ui.style()
         });
-        ui.div_begin(DivOptions {
-            width: Some(width),
-            height: Some(height),
-            ..Default::default()
-        })?;
+        ui.div_begin_reveal(
+            "quickshell",
+            DivOptions {
+                width: Some(width),
+                height: Some(height),
+                ..Default::default()
+            },
+            presence,
+        )?;
         ui.push_style(Style {
             padding: 0.0,
             background: None,
@@ -415,7 +432,8 @@ impl Shell {
             color: ui.theme().text,
             background: Some(ui.theme().input),
             border_color: Some(ui.theme().border),
-            radius: 0.0,
+            radius: ui.corner_radii().popup,
+            rounded_corners: [self.levels.is_empty(), true, false, false],
             ..ui.style()
         });
         let nested = !self.levels.is_empty();
@@ -434,6 +452,7 @@ impl Shell {
                 click_color: Some(ui.theme().primary),
                 click_text_color: Some(ui.theme().primary_text),
                 border_color: None,
+                rounded_corners: [true, false, false, false],
                 ..ui.style()
             });
             ui.push_sizing(Some(42.0), Some(46.0));
@@ -443,7 +462,9 @@ impl Shell {
             ui.set_position(44.0, 0.0);
             ui.push_sizing(Some((width - 44.0).max(1.0)), None);
         }
-        ui.focus_control(QUERY, false);
+        if self.open {
+            ui.focus_control(QUERY, false);
+        }
         let input_origin = ui.position();
         let query = ui.input_with_options(
             gpu,
@@ -470,7 +491,7 @@ impl Shell {
             ui.set_position(after_input.0, after_input.1);
         }
 
-        if query != self.query {
+        if self.open && query != self.query {
             self.search(&query);
             ui.animate_until(std::time::Instant::now());
         }
@@ -591,7 +612,7 @@ impl Shell {
         ui.pop_style();
         ui.div_end();
         ui.pop_style();
-        ui.end_overlay();
+        ui.end_overlay()?;
         Ok(if go_back {
             self.back(ui);
             None

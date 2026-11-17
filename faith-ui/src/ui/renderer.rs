@@ -209,6 +209,34 @@ const MAX_INSTANCES: usize = 65_536;
 const MAX_INSTANCES_PER_FRAME: usize = MAX_INSTANCES;
 
 impl UIRenderer {
+    pub(crate) fn mark(&self) -> (usize, usize) {
+        (self.atlas_instances.len(), self.dedicated_instances.len())
+    }
+
+    /* deferred boxes need the same fade as the text and images around them */
+    pub(crate) fn fade_since(&mut self, mark: (usize, usize), opacity: f32) {
+        if opacity >= 1.0 {
+            return;
+        }
+
+        for instance in self.atlas_instances[mark.0..]
+            .iter_mut()
+            .chain(self.dedicated_instances[mark.1..].iter_mut())
+        {
+            instance.color[3] *= opacity;
+        }
+
+        for (decoration, _) in &mut self.resolved_boxes {
+            if decoration.start >= mark.0 {
+                decoration.color.a *= opacity;
+
+                if let Some(border) = &mut decoration.border {
+                    border.a *= opacity;
+                }
+            }
+        }
+    }
+
     /// Reserve a solid decoration before its contents; resolve its bounds once
     /// immediate container layout is complete. Keeps painter submission order.
     pub(crate) fn reserve_box(
