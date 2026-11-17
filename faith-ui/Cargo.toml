@@ -24,7 +24,7 @@ glow = "0.17.0"
 khronos-egl = { version = "6.0.0", features = ["static"] }
 wayland-client = "0.31.14"
 wayland-egl = "0.32.11"
-wayland-protocols = { version = "0.32.12", features = ["client"] }
+wayland-protocols = { version = "0.32.12", features = ["client", "staging", "unstable"] }
 x11 = { version = "2.21", features = ["xlib", "xlib_xcb"] }
 x11rb = { version = "0.13", features = ["allow-unsafe-code", "xkb", "randr"] }
 clap = { version = "4", features = ["derive"] }

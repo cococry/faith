@@ -50,6 +50,8 @@ pub struct X11Platform {
 
     xcb_conn: XCBConnection,
     window: u32,
+    text_cursor: u64,
+    cursor: super::window::CursorIcon,
     wm_delete_window: u32,
     pub(crate) mouse: Mouse,
     keyboard: Keyboard,
@@ -279,6 +281,8 @@ impl X11Platform {
             xdisplay,
             xcb_conn: conn,
             window: win_id,
+            text_cursor: unsafe { x11::xlib::XCreateFontCursor(xdisplay.as_ptr(), 152) }, // XC_xterm
+            cursor: super::window::CursorIcon::Default,
             wm_delete_window,
             mouse: Mouse::default(),
             keyboard,
@@ -289,6 +293,28 @@ impl X11Platform {
         };
         let _ = platform.update_frame_timing();
         Ok(platform)
+    }
+
+    pub fn set_cursor(&mut self, cursor: super::window::CursorIcon) -> anyhow::Result<()> {
+        if self.cursor != cursor {
+            unsafe {
+                match cursor {
+                    super::window::CursorIcon::Text => {
+                        x11::xlib::XDefineCursor(
+                            self.xdisplay.as_ptr(),
+                            self.window as _,
+                            self.text_cursor,
+                        );
+                    }
+                    super::window::CursorIcon::Default => {
+                        x11::xlib::XUndefineCursor(self.xdisplay.as_ptr(), self.window as _);
+                    }
+                }
+                x11::xlib::XFlush(self.xdisplay.as_ptr());
+            }
+            self.cursor = cursor;
+        }
+        Ok(())
     }
 
     pub fn scale_factor(&self) -> f32 {
@@ -706,6 +732,7 @@ impl Drop for X11Platform {
         let _ = self.xcb_conn.flush();
         // XCBConnection borrows this connection (should_drop=false).
         unsafe {
+            x11::xlib::XFreeCursor(self.xdisplay.as_ptr(), self.text_cursor);
             x11::xlib::XCloseDisplay(self.xdisplay.as_ptr());
         }
     }

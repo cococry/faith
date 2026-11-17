@@ -252,6 +252,7 @@ pub struct Framework {
     events: Vec<WindowEvent>,
     pointer: Option<CursorPosition>,
     batch_pointer: Option<CursorPosition>,
+    text_cursor: bool,
     buttons: HashMap<(String, usize), button::State>,
     button_occurrences: HashMap<String, usize>,
 }
@@ -326,6 +327,7 @@ impl Framework {
             events: vec![],
             pointer: None,
             batch_pointer: None,
+            text_cursor: false,
             buttons: HashMap::new(),
             button_occurrences: HashMap::new(),
         };
@@ -471,6 +473,14 @@ impl Framework {
         &self.events
     }
 
+    pub fn cursor_icon(&self) -> crate::platform::window::CursorIcon {
+        if self.text_cursor && self.active_dropdown.is_none() {
+            crate::platform::window::CursorIcon::Text
+        } else {
+            crate::platform::window::CursorIcon::Default
+        }
+    }
+
     pub fn pointer_position(&self) -> Option<CursorPosition> {
         self.pointer
     }
@@ -487,6 +497,7 @@ impl Framework {
         self.styles.push(self.base_style());
         self.sizing.push((None, None));
         self.overlay = true;
+        self.text_cursor = false;
         self.overlay_mark = self.ui_renderer.mark();
         self.overlay_opacity = 1.0;
         Ok(())
@@ -920,6 +931,7 @@ impl Framework {
     }
 
     pub fn begin(&mut self, platform: &Platform, events: &[WindowEvent]) {
+        self.text_cursor = false;
         self.frame_time = Instant::now();
         self.layout_resized = events
             .iter()
@@ -2769,6 +2781,14 @@ impl Framework {
         let s = self.animate_style((format!("input:{id}"), 0), s);
         let hit = self.hit_bounds(b);
         let visible = self.visible(b);
+        if visible
+            && (!self.modal_input || self.overlay)
+            && self
+                .pointer
+                .is_some_and(|p| contains(scroll::intersect(b, self.clip_bounds()), p))
+        {
+            self.text_cursor = true;
+        }
         if visible {
             self.register_control(id, b, FocusKind::Input, false);
         }
