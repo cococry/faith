@@ -11,6 +11,9 @@ typedef struct {
   bool               uncertain;
   uint64_t           client_id;
   faith_command_id_t command_id;
+  faith_auth_id_t    owner;
+  uint8_t            conversation_id[FAITH_CONVERSATION_ID_SIZE];
+  faith_group_kind_t kind;
   faith_auth_id_t    targets[FAITH_GROUP_MAX_TARGETS];
   uint16_t           n_targets;
   uint8_t           *payload;
@@ -19,6 +22,8 @@ typedef struct {
 } conversation_job_t;
 
 static bool                _command(faith_db_t *db, const char *sql);
+static faith_status_code_t _check_approvals(faith_db_t *db,
+                                            const conversation_job_t *job);
 static faith_status_code_t _create(faith_db_t *db, void *data);
 static void _complete(void *owner, void *data, faith_status_code_t status);
 static void _destroy(void *data);
@@ -31,13 +36,45 @@ static bool _command(faith_db_t *db, const char *sql) {
   return ok;
 }
 
+static faith_status_code_t _check_approvals(faith_db_t *db,
+                                            const conversation_job_t *job) {
+  if (job->kind == FAITH_GROUP_CREATE)
+    _FH_CHECK_RETURN(conv_claim(db, job->conversation_id, &job->owner));
+
+  const char *values[] = {(const char *)job->conversation_id,
+                          (const char *)job->owner.bytes,
+                          (const char *)job->targets};
+  const int lengths[] = {FAITH_CONVERSATION_ID_SIZE, FAITH_AUTH_ID_SIZE,
+                         job->n_targets * FAITH_AUTH_ID_SIZE};
+  const int formats[] = {1, 1, 1};
+  PGresult *res = PQexecParams(
+      db->conn,
+      "SELECT 1 FROM conversations c WHERE c.conversation_id = $1 "
+      "AND c.owner_id = $2 AND NOT EXISTS ("
+      "SELECT 1 FROM generate_series(1, octet_length($3::bytea), 16) AS t(pos) "
+      "WHERE substring($3::bytea FROM t.pos FOR 16) <> c.owner_id "
+      "AND NOT EXISTS (SELECT 1 FROM conversation_requests r "
+      "WHERE r.conversation_id = c.conversation_id "
+      "AND r.recipient_id = substring($3::bytea FROM t.pos FOR 16) "
+      "AND r.accepted IS TRUE))",
+      3, NULL, values, lengths, formats, 0);
+  faith_status_code_t rc = FAITH_ERR_IO;
+
+  if (res && PQresultStatus(res) == PGRES_TUPLES_OK)
+    rc = PQntuples(res) == 1 ? FAITH_OK : FAITH_ERR_UNAUTHORIZED;
+
+  PQclear(res);
+
+  return rc;
+}
+
 static faith_status_code_t _create(faith_db_t *db, void *data) {
   conversation_job_t *job = data;
 
   if (!_command(db, "BEGIN"))
     return FAITH_ERR_IO;
 
-  faith_status_code_t rc = FAITH_OK;
+  faith_status_code_t rc = _check_approvals(db, job);
 
   for (size_t target = 0; target < job->n_targets && rc == FAITH_OK; target++) {
     db_user_device_list_t devices = {0};
@@ -102,6 +139,8 @@ static void _complete(void *owner, void *data, faith_status_code_t status) {
                        status == FAITH_OK ? FAITH_COMMAND_ERR_NONE
                        : status == FAITH_ERR_NOT_FOUND
                            ? FAITH_COMMAND_ERR_USER_NOT_FOUND
+                       : status == FAITH_ERR_UNAUTHORIZED
+                           ? FAITH_COMMAND_ERR_UNAUTHORIZED
                            : FAITH_COMMAND_ERR_INTERNAL_ERROR,
                        status == FAITH_OK ? FAITH_COMMAND_RESULT_ACCEPTED
                                           : FAITH_COMMAND_RESULT_REJECTED);
@@ -151,6 +190,10 @@ conv_handle_group_delivery(server_state_t *s, client_conn_t *cl,
   if (!job)
     return FAITH_ERR_NOMEM;
 
+  job->owner = packet.members[0];
+  job->kind = packet.kind;
+  memcpy(job->conversation_id, packet.conversation_id,
+         sizeof(job->conversation_id));
   job->n_targets = count;
   /* the outer payload holds the group targets, after the uint16_t count */
   memcpy(job->targets, cmd->payload + 2, 16u * count);

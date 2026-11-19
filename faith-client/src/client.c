@@ -144,7 +144,7 @@ struct faith_client {
 static faith_status_code_t
             send_command_result_event(faith_client_t                        *client,
                                       const faith_envl_stc_command_result_t *res);
-static void _group_result(faith_client_t                        *client,
+static void _notify_command_result(faith_client_t                        *client,
                           const faith_envl_stc_command_result_t *res) {
   send_command_result_event(client, res);
 }
@@ -1102,6 +1102,31 @@ client_dispatch_event(faith_client_t               *client,
 
     if (rc != FAITH_OK)
       return rc;
+    break;
+  }
+
+  case FAITH_EVENT_CONVERSATION_REQUEST:
+  case FAITH_EVENT_CONVERSATION_RESPONSE: {
+    bool request = event->type == FAITH_EVENT_CONVERSATION_REQUEST;
+    size_t size = request ? FAITH_CONVERSATION_REQUEST_SIZE
+                          : FAITH_CONVERSATION_RESPONSE_SIZE;
+
+    if (event->data_size != size ||
+        (!request && event->data[FAITH_CONVERSATION_REQUEST_SIZE] > 1))
+      return FAITH_ERR_BAD_ENVELOPE;
+
+    if (client->store_event) {
+      _FH_CHECK_RETURN(client->store_event(
+          client->store_event_context, &client->ident.auth_id,
+          &client->ident.device_id, event->seq_num, event->type, event->data,
+          event->data_size));
+    }
+
+    _FH_CHECK_RETURN(client_push_event_ex(
+        client, request ? FAITH_EVENT_CONVERSATION_REQUEST_RECEIVED
+                        : FAITH_EVENT_CONVERSATION_RESPONSE_RECEIVED,
+        event->seq_num, request ? 0 : event->data[FAITH_CONVERSATION_REQUEST_SIZE],
+        event->data, event->data + FAITH_CONVERSATION_ID_SIZE, NULL, NULL, 0));
     break;
   }
 
@@ -2790,6 +2815,51 @@ faith_status_code_t faith_client_identity(faith_client_t    *client,
   return FAITH_OK;
 }
 
+faith_status_code_t faith_client_request_conversation(
+    faith_client_t *client, const faith_conversation_id_t *conversation,
+    const faith_auth_id_t *recipient) {
+  if (!client || !conversation || !recipient ||
+      faith_client_id_equal(*recipient, client->ident.auth_id))
+    return FAITH_ERR_INVALID;
+
+  uint8_t payload[FAITH_CONVERSATION_REQUEST_SIZE];
+  memcpy(payload, conversation->bytes, FAITH_CONVERSATION_ID_SIZE);
+  memcpy(payload + FAITH_CONVERSATION_ID_SIZE, recipient->bytes,
+         FAITH_AUTH_ID_SIZE);
+
+  return client_send_command(client, payload, sizeof(payload),
+                             FAITH_COMMAND_CONVERSATION_REQUEST,
+                             _notify_command_result);
+}
+
+faith_status_code_t faith_client_respond_conversation(
+    faith_client_t *client, const faith_conversation_id_t *conversation,
+    const faith_auth_id_t *requester, bool accepted) {
+  if (!client || !conversation || !requester ||
+      faith_client_id_equal(*requester, client->ident.auth_id))
+    return FAITH_ERR_INVALID;
+
+  uint8_t payload[FAITH_CONVERSATION_SIGNED_RESPONSE_SIZE];
+  memcpy(payload, conversation->bytes, FAITH_CONVERSATION_ID_SIZE);
+  memcpy(payload + FAITH_CONVERSATION_ID_SIZE, requester->bytes,
+         FAITH_AUTH_ID_SIZE);
+  payload[FAITH_CONVERSATION_REQUEST_SIZE] = accepted;
+
+  uint8_t msg[FAITH_SIGNATURE_CONVERSATION_RESPONSE_SIZE];
+  faith_gen_sign_buf_conversation_response(msg, payload,
+                                          &client->ident.auth_id,
+                                          &client->ident.device_id);
+
+  size_t signature_size = 0;
+  _FH_CHECK_RETURN(faith_gen_signature(
+      client->ident.keypair, payload + FAITH_CONVERSATION_RESPONSE_SIZE,
+      &signature_size, msg, sizeof(msg)));
+
+  return client_send_command(client, payload, sizeof(payload),
+                             FAITH_COMMAND_CONVERSATION_RESPONSE,
+                             _notify_command_result);
+}
+
 faith_status_code_t
 faith_client_deliver_group(faith_client_t             *client,
                            const faith_group_packet_t *packet,
@@ -2806,7 +2876,7 @@ faith_client_deliver_group(faith_client_t             *client,
                                       sizeof(payload) - offset, &size, packet));
 
   return client_send_command(client, payload, offset + size,
-                             FAITH_COMMAND_GROUP_DELIVER, _group_result);
+                             FAITH_COMMAND_GROUP_DELIVER, _notify_command_result);
 }
 
 faith_status_code_t faith_client_create_group(faith_client_t        *client,
@@ -2825,6 +2895,20 @@ faith_status_code_t faith_client_create_group(faith_client_t        *client,
     memcpy(packet.members + 1, peers, count * sizeof(*peers));
   _FH_CHECK_RETURN(faith_random_bytes(packet.conversation_id, 16));
   _FH_CHECK_RETURN(faith_random_bytes(packet.message_id, 16));
+  if (count) {
+    if (!conversation_id)
+      return FAITH_ERR_INVALID;
+
+    faith_conversation_id_t id;
+    memcpy(id.bytes, packet.conversation_id, sizeof(id.bytes));
+    memcpy(conversation_id, id.bytes, sizeof(id.bytes));
+
+    for (size_t i = 0; i < count; i++)
+      _FH_CHECK_RETURN(faith_client_request_conversation(client, &id, &peers[i]));
+
+    return FAITH_OK;
+  }
+
   _FH_CHECK_RETURN(faith_client_deliver_group(client, &packet, packet.members,
                                               packet.n_members));
 

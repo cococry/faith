@@ -65,3 +65,16 @@ faith_status_code_t faith_gen_sign_buf_device_link_response(
              ? FAITH_OK
              : FAITH_ERR_INVALID;
 }
+
+void faith_gen_sign_buf_conversation_response(
+    uint8_t out[FAITH_SIGNATURE_CONVERSATION_RESPONSE_SIZE],
+    const uint8_t response[FAITH_CONVERSATION_RESPONSE_SIZE],
+    const faith_auth_id_t *recipient, const faith_device_id_t *device) {
+  const size_t domain_size = sizeof(FAITH_CONVERSATION_RESPONSE_DOMAIN) - 1;
+  memcpy(out, FAITH_CONVERSATION_RESPONSE_DOMAIN, domain_size);
+  memcpy(out + domain_size, response, FAITH_CONVERSATION_RESPONSE_SIZE);
+  memcpy(out + domain_size + FAITH_CONVERSATION_RESPONSE_SIZE,
+         recipient->bytes, FAITH_AUTH_ID_SIZE);
+  memcpy(out + domain_size + FAITH_CONVERSATION_RESPONSE_SIZE + FAITH_AUTH_ID_SIZE,
+         device->bytes, FAITH_DEVICE_ID_SIZE);
+}

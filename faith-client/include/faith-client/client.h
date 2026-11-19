@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 
+#include <faith-proto/codec/application.h>
 #include <faith-proto/codec/auth.h>
 #include <faith-proto/codec/group.h>
 #include <faith-proto/core/core.h>
@@ -26,7 +27,9 @@
   X(FAITH_EVENT_COMMAND_RESULT, 14)                                            \
   X(FAITH_EVENT_COMMAND_FAILED, 15)                                            \
   X(FAITH_EVENT_CONVERSATION_READY, 16)                                        \
-  X(FAITH_EVENT_GROUP_RECEIVED, 17)
+  X(FAITH_EVENT_GROUP_RECEIVED, 17) \
+  X(FAITH_EVENT_CONVERSATION_REQUEST_RECEIVED, 18) \
+  X(FAITH_EVENT_CONVERSATION_RESPONSE_RECEIVED, 19)
 
 typedef enum {
 #define X(name, value) name = value,
@@ -117,7 +120,20 @@ faith_status_code_t faith_client_identity(faith_client_t    *client,
                                           faith_auth_id_t   *auth,
                                           faith_device_id_t *device);
 
-/* deliver a group package */
+/* Request each peer's approval before delivering packets for this conversation.
+ * Request and response events carry the sequence in value0, conversation ID
+ * in value0_128, and peer auth ID in value1_128. For responses, value1 is 1
+ * on acceptance and 0 on denial. The store callback receives these events
+ * before acknowledgment, using the payload format in codec/commands.h. */
+faith_status_code_t faith_client_request_conversation(
+    faith_client_t *client, const faith_conversation_id_t *conversation,
+    const faith_auth_id_t *recipient);
+
+faith_status_code_t faith_client_respond_conversation(
+    faith_client_t *client, const faith_conversation_id_t *conversation,
+    const faith_auth_id_t *requester, bool accepted);
+
+/* Deliver a group packet after peers accept the conversation request. */
 faith_status_code_t
 faith_client_deliver_group(faith_client_t             *client,
                            const faith_group_packet_t *packet,

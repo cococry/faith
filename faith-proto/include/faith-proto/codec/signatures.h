@@ -2,7 +2,7 @@
 
 #include "../core/crypto.h"
 
-#include "auth.h"
+#include "commands.h"
 
 #define FAITH_SIGNATURE_DEVICE_LINK_RESPONSE_SIZE                              \
   (FAITH_AUTH_ID_SIZE /* auth ID */ +                                          \
@@ -57,3 +57,13 @@ faith_gen_sign_buf_hello_handshake(uint8_t *out_buf, size_t *out_size,
 faith_status_code_t faith_gen_sign_buf_device_link_response(
     uint8_t *out_buf, size_t *out_size, size_t buf_cap_in_bytes,
     const faith_signature_device_link_response_t *in);
+
+#define FAITH_CONVERSATION_RESPONSE_DOMAIN "faith/conversation-response/v1"
+#define FAITH_SIGNATURE_CONVERSATION_RESPONSE_SIZE \
+  (sizeof(FAITH_CONVERSATION_RESPONSE_DOMAIN) - 1 + \
+   FAITH_CONVERSATION_RESPONSE_SIZE + FAITH_AUTH_ID_SIZE + FAITH_DEVICE_ID_SIZE)
+
+void faith_gen_sign_buf_conversation_response(
+    uint8_t out[FAITH_SIGNATURE_CONVERSATION_RESPONSE_SIZE],
+    const uint8_t response[FAITH_CONVERSATION_RESPONSE_SIZE],
+    const faith_auth_id_t *recipient, const faith_device_id_t *device);
