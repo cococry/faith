@@ -4,7 +4,7 @@ mod rank;
 use std::collections::HashMap;
 
 use crate::{
-    Action, App,
+    Action, App, Profile,
     graphics::Renderer,
     platform::{WindowEvent, event::Key, mouse::MouseButton},
     ui::{
@@ -19,6 +19,8 @@ const ROW: f32 = 56.0;
 
 struct SearchResult {
     index: usize,
+    match_score: i32,
+    destination: u8,
     score: i32,
     path: Vec<usize>,
     title: String,
@@ -30,10 +32,20 @@ struct Match<'a> {
     path: Vec<usize>,
 }
 
+fn destination_rank(entry: &Entry, context: &Context) -> u8 {
+    match &entry.command {
+        Action::OpenConversation { .. } => 2 + u8::from(entry.owner == context.profile),
+        Action::OpenProfile(_) => 0,
+        _ if entry.id == "profile-conversations" => 2,
+        _ => 1,
+    }
+}
+
 fn find<'a>(
     entry: &'a Entry,
     tokens: &[Vec<char>],
     inherited: &[Option<i32>],
+    context: &Context,
 ) -> Option<Match<'a>> {
     let own: Vec<_> = tokens
         .iter()
@@ -74,13 +86,18 @@ fn find<'a>(
     };
     if let Some(children) = &entry.children {
         for (index, child) in children.iter().enumerate() {
-            if let Some(mut candidate) = find(child, tokens, &scores) {
+            if let Some(mut candidate) = find(child, tokens, &scores, context) {
                 let better = best.as_ref().is_none_or(|best| {
                     candidate.score > best.score
                         || (candidate.score == best.score
                             && !best.path.is_empty()
-                            && (&candidate.entry.label, &candidate.entry.id)
-                                < (&best.entry.label, &best.entry.id))
+                            && destination_rank(best.entry, context)
+                                .cmp(&destination_rank(candidate.entry, context))
+                                .then_with(|| {
+                                    (&candidate.entry.label, &candidate.entry.id)
+                                        .cmp(&(&best.entry.label, &best.entry.id))
+                                })
+                                .is_lt())
                 });
                 if better {
                     candidate.path.insert(0, index);
@@ -115,6 +132,7 @@ struct Level {
 
 #[derive(Default)]
 pub struct Shell {
+    name_target: Option<(Profile, faith_client::Id)>,
     open: bool,
     presence: crate::ui::animation::Presence,
     entries: Vec<Entry>,
@@ -139,6 +157,7 @@ impl Shell {
     }
 
     pub fn open(&mut self, app: &App, zoom: u32, ui: &mut Framework) {
+        self.name_target = None;
         self.levels.clear();
         self.placeholder = "Run an action directly".into();
         self.entries = catalog::build(app, zoom);
@@ -149,6 +168,37 @@ impl Shell {
         self.open = true;
         self.search("");
         ui.clear_input(QUERY);
+    }
+
+    pub fn open_conversation_name(
+        &mut self,
+        app: &App,
+        zoom: u32,
+        ui: &mut Framework,
+        profile: Profile,
+        id: faith_client::Id,
+    ) {
+        self.open(app, zoom, ui);
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|entry| entry.id == "name-conversation")
+        {
+            self.enter(index, ui);
+        }
+
+        self.prompt_conversation_name(ui, profile, id);
+    }
+
+    fn prompt_conversation_name(
+        &mut self,
+        ui: &mut Framework,
+        profile: Profile,
+        id: faith_client::Id,
+    ) {
+        self.name_target = Some((profile, id));
+        ui.clear_input(QUERY);
+        ui.animate_until(std::time::Instant::now());
     }
 
     fn search(&mut self, query: &str) {
@@ -191,7 +241,7 @@ impl Shell {
                     score: 0,
                     path: Vec::new(),
                 }
-            } else if let Some(matched) = find(entry, &tokens, &[]) {
+            } else if let Some(matched) = find(entry, &tokens, &[], context) {
                 matched
             } else {
                 continue;
@@ -204,7 +254,7 @@ impl Shell {
             let score = if tokens.is_empty() {
                 entry.priority
             } else {
-                matched.score + target.priority.min(200) / 5
+                target.priority.min(200) / 5
             };
             /* we prefer themes for generic theme and selector queries, even from settings */
             let generic_selector = !normalized.is_empty() && "selector".starts_with(&normalized);
@@ -223,15 +273,19 @@ impl Shell {
             }
             results.push(SearchResult {
                 index,
-                score: score + target.context_bonus(context) + usage + preference,
+                match_score: matched.score + preference,
+                destination: destination_rank(target, context),
+                score: score + target.context_bonus(context) + usage,
                 path: matched.path,
                 title,
             });
         }
 
         results.sort_unstable_by(|a, b| {
-            b.score
-                .cmp(&a.score)
+            b.match_score
+                .cmp(&a.match_score)
+                .then_with(|| b.destination.cmp(&a.destination))
+                .then_with(|| b.score.cmp(&a.score))
                 .then_with(|| a.title.cmp(&b.title))
                 .then_with(|| self.entries[a.index].id.cmp(&self.entries[b.index].id))
         });
@@ -294,6 +348,11 @@ impl Shell {
             }
             return None;
         }
+        if let Action::PromptConversationName { profile, id } = &entry.command {
+            self.prompt_conversation_name(ui, profile.clone(), *id);
+            return None;
+        }
+
         self.clock += 1;
         let usage = self.usage.entry(entry.id.clone()).or_default();
         usage.count = usage.count.saturating_add(1);
@@ -315,7 +374,10 @@ impl Shell {
 
         let mut presence = ui.presence(&mut self.presence, self.open);
         ui.overlay_opacity(presence);
-        if !self.levels.is_empty()
+        let naming = self.name_target.is_some();
+
+        if !naming
+            && !self.levels.is_empty()
             && ui.events().iter().any(|event| {
                 matches!(
                     event,
@@ -336,7 +398,9 @@ impl Shell {
             .min(8)
             .min(count);
         let empty = self.results.is_empty();
-        let list_height = if empty {
+        let list_height = if naming {
+            0.0
+        } else if empty {
             ui.push_style(Style {
                 font_size: 13,
                 ..ui.style()
@@ -353,12 +417,16 @@ impl Shell {
         } else {
             ui.corner_radii().popup.max(1.0)
         };
-        let height = if empty {
-            48.0
+        let height = if naming {
+            46.0
         } else {
-            56.0
-        } + list_height
-            + bottom_inset;
+            (if empty {
+                48.0
+            } else {
+                56.0
+            }) + list_height
+                + bottom_inset
+        };
         let x = ((ui.div_width() - width) * 0.5).max(0.0);
         let top = ((ui.div_height() - height) * 0.5).max(0.0);
         let pointer = ui.pointer_position();
@@ -392,6 +460,14 @@ impl Shell {
                     }
                 )
             });
+            if naming && escape {
+                self.name_target = None;
+                ui.set_input(QUERY, &self.query);
+                ui.animate_until(std::time::Instant::now());
+                ui.end_overlay()?;
+                return Ok(None);
+            }
+
             if !escape || !self.back(ui) {
                 self.open = false;
                 ui.ignore_overlay_input();
@@ -433,14 +509,15 @@ impl Shell {
             background: Some(ui.theme().input),
             border_color: Some(ui.theme().border),
             radius: ui.corner_radii().popup,
-            rounded_corners: [self.levels.is_empty(), true, false, false],
+            rounded_corners: [naming || self.levels.is_empty(), !naming, false, naming],
             ..ui.style()
         });
-        let nested = !self.levels.is_empty();
+        let nested = !naming && !self.levels.is_empty();
         let mut go_back = false;
         if nested {
             ui.set_position(1.0, 1.0);
             ui.push_style(Style {
+                tooltip: Some("Back"),
                 font_size: 20,
                 padding: 10.0,
                 background: Some(ui.theme().surface),
@@ -465,30 +542,77 @@ impl Shell {
         if self.open {
             ui.focus_control(QUERY, false);
         }
-        let input_origin = ui.position();
-        let query = ui.input_with_options(
+        let done_width = 88.0_f32.min(width * 0.35);
+        if naming {
+            ui.push_sizing(Some((width - done_width).max(1.0)), Some(46.0));
+        }
+
+        let query = ui.input_with_hint(
             gpu,
             QUERY,
             InputOptions {
-                max_chars: Some(96),
+                max_chars: Some(if naming {
+                    256
+                } else {
+                    96
+                }),
                 filter: None,
             },
+            if naming {
+                "Name conversation"
+            } else {
+                &self.placeholder
+            },
         )?;
-        if nested {
+        if nested || naming {
             ui.pop_sizing();
         }
+
         ui.pop_style();
-        if query.is_empty() {
-            let after_input = ui.position();
-            ui.set_position(input_origin.0 + 14.0, input_origin.1 + 12.0);
+        if naming {
+            ui.set_position(width - done_width, 0.0);
+            let enabled = self.open && !query.trim().is_empty();
             ui.push_style(Style {
                 font_size: 16,
-                color: ui.theme().muted,
+                padding: 12.0,
+                color: if enabled {
+                    ui.theme().primary_text
+                } else {
+                    ui.theme().muted
+                },
+                background: Some(if enabled {
+                    ui.theme().primary
+                } else {
+                    ui.theme().button
+                }),
+                border_color: Some(ui.theme().border),
+                radius: ui.corner_radii().popup,
+                rounded_corners: [false, true, true, false],
+                center_button_content: true,
+                enabled,
                 ..ui.style()
             });
-            ui.text(gpu, &self.placeholder, None)?;
+            ui.push_sizing(Some(done_width), Some(46.0));
+            let done = ui.icon_label_button(gpu, "quickshell-done", "", "Done")?;
+            ui.pop_sizing();
             ui.pop_style();
-            ui.set_position(after_input.0, after_input.1);
+            ui.pop_style();
+            ui.div_end();
+            ui.pop_style();
+            ui.end_overlay()?;
+            if enabled
+                && (done || ui.input_submitted(QUERY))
+                && let Some((profile, id)) = &self.name_target
+            {
+                self.open = false;
+                return Ok(Some(Action::RenameConversation {
+                    profile: profile.clone(),
+                    id: *id,
+                    title: query.trim().to_owned(),
+                }));
+            }
+
+            return Ok(None);
         }
 
         if self.open && query != self.query {
@@ -623,5 +747,47 @@ impl Shell {
         } else {
             None
         })
+    }
+}
+
+#[cfg(test)]
+mod ranking_tests {
+    use super::*;
+
+    #[test]
+    fn conversation_title_beats_a_profile_with_the_same_name() {
+        let profile = |alias: &str| Profile {
+            alias: alias.into(),
+            path: alias.into(),
+        };
+        let active = profile("hello123");
+        let other = profile("other");
+        let id = faith_client::Id([1; 16]);
+        let active_chat = Entry::conversation(&active, id, "hello123");
+        let other_chat = Entry::conversation(&other, id, "hello123");
+        let mut parent = Entry::conversation(&other, id, "Open conversation");
+        parent.id = "profile-conversations".into();
+        parent.command = Action::None;
+        parent.children = Some(vec![other_chat, active_chat]);
+
+        let mut shell = Shell {
+            entries: vec![Entry::profile(&active), parent],
+            context: Some(Context {
+                kind: Kind::Profile,
+                profile: Some(active.path.clone()),
+            }),
+            ..Default::default()
+        };
+        shell.search("hello123");
+        assert_eq!(shell.results[0].index, 1);
+        assert_eq!(shell.results[0].path, [1]);
+
+        shell.context.as_mut().unwrap().profile = Some(other.path.clone());
+        shell.search("hello123");
+        assert_eq!(shell.results[0].index, 1);
+        assert_eq!(shell.results[0].path, [0]);
+
+        shell.search("open conversation");
+        assert!(shell.results[0].path.is_empty());
     }
 }

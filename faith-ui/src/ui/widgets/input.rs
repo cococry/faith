@@ -18,6 +18,8 @@ pub struct Bounds {
 pub struct InputResponse {
     pub changed: bool,
     pub submitted: Option<String>,
+    pub copied: Option<String>,
+    pub paste: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -33,6 +35,7 @@ pub struct InputField {
     options: InputOptions,
     text: String,
     cursor: usize,
+    selected: bool,
     focused: bool,
     max_bytes: usize,
     scroll_x: f32,
@@ -44,6 +47,7 @@ impl InputField {
             options: InputOptions::default(),
             text: String::new(),
             cursor: 0,
+            selected: false,
             focused: true,
             max_bytes,
             scroll_x: 0.0,
@@ -74,37 +78,43 @@ impl InputField {
         match event {
             WindowEvent::FocusChanged(focused) => {
                 response.changed = self.focused != *focused;
-                self.focused = *focused;
+                self.set_focused(*focused);
             }
 
             WindowEvent::TextInput(text) if self.focused => {
+                let existing = if self.selected {
+                    ""
+                } else {
+                    &self.text
+                };
                 let remaining = self.options.max_chars.map_or(usize::MAX, |max| {
-                    max.saturating_sub(self.text.chars().count())
+                    max.saturating_sub(existing.chars().count())
                 });
 
+                let mut bytes = self.max_bytes.saturating_sub(existing.len());
                 let text: String = text
                     .chars()
                     .filter(|c| {
                         !c.is_control() && self.options.filter.is_none_or(|filter| filter(*c))
                     })
                     .take(remaining)
+                    .take_while(|c| {
+                        if c.len_utf8() > bytes {
+                            return false;
+                        }
+
+                        bytes -= c.len_utf8();
+                        true
+                    })
                     .collect();
 
-                if !text.is_empty() && self.text.len() + text.len() <= self.max_bytes {
-                    self.text.insert_str(self.cursor, &text);
-                    self.cursor += text.len();
-                    // A combining commit can join adjacent graphemes. Keep the
-                    // cursor on a valid grapheme boundary after insertion.
-                    if let Some((next, _)) = self
-                        .text
-                        .grapheme_indices(true)
-                        .find(|(i, _)| *i >= self.cursor)
-                    {
-                        self.cursor = next;
-                    } else {
-                        self.cursor = self.text.len();
+                if !text.is_empty() {
+                    if self.selected {
+                        self.clear();
                     }
 
+                    self.text.insert_str(self.cursor, &text);
+                    self.cursor += text.len();
                     response.changed = true;
                 }
             }
@@ -113,6 +123,22 @@ impl InputField {
                 let before = self.cursor;
 
                 match key {
+                    Key::SelectAll => {
+                        self.selected = !self.text.is_empty();
+                        self.cursor = self.text.len();
+                        response.changed = true;
+                    }
+
+                    Key::Copy if !self.text.is_empty() => response.copied = Some(self.text.clone()),
+                    Key::Paste => response.paste = true,
+                    Key::Backspace | Key::Delete if self.selected => {
+                        self.clear();
+                        response.changed = true;
+                    }
+
+                    Key::Left if self.selected => self.cursor = 0,
+                    Key::Right if self.selected => self.cursor = self.text.len(),
+
                     Key::Enter if !self.text.trim().is_empty() => {
                         response.submitted = Some(self.text.clone());
                         response.changed = true;
@@ -168,22 +194,26 @@ impl InputField {
                     _ => {}
                 }
 
+                if matches!(
+                    key,
+                    Key::Left | Key::Right | Key::Home | Key::End | Key::Escape
+                ) {
+                    response.changed |= self.selected;
+                    self.selected = false;
+                }
+
                 response.changed |= self.cursor != before;
             }
 
             _ => {}
         }
 
-        if !self.text.is_empty()
-            && !self
-                .text
-                .grapheme_indices(true)
-                .any(|(i, _)| i == self.cursor)
-        {
+        // we can end up inside a grapheme when text joins across the caret
+        if response.changed && self.cursor < self.text.len() {
             self.cursor = self
                 .text
                 .grapheme_indices(true)
-                .find(|(i, _)| *i > self.cursor)
+                .find(|(i, _)| *i >= self.cursor)
                 .map_or(self.text.len(), |(i, _)| i);
         }
 
@@ -196,6 +226,9 @@ impl InputField {
 
     pub fn set_focused(&mut self, focused: bool) {
         self.focused = focused;
+        if !focused {
+            self.selected = false;
+        }
     }
 
     #[allow(dead_code)]
@@ -203,6 +236,7 @@ impl InputField {
         self.text.clear();
         self.cursor = 0;
         self.scroll_x = 0.0;
+        self.selected = false;
     }
 
     pub fn render<G: GraphicsDevice>(
@@ -223,6 +257,13 @@ impl InputField {
         let height = (bounds.height - style.padding * 2.0).max(0.0);
         ui.push_clip([x, y, available, height]);
         let result = (|| -> anyhow::Result<()> {
+            if self.focused && self.selected {
+                ui.quad(
+                    [x - self.scroll_x, y, caret, height],
+                    style.border_color.unwrap_or(style.color),
+                )?;
+            }
+
             text.render(x - self.scroll_x, y, &self.text, font, gpu, ui)?;
 
             if self.focused {
@@ -246,5 +287,31 @@ fn scroll_to_caret(scroll: f32, caret: f32, viewport: f32) -> f32 {
         (caret - viewport).max(0.0)
     } else {
         scroll
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clipboard_shortcuts_replace_the_selection_and_keep_utf8_within_the_limit() {
+        let mut field = InputField::new(5);
+        field.handle(&WindowEvent::TextInput("draft".into()));
+        let shortcut = |key| WindowEvent::KeyPressed { key, control: true };
+
+        field.handle(&shortcut(Key::SelectAll));
+        assert_eq!(
+            field.handle(&shortcut(Key::Copy)).copied.as_deref(),
+            Some("draft")
+        );
+        assert!(field.handle(&shortcut(Key::Paste)).paste);
+
+        field.handle(&WindowEvent::TextInput("ééé".into()));
+        assert_eq!(field.text(), "éé");
+
+        field.handle(&shortcut(Key::SelectAll));
+        field.handle(&WindowEvent::FocusChanged(false));
+        assert!(!field.handle(&shortcut(Key::Paste)).paste);
     }
 }

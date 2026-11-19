@@ -78,6 +78,9 @@ impl Keyboard {
         }
 
         let key = match sym {
+            0x0041 | 0x0061 if control && !alt => Some(Key::SelectAll),
+            0x0043 | 0x0063 if control && !alt => Some(Key::Copy),
+            0x0056 | 0x0076 if control && !alt => Some(Key::Paste),
             0xff0d | 0xff8d => Some(Key::Enter),
             0xff08 => Some(Key::Backspace),
             0xffff | 0xff9f => Some(Key::Delete),

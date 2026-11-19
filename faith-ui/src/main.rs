@@ -1,5 +1,6 @@
 use ui::animation::Curve;
 mod assets;
+mod chat_ui;
 mod cli;
 mod client;
 mod graphics;
@@ -24,6 +25,9 @@ use ui::{
 const MENU: &str = "\u{eb94}";
 const ACCOUNTS: &str = "\u{f0b55}";
 const ACCOUNTS_SELECTED: &str = "\u{f0009}";
+const GROUP: &str = "\u{f0849}";
+const COPY_AUTH: &str = "󰆏";
+const NEW_CHAT: &str = "";
 const CHATS: &str = "\u{f0ede}";
 const CHATS_SELECTED: &str = "\u{f0b79}";
 const SETTINGS: &str = "\u{f08bb}";
@@ -41,7 +45,14 @@ enum Page {
     Accounts,
     Create,
     Conversations,
+    CreateConversation,
     Settings,
+}
+
+impl Page {
+    fn is_chat(self) -> bool {
+        matches!(self, Self::Conversations | Self::CreateConversation)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -56,6 +67,7 @@ struct Location {
     page: Page,
     settings_item: SettingsItem,
     conversation: Option<faith_client::Id>,
+    chat_session: u64,
     list_offset: usize,
 }
 
@@ -91,7 +103,33 @@ enum Action {
     Settings,
     ToggleMenu,
     ListPage(usize),
-    Conversation(faith_client::Id),
+    NewConversation(Profile),
+    AddChatPartner(faith_client::Id, String),
+    FocusChatPartner,
+    NameNewConversation(Option<(faith_client::Id, String)>),
+    EditChatPartners,
+    PromptConversationName {
+        profile: Profile,
+        id: faith_client::Id,
+    },
+    RenameConversation {
+        profile: Profile,
+        id: faith_client::Id,
+        title: String,
+    },
+    RemoveChatPartner(usize),
+    CancelConversation,
+    CreateConversation {
+        title: String,
+        partners: Vec<(faith_client::Id, String)>,
+    },
+    SendMessage {
+        id: faith_client::Id,
+        body: String,
+    },
+    CopyAuthId(Profile),
+    RetryDelivery(Profile),
+    DiscardDelivery(Profile),
     Theme(String),
     SettingsItem(SettingsItem),
     Rounded(bool),
@@ -113,6 +151,7 @@ struct App {
     profiles: Vec<Profile>,
     selected: Option<Profile>,
     session: Option<client::Session>,
+    chat: chat_ui::State,
     page: Page,
     back_history: Vec<Location>,
     forward_history: Vec<Location>,
@@ -136,6 +175,7 @@ struct App {
     default_zoom: u32,
     settings: settings::Store,
     saved_at: Option<std::time::Instant>,
+    copied_at: Option<std::time::Instant>,
     settings_error: String,
 }
 
@@ -146,20 +186,39 @@ impl App {
             page: self.page,
             settings_item: self.settings_item,
             conversation: self.conversation,
+            chat_session: self.chat.session,
             list_offset: self.list_offset,
         }
     }
 
     fn restore_location(&mut self, location: Location) {
-        self.page = location.page;
+        self.error.clear();
+        self.page = if location.page == Page::CreateConversation
+            && location.chat_session != self.chat.session
+        {
+            Page::Conversations
+        } else {
+            location.page
+        };
         self.settings_item = location.settings_item;
         self.conversation = location.conversation.filter(|id| {
-            self.session
-                .as_ref()
-                .is_some_and(|session| session.snapshot().conversations.contains(id))
+            location.chat_session == self.chat.session
+                && self
+                    .chat
+                    .snapshot
+                    .conversations
+                    .iter()
+                    .any(|chat| chat.id == *id)
         });
+
+        if let Some(id) = self.conversation
+            && let Some(session) = &self.session
+            && let Err(error) = session.submit(client::Command::Select(id))
+        {
+            self.error = error.to_string();
+        }
+
         self.list_offset = location.list_offset;
-        self.error.clear();
     }
 
     fn save_settings(&mut self) {
@@ -183,6 +242,7 @@ impl App {
     fn login(&mut self, profile: Profile, cli: &cli::Cli, platform: &Platform) {
         // Stop the old session before selecting another account.
         self.session = None;
+        self.chat.reset();
         self.error.clear();
         self.conversation = None;
         self.list_offset = 0;
@@ -206,12 +266,89 @@ impl App {
         }
     }
 
+    fn ensure_profile(
+        &mut self,
+        profile: Profile,
+        cli: &cli::Cli,
+        platform: &Platform,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(profile.path.is_dir(), "Profile is no longer available");
+        if self
+            .selected
+            .as_ref()
+            .is_none_or(|selected| selected.path != profile.path)
+        {
+            self.login(profile, cli, platform);
+        }
+
+        Ok(())
+    }
+
+    fn submit_chat(&self, command: client::Command) -> anyhow::Result<u64> {
+        self.session
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Profile session is unavailable"))?
+            .submit(command)
+    }
+
+    fn refresh_chat(&mut self, ui: &mut Framework) {
+        let Some(snapshot) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.snapshot_since(self.chat.snapshot.generation))
+        else {
+            return;
+        };
+
+        if let Some((id, accepted, created)) = snapshot.submission
+            && self
+                .chat
+                .submission
+                .as_ref()
+                .is_some_and(|(request, _)| *request == id)
+            && let Some((_, submission)) = self.chat.submission.take()
+        {
+            if accepted {
+                match submission {
+                    chat_ui::Submission::Create => {
+                        if self.page == Page::CreateConversation {
+                            self.conversation = created;
+                            self.page = Page::Conversations;
+                            self.chat.clear_form(ui);
+                            ui.navigation_changed();
+                        }
+                    }
+
+                    chat_ui::Submission::Send(input) => {
+                        ui.clear_input(&input);
+                        if self.page == Page::Conversations
+                            && self
+                                .conversation
+                                .is_some_and(|id| self.chat.composer_id(id) == input)
+                        {
+                            ui.focus_input(&input);
+                        }
+                    }
+                }
+            } else {
+                self.error = snapshot
+                    .notices
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| "Chat action failed".into());
+            }
+        }
+
+        self.chat.snapshot = snapshot;
+    }
+
     fn act(
         &mut self,
         action: Action,
         cli: &cli::Cli,
         platform: &Platform,
         ui: &mut Framework,
+        clipboard: &mut Vec<ui::framework::ClipboardAction>,
     ) -> anyhow::Result<()> {
         if let Action::FocusSetting {
             action,
@@ -219,7 +356,7 @@ impl App {
             control,
         } = action
         {
-            self.act(*action, cli, platform, ui)?;
+            self.act(*action, cli, platform, ui, clipboard)?;
             return self.act(
                 Action::OpenSettings {
                     section,
@@ -228,6 +365,7 @@ impl App {
                 cli,
                 platform,
                 ui,
+                clipboard,
             );
         }
 
@@ -236,6 +374,7 @@ impl App {
         let focus_requested = matches!(
             action,
             Action::New
+                | Action::NewConversation(_)
                 | Action::OpenSettings {
                     control: Some(_),
                     ..
@@ -247,17 +386,21 @@ impl App {
                 | Action::Create(_)
                 | Action::OpenProfile(_)
                 | Action::OpenConversation { .. }
+                | Action::NewConversation(_)
                 | Action::OpenSettings { .. }
                 | Action::Choose
                 | Action::New
                 | Action::Chats
                 | Action::Settings
-                | Action::Conversation(_)
                 | Action::SettingsItem(_)
         );
         match action {
             Action::FocusSetting { .. } => unreachable!(),
-            Action::None | Action::OpenMenu | Action::OpenQuickshell | Action::Quit => {
+            Action::None
+            | Action::OpenMenu
+            | Action::OpenQuickshell
+            | Action::Quit
+            | Action::PromptConversationName { .. } => {
                 return Ok(());
             }
             Action::Back => {
@@ -292,25 +435,102 @@ impl App {
                 }
             }
             Action::OpenConversation { profile, id } => {
-                anyhow::ensure!(profile.path.is_dir(), "Profile is no longer available");
-                if self
-                    .selected
-                    .as_ref()
-                    .is_none_or(|selected| selected.path != profile.path)
-                {
-                    self.login(profile, cli, platform);
+                self.ensure_profile(profile, cli, platform)?;
+                self.submit_chat(client::Command::Select(id))?;
+                self.conversation = Some(id);
+                self.page = Page::Conversations;
+                self.error.clear();
+            }
+
+            Action::NewConversation(profile) => {
+                self.ensure_profile(profile, cli, platform)?;
+                if self.page != Page::CreateConversation {
+                    self.chat.clear_form(ui);
+                    self.page = Page::CreateConversation;
                 }
 
-                if let Some(session) = &self.session {
-                    match session.submit(format!("/use {id}")) {
-                        Ok(_) => {
-                            self.conversation = Some(id);
-                            self.page = Page::Conversations;
-                        }
-                        Err(error) => self.error = error.to_string(),
-                    }
+                self.error.clear();
+                if self.chat.naming {
+                    ui.focus_input(&self.chat.title_id());
+                } else {
+                    ui.focus_input(&self.chat.partner_id());
                 }
             }
+
+            Action::AddChatPartner(_, _)
+            | Action::FocusChatPartner
+            | Action::RemoveChatPartner(_)
+            | Action::NameNewConversation(_)
+            | Action::EditChatPartners
+            | Action::CancelConversation
+                if self.page != Page::CreateConversation || !self.chat.editing_creation() => {}
+
+            Action::FocusChatPartner => ui.focus_input(&self.chat.partner_id()),
+            Action::AddChatPartner(id, name) => self.chat.add_partner(ui, (id, name)),
+            Action::RemoveChatPartner(index) => {
+                if index < self.chat.partners.len() {
+                    self.chat.partners.remove(index);
+                }
+            }
+
+            Action::NameNewConversation(partner) => {
+                if let Some(partner) = partner {
+                    self.chat.add_partner(ui, partner);
+                }
+
+                self.chat.naming = true;
+                ui.set_input(&self.chat.title_id(), &self.chat.default_title());
+            }
+
+            Action::EditChatPartners => {
+                self.chat.naming = false;
+                ui.focus_input(&self.chat.partner_id());
+            }
+
+            Action::RenameConversation { profile, id, title } => {
+                self.ensure_profile(profile, cli, platform)?;
+                self.submit_chat(client::Command::Rename { id, title })?;
+            }
+
+            Action::CancelConversation => {
+                self.chat.clear_form(ui);
+                self.page = Page::Conversations;
+                self.error.clear();
+            }
+
+            Action::CreateConversation { title, partners } => {
+                let id = self.submit_chat(client::Command::Create { title, partners })?;
+                self.chat.submission = Some((id, chat_ui::Submission::Create));
+                self.error.clear();
+            }
+
+            Action::SendMessage { id, body } => {
+                let input = self.chat.composer_id(id);
+                let id = self.submit_chat(client::Command::Send { id, body })?;
+                self.chat.submission = Some((id, chat_ui::Submission::Send(input)));
+                self.error.clear();
+            }
+
+            Action::CopyAuthId(profile) => {
+                self.ensure_profile(profile, cli, platform)?;
+                let auth = self
+                    .chat
+                    .snapshot
+                    .auth
+                    .ok_or_else(|| anyhow::anyhow!("Auth ID is still loading"))?;
+                clipboard.push(ui::framework::ClipboardAction::Copy(auth.to_string()));
+            }
+
+            Action::RetryDelivery(profile) => {
+                self.ensure_profile(profile, cli, platform)?;
+                self.submit_chat(client::Command::Retry)?;
+            }
+
+            Action::DiscardDelivery(profile) => {
+                self.ensure_profile(profile, cli, platform)?;
+                self.submit_chat(client::Command::Discard)?;
+            }
+
             Action::OpenSettings { section, control } => {
                 self.page = Page::Settings;
                 self.settings_item = section;
@@ -387,7 +607,6 @@ impl App {
 
             Action::ToggleMenu => self.collapsed = !self.collapsed,
             Action::ListPage(offset) => self.list_offset = offset,
-            Action::Conversation(id) => self.conversation = Some(id),
             Action::SettingsItem(item) => {
                 if item == SettingsItem::Theme
                     && let Err(error) = self.themes.refresh()
@@ -587,9 +806,11 @@ fn icon(
     id: &str,
     glyph: &str,
     selected: bool,
+    tooltip: &'static str,
 ) -> anyhow::Result<bool> {
     ui.push_style(Style {
         selected,
+        tooltip: Some(tooltip),
         selection_group: id.starts_with("nav-").then_some("navigation"),
         font_size: 20,
         padding: 4.0,
@@ -682,7 +903,7 @@ fn navigation(
     let mut action = Action::None;
     ui.set_position(16.0, 16.0);
 
-    if icon(ui, gpu, "nav-collapse", MENU, false)? {
+    if icon(ui, gpu, "nav-collapse", MENU, false, "Hide navigation")? {
         action = Action::ToggleMenu;
     }
 
@@ -704,13 +925,14 @@ fn navigation(
             ACCOUNTS
         },
         accounts_selected,
+        "Profiles",
     )? {
         action = Action::Choose;
     }
 
     ui.set_position(16.0, 144.0);
 
-    let chats_selected = app.page == Page::Conversations;
+    let chats_selected = app.page.is_chat();
 
     if icon(
         ui,
@@ -722,6 +944,7 @@ fn navigation(
             CHATS
         },
         chats_selected,
+        "Conversations",
     )? {
         action = Action::Chats;
     }
@@ -740,6 +963,7 @@ fn navigation(
             SETTINGS
         },
         app.page == Page::Settings,
+        "Settings",
     )? {
         action = Action::Settings;
     }
@@ -766,36 +990,68 @@ fn list_header(
     if app.collapsed {
         ui.set_position(12.0, 16.0);
 
-        if icon(ui, gpu, "list-expand", MENU, false)? {
+        if icon(ui, gpu, "list-expand", MENU, false, "Show navigation")? {
             action = Action::ToggleMenu;
         }
     }
 
+    let chats = app.page.is_chat();
+    let title_x = if app.collapsed {
+        62.0
+    } else {
+        24.0
+    };
+    let actions_width = if chats {
+        96.0
+    } else {
+        52.0
+    };
     ui.set_position(
-        if app.collapsed {
-            62.0
+        title_x,
+        if chats {
+            25.0
         } else {
-            24.0
+            22.0
         },
-        22.0,
     );
-    ui.push_sizing(
-        Some(
-            (width
-                - if app.collapsed {
-                    118.0
-                } else {
-                    80.0
-                })
-            .max(1.0),
-        ),
-        None,
-    );
-    label(ui, gpu, title, 20, true, false, false)?;
+    ui.push_sizing(Some((width - title_x - actions_width - 4.0).max(1.0)), None);
+    label(
+        ui,
+        gpu,
+        title,
+        if chats {
+            16
+        } else {
+            20
+        },
+        true,
+        false,
+        false,
+    )?;
     ui.pop_sizing();
-    ui.set_position(width - 52.0, 16.0);
-    if icon(ui, gpu, "list-more", MORE, false)? {
+    ui.set_position(width - actions_width, 16.0);
+    if icon(ui, gpu, "list-more", MORE, false, "More options")? {
         action = Action::OpenMenu;
+    }
+
+    if chats {
+        ui.set_position(width - 52.0, 16.0);
+        ui.push_style(Style {
+            enabled: app.selected.is_some(),
+            ..ui.style()
+        });
+        let create = icon(
+            ui,
+            gpu,
+            "list-new-chat",
+            NEW_CHAT,
+            false,
+            "New conversation",
+        )?;
+        ui.pop_style();
+        if create && let Some(profile) = &app.selected {
+            action = Action::NewConversation(profile.clone());
+        }
     }
     ui.div_end();
     ui.space(38.0);
@@ -862,14 +1118,14 @@ fn item_list(
         ui,
         gpu,
         app,
-        if app.page == Page::Conversations {
+        if app.page.is_chat() {
             "Conversations"
         } else {
             "Profiles"
         },
     )?;
     let width = ui.div_width();
-    let chats = app.page == Page::Conversations;
+    let chats = app.page.is_chat();
 
     let count = if chats {
         snapshot.conversations.len()
@@ -892,39 +1148,42 @@ fn item_list(
     )?;
 
     // An empty list still gets a heading and a short explanation.
-    if count == 0 {
+    if chats && app.session.is_some() && snapshot.auth.is_none() {
+        ui.set_position(8.0, 14.0);
+        let status = if snapshot.generation == 0 {
+            "Loading conversations..."
+        } else {
+            &snapshot.status
+        };
+        label(ui, gpu, status, 14, false, true, false)?;
+    } else if count == 0 {
         ui.set_position(8.0, 14.0);
         ui.div_begin(DivOptions {
             width: Some((ui.div_width() - 16.0).max(1.0)),
             ..Default::default()
         })?;
-        label(
-            ui,
-            gpu,
-            if chats {
-                "You have no conversations."
-            } else {
-                "No profile yet"
-            },
-            16,
-            true,
-            false,
-            false,
-        )?;
-        ui.space(12.0);
-        label(
-            ui,
-            gpu,
-            if chats {
-                "Your conversations will appear here."
-            } else {
-                "Create your first profile to begin chatting."
-            },
-            14,
-            false,
-            true,
-            false,
-        )?;
+        if chats {
+            label(ui, gpu, "No conversations yet", 16, true, false, false)?;
+            ui.space(12.0);
+            if let Some(profile) = &app.selected
+                && row_button(ui, gpu, "new-chat-empty", NEW_CHAT, "New chat", false, true)?
+            {
+                action = Action::NewConversation(profile.clone());
+            }
+        } else {
+            label(ui, gpu, "No profile yet", 16, true, false, false)?;
+            ui.space(12.0);
+            label(
+                ui,
+                gpu,
+                "Create your first profile to begin chatting.",
+                14,
+                false,
+                true,
+                false,
+            )?;
+        }
+
         ui.div_end();
     } else {
         // Render one row for each visible profile or conversation.
@@ -932,23 +1191,52 @@ fn item_list(
             ui.set_position(0.0, (index - offset) as f32 * 58.0);
 
             if chats {
-                let id = snapshot.conversations[index];
-                let title = format!("Chat · {}", &id.to_string()[..8]);
+                let chat = &snapshot.conversations[index];
+                let id = chat.id;
+                let row_y = ui.position().1;
+                let row_width = ui.div_width();
+                if chat.needs_name {
+                    ui.push_sizing(Some((row_width - 40.0).max(1.0)), None);
+                }
 
-                if row_button(
-                    ui,
-                    gpu,
-                    &format!("conversation-{id}"),
-                    if app.conversation == Some(id) {
-                        CHATS_SELECTED
-                    } else {
-                        CHATS
-                    },
-                    &title,
-                    app.conversation == Some(id),
-                    false,
-                )? {
-                    action = Action::Conversation(id);
+                if let Some(profile) = &app.selected
+                    && ui
+                        .action_row(
+                            gpu,
+                            &format!("conversation-{id}"),
+                            ui::framework::ActionRow {
+                                title: &chat.title,
+                                detail: &chat.last,
+                                icon: GROUP,
+                                selected: app.conversation == Some(id)
+                                    && app.page == Page::Conversations,
+                            },
+                        )?
+                        .clicked
+                {
+                    action = Action::OpenConversation {
+                        profile: profile.clone(),
+                        id,
+                    };
+                }
+                if chat.needs_name {
+                    ui.pop_sizing();
+                    ui.set_position((row_width - 40.0).max(0.0), row_y + 8.0);
+                    if let Some(profile) = &app.selected
+                        && icon(
+                            ui,
+                            gpu,
+                            &format!("name-chat-{id}"),
+                            ADD,
+                            false,
+                            "Name conversation",
+                        )?
+                    {
+                        action = Action::PromptConversationName {
+                            profile: profile.clone(),
+                            id,
+                        };
+                    }
                 }
             } else {
                 let profile = &app.profiles[index];
@@ -978,22 +1266,29 @@ fn item_list(
     if count > per_page {
         ui.set_position(16.0, height - 126.0);
 
-        if offset > 0 && icon(ui, gpu, "list-previous", BACK, false)? {
+        if offset > 0 && icon(ui, gpu, "list-previous", BACK, false, "Previous page")? {
             action = Action::ListPage(offset.saturating_sub(per_page));
         }
 
         ui.set_position(width - 56.0, height - 126.0);
 
-        if offset + per_page < count && icon(ui, gpu, "list-next", NEXT, false)? {
+        if offset + per_page < count && icon(ui, gpu, "list-next", NEXT, false, "Next page")? {
             action = Action::ListPage(offset + per_page);
         }
     }
 
     // The list footer shows account status or the create button.
-    panel(ui, 16.0, height - 70.0, width - 32.0, 54.0, true)?;
+    let footer_y = height - 70.0;
+    panel(ui, 16.0, footer_y, width - 32.0, 54.0, true)?;
 
     if chats {
         if let Some(profile) = &app.selected {
+            let copy_x = (ui.div_width() - 40.0).max(0.0);
+            let has_auth = snapshot.auth.is_some();
+            if has_auth {
+                ui.push_sizing(Some((copy_x - 8.0).max(1.0)), None);
+            }
+
             label(ui, gpu, &profile.alias, 15, true, false, false)?;
             label(
                 ui,
@@ -1010,6 +1305,13 @@ fn item_list(
                 true,
                 false,
             )?;
+            if has_auth {
+                ui.pop_sizing();
+                ui.set_position(copy_x, 7.0);
+                if icon(ui, gpu, "copy-auth-id", COPY_AUTH, false, "Copy Auth ID")? {
+                    action = Action::CopyAuthId(profile.clone());
+                }
+            }
         } else if row_button(
             ui,
             gpu,
@@ -1062,6 +1364,11 @@ fn history_controls(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow
         }
 
         ui.push_style(Style {
+            tooltip: Some(if id == "history-back" {
+                "Back"
+            } else {
+                "Forward"
+            }),
             font_size: 20,
             padding: 8.0,
             hit_padding: 4.0,
@@ -1181,6 +1488,17 @@ fn brand_page(
 }
 
 // The form for creating a local account profile.
+fn profile_input_style(ui: &Framework) -> Style {
+    Style {
+        padding: 12.0,
+        font_size: 16,
+        radius: ui.corner_radii().control,
+        border_color: Some(ui.theme().border),
+        background: Some(ui.theme().input),
+        ..ui.style()
+    }
+}
+
 fn profile_creation_page(
     ui: &mut Framework,
     gpu: &mut Renderer,
@@ -1236,14 +1554,7 @@ fn profile_creation_page(
     ui.space(28.0);
     label(ui, gpu, "Account handle", 13, true, true, false)?;
     ui.space(10.0);
-    ui.push_style(Style {
-        padding: 12.0,
-        font_size: 16,
-        radius: ui.corner_radii().control,
-        border_color: Some(ui.theme().border),
-        background: Some(ui.theme().input),
-        ..ui.style()
-    });
+    ui.push_style(profile_input_style(ui));
 
     // Only allow characters that are valid in a profile handle.
     let alias = ui.input_with_options(
@@ -1284,138 +1595,6 @@ fn profile_creation_page(
     Ok(action)
 }
 
-// Account status and the conversation placeholder.
-fn logged_in_page(
-    ui: &mut Framework,
-    gpu: &mut Renderer,
-    app: &App,
-    snapshot: &client::Snapshot,
-) -> anyhow::Result<Action> {
-    let width = ui.div_width();
-    ui.set_position(28.0, 24.0);
-    ui.div_begin(DivOptions {
-        width: Some((width - 56.0).max(1.0)),
-        ..Default::default()
-    })?;
-    label(
-        ui,
-        gpu,
-        app.selected
-            .as_ref()
-            .map_or("Conversations", |p| p.alias.as_str()),
-        20,
-        true,
-        false,
-        false,
-    )?;
-
-    // Display the identity reported by the client worker.
-    if let Some(id) = snapshot.auth {
-        label(ui, gpu, &format!("User ID: {id}"), 12, false, true, false)?;
-    }
-
-    if !snapshot.status.is_empty() {
-        ui.push_style(Style {
-            font_size: 13,
-            color: if snapshot.authorized {
-                ui.theme().success
-            } else {
-                ui.theme().warning
-            },
-            ..ui.style()
-        });
-
-        ui.text(gpu, &snapshot.status, None)?;
-        ui.pop_style();
-    }
-
-    if let Some(notice) = snapshot.notices.last() {
-        label(ui, gpu, notice, 12, false, true, false)?;
-    }
-
-    ui.div_end();
-    let header_bottom = ui.position().1;
-
-    // Center the empty conversation view in its own column.
-    let top = (ui.div_height() * 0.5 - 38.0)
-        .max(200.0)
-        .max(header_bottom + 16.0);
-    ui.set_position(24.0, top);
-    ui.div_begin(DivOptions {
-        width: Some((width - 48.0).max(1.0)),
-        ..Default::default()
-    })?;
-
-    ui.push_style(Style {
-        font_size: 36,
-        color: ui.theme().muted,
-        ..ui.style()
-    });
-
-    ui.text_centered(gpu, CHATS, Some(Font::Icons))?;
-    ui.pop_style();
-    label(
-        ui,
-        gpu,
-        if app.conversation.is_some() {
-            "Your conversation"
-        } else {
-            "A space for your conversations"
-        },
-        23,
-        true,
-        false,
-        true,
-    )?;
-    label(
-        ui,
-        gpu,
-        if app.conversation.is_some() {
-            "The message view is coming next."
-        } else {
-            "Choose a conversation from the list to get started."
-        },
-        14,
-        false,
-        true,
-        true,
-    )?;
-    ui.div_end();
-    let mut action = Action::None;
-
-    if app.selected.is_some() && !snapshot.authorized {
-        // Centered reconnect button with centered content.
-        let button_width = (width - 56.0).min(220.0);
-        panel(
-            ui,
-            (width - button_width) / 2.0,
-            (ui.div_height() - 90.0)
-                .max(280.0)
-                .max(ui.position().1 + 16.0),
-            button_width,
-            52.0,
-            false,
-        )?;
-
-        ui.push_style(Style {
-            center_button_content: true,
-            ..ui.style()
-        });
-
-        let reconnect = row_button(ui, gpu, "reconnect", REFRESH, "Reconnect", false, false);
-        ui.pop_style();
-
-        if reconnect? {
-            action = Action::Retry;
-        }
-
-        end_panel(ui);
-    }
-
-    Ok(action)
-}
-
-// Small interface preferences.
 fn misc_settings_page(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Result<Action> {
     let width = (ui.div_width() - 64.0).max(1.0);
     let height = (ui.div_height() - 112.0).max(1.0);
@@ -1775,17 +1954,26 @@ fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyh
     // Reserve enough room for the full heading and its controls.
     let title = match app.page {
         Page::Settings => "Settings",
-        Page::Conversations => "Conversations",
+        Page::Conversations | Page::CreateConversation => "Conversations",
         Page::Accounts | Page::Create => "Profiles",
     };
     ui.push_style(Style {
-        font_size: 20,
+        font_size: if app.page.is_chat() {
+            16
+        } else {
+            20
+        },
         ..ui.style()
     });
 
     let title_size = ui.text_size(title, Some(Font::Bold));
     ui.pop_style();
     let header_width = title_size?.0.ceil()
+        + if app.page.is_chat() {
+            44.0
+        } else {
+            0.0
+        }
         + if app.collapsed {
             118.0
         } else {
@@ -1798,11 +1986,7 @@ fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyh
         .min((remaining - 200.0).max(100.0));
     let content = (remaining - list).max(1.0);
 
-    // Read the latest client state without making network requests.
-    let snapshot = app
-        .session
-        .as_ref()
-        .map_or_else(client::Snapshot::default, |s| s.snapshot());
+    let snapshot = &app.chat.snapshot;
     let mut action = Action::None;
 
     /* we keep the rail's identity while its width shrinks to zero */
@@ -1824,7 +2008,7 @@ fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyh
     let list_action = if app.page == Page::Settings {
         settings_list(ui, gpu, app, height)?
     } else {
-        item_list(ui, gpu, app, &snapshot, height)?
+        item_list(ui, gpu, app, snapshot, height)?
     };
 
     if !matches!(list_action, Action::None) {
@@ -1871,14 +2055,55 @@ fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyh
         false,
     )?;
 
+    let copied = app.copied_at > app.saved_at;
+    let confirmation = if copied {
+        app.copied_at
+    } else {
+        app.saved_at
+    };
+    let sliding = ui.slider_dragging();
+    let opacity = confirmation
+        .map(|at| settings::confirmation_opacity(at, app.animations, app.animation_curve))
+        .unwrap_or(0.0);
+    let error = !app.settings_error.is_empty() && (!copied || opacity <= 0.0);
+    if !sliding
+        && !error
+        && let Some(deadline) = confirmation.and_then(|at| {
+            settings::confirmation_deadline(at, std::time::Instant::now(), app.animations)
+        })
+    {
+        ui.animate_until(deadline);
+    }
+
+    let show_clipboard = copied && !sliding && opacity > 0.0;
+    let mut clipboard_position = None;
+
     // Render the current page in the main content pane.
     let content_action = match app.page {
         Page::Accounts => brand_page(ui, gpu, logo, app.profiles.is_empty())?,
 
         Page::Create => profile_creation_page(ui, gpu, !app.profiles.is_empty())?,
-        Page::Conversations => logged_in_page(ui, gpu, app, &snapshot)?,
+        Page::Conversations => {
+            let (action, position) = chat_ui::conversation(ui, gpu, app, show_clipboard)?;
+            clipboard_position = position;
+            action
+        }
+
+        Page::CreateConversation => chat_ui::creation(ui, gpu, app)?,
         Page::Settings => settings_page(ui, gpu, app)?,
     };
+
+    if let Some(position) = clipboard_position {
+        confirmation_text(
+            ui,
+            gpu,
+            "Copied to system clipboard",
+            position,
+            pane_width - 40.0,
+            opacity,
+            false,
+        )?;
+    }
 
     end_panel(ui);
     if !matches!(content_action, Action::None) {
@@ -1903,54 +2128,59 @@ fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyh
         ui.pop_style();
     }
 
-    // Keep save feedback small and independent of the active settings section.
-    let sliding = ui.slider_dragging();
-    let opacity = app
-        .saved_at
-        .map(|saved| settings::confirmation_opacity(saved, app.animations, app.animation_curve))
-        .unwrap_or(0.0);
-    if !sliding
-        && app.settings_error.is_empty()
-        && let Some(deadline) = app.saved_at.and_then(|saved| {
-            settings::confirmation_deadline(saved, std::time::Instant::now(), app.animations)
-        })
-    {
-        ui.animate_until(deadline);
-    }
-
-    let feedback = if app.settings_error.is_empty() {
-        "Settings saved"
-    } else {
-        &app.settings_error
-    };
-
-    if (!sliding && opacity > 0.0) || !app.settings_error.is_empty() {
-        ui.set_position(28.0, (height - 68.0).max(0.0));
-        let mut color = if app.settings_error.is_empty() {
-            ui.theme().muted
+    if clipboard_position.is_none() && ((!sliding && opacity > 0.0) || error) {
+        let feedback = if error {
+            &app.settings_error
+        } else if copied {
+            "Copied to system clipboard"
         } else {
-            ui.theme().error
+            "Settings saved"
         };
-
-        color.a *= if app.settings_error.is_empty() {
-            opacity
-        } else {
-            1.0
-        };
-
-        ui.push_style(Style {
-            font_size: 12,
-            color,
-            ..ui.style()
-        });
-        ui.push_sizing(Some((content - 56.0).max(1.0)), None);
-        ui.text(gpu, feedback, None)?;
-        ui.pop_sizing();
-        ui.pop_style();
+        confirmation_text(
+            ui,
+            gpu,
+            feedback,
+            [28.0, (height - 68.0).max(0.0)],
+            content - 56.0,
+            opacity,
+            error,
+        )?;
     }
 
     end_panel(ui);
     Ok(action)
+}
+
+fn confirmation_text(
+    ui: &mut Framework,
+    gpu: &mut Renderer,
+    text: &str,
+    [x, y]: [f32; 2],
+    width: f32,
+    opacity: f32,
+    error: bool,
+) -> anyhow::Result<()> {
+    let mut color = if error {
+        ui.theme().error
+    } else {
+        ui.theme().muted
+    };
+    color.a *= if error {
+        1.0
+    } else {
+        opacity
+    };
+    ui.set_position(x, y);
+    ui.push_style(Style {
+        font_size: 12,
+        color,
+        ..ui.style()
+    });
+    ui.push_sizing(Some(width.max(1.0)), None);
+    let result = ui.text(gpu, text, None);
+    ui.pop_sizing();
+    ui.pop_style();
+    result
 }
 
 // Start the window and run the blocking UI loop.
@@ -2041,6 +2271,7 @@ fn main() -> anyhow::Result<()> {
         profiles,
         selected: None,
         session: None,
+        chat: chat_ui::State::default(),
         page: Page::Accounts,
         back_history: Vec::new(),
         forward_history: Vec::new(),
@@ -2064,6 +2295,7 @@ fn main() -> anyhow::Result<()> {
         default_zoom: preferences.default_zoom,
         settings: settings::Store::start(settings_path, platform.waker())?,
         saved_at: None,
+        copied_at: None,
         settings_error,
     };
 
@@ -2095,6 +2327,7 @@ fn main() -> anyhow::Result<()> {
     // Wait for input or a client notification before drawing again.
     loop {
         let mut events = platform.poll_events()?;
+        app.refresh_chat(&mut ui);
         events.retain(|event| {
             let requested = matches!(event, WindowEvent::QuickShellRequested)
                 || (!quickshell.is_open()
@@ -2174,25 +2407,32 @@ fn main() -> anyhow::Result<()> {
         }
         if popup.is_visible() {
             use ui::widgets::popup::Item;
-            if let Some(index) = ui.popup(
-                &mut renderer,
-                "header-menu",
-                &mut popup,
-                &[
+            let mut items = vec![
+                Item {
+                    icon: "",
+                    label: "Open Quickshell",
+                },
+                Item {
+                    icon: "\u{ea76}",
+                    label: "Quit faith",
+                },
+            ];
+
+            if app.page.is_chat() && app.selected.is_some() {
+                items.insert(
+                    0,
                     Item {
-                        icon: "",
-                        label: "Open Quickshell",
+                        icon: NEW_CHAT,
+                        label: "New conversation",
                     },
-                    Item {
-                        icon: "\u{ea76}",
-                        label: "Quit faith",
-                    },
-                ],
-            )? {
-                action = if index == 0 {
-                    Action::OpenQuickshell
-                } else {
-                    Action::Quit
+                );
+            }
+
+            if let Some(index) = ui.popup(&mut renderer, "header-menu", &mut popup, &items)? {
+                action = match (items.len(), index) {
+                    (3, 0) => Action::NewConversation(app.selected.clone().unwrap()),
+                    (3, 1) | (2, 0) => Action::OpenQuickshell,
+                    _ => Action::Quit,
                 };
             }
         }
@@ -2212,6 +2452,7 @@ fn main() -> anyhow::Result<()> {
             ui.set_modal_input(false);
         }
 
+        let mut clipboard = ui.take_clipboard_actions();
         match action {
             Action::OpenMenu => {
                 ui.set_modal_input(false);
@@ -2228,6 +2469,12 @@ fn main() -> anyhow::Result<()> {
                 platform.request_redraw()?;
                 continue;
             }
+            Action::PromptConversationName { profile, id } => {
+                ui.set_modal_input(false);
+                quickshell.open_conversation_name(&app, ui.zoom_percent(), &mut ui, profile, id);
+                platform.request_redraw()?;
+                continue;
+            }
             Action::Quit => return Ok(()),
             _ => {}
         }
@@ -2235,9 +2482,26 @@ fn main() -> anyhow::Result<()> {
             platform.request_redraw()?;
         }
 
-        if let Err(error) = app.act(action, &cli, &platform, &mut ui) {
+        if let Err(error) = app.act(action, &cli, &platform, &mut ui, &mut clipboard) {
             app.error = error.to_string();
             platform.request_redraw()?;
+        }
+
+        for action in clipboard {
+            let result = match action {
+                ui::framework::ClipboardAction::Copy(text) => {
+                    platform.copy_text(text).and_then(|()| {
+                        app.copied_at = Some(std::time::Instant::now());
+                        platform.request_redraw()
+                    })
+                }
+                ui::framework::ClipboardAction::Paste(target) => platform.paste_text(target),
+            };
+
+            if let Err(error) = result {
+                app.error = format!("Clipboard: {error}");
+                platform.request_redraw()?;
+            }
         }
     }
 }

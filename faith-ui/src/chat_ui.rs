@@ -1,0 +1,920 @@
+use faith_client::Id;
+use std::{cell::RefCell, sync::Arc};
+
+use crate::{
+    ADD, Action, App, CHATS, GROUP, NEW_CHAT, REFRESH, Renderer, client, end_panel, icon, label,
+    panel, row_button,
+    ui::{
+        framework::{DivOptions, Font, Framework, Style},
+        widgets::input::InputOptions,
+    },
+};
+
+pub enum Submission {
+    Create,
+    Send(String),
+}
+
+pub struct State {
+    pub snapshot: client::Snapshot,
+    pub submission: Option<(u64, Submission)>,
+    pub partners: Vec<(Id, String)>,
+    pub naming: bool,
+    pub session: u64,
+    form: u64,
+    history_layout: RefCell<Option<HistoryLayout>>,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            snapshot: client::Snapshot::default(),
+            submission: None,
+            partners: Vec::new(),
+            naming: false,
+            session: 0,
+            form: 0,
+            history_layout: RefCell::new(None),
+        }
+    }
+}
+
+impl State {
+    pub fn reset(&mut self) {
+        *self = Self {
+            session: self.session + 1,
+            ..Self::default()
+        };
+    }
+
+    pub fn title_id(&self) -> String {
+        format!("chat-title-{}-{}", self.session, self.form)
+    }
+
+    pub fn partner_id(&self) -> String {
+        format!("chat-partner-id-{}-{}", self.session, self.form)
+    }
+
+    fn partner_name(&self) -> String {
+        format!("chat-partner-name-{}-{}", self.session, self.form)
+    }
+
+    pub fn composer_id(&self, chat: Id) -> String {
+        format!("chat-composer-{}-{chat}", self.session)
+    }
+
+    pub fn clear_form(&mut self, ui: &mut Framework) {
+        ui.clear_input(&self.title_id());
+
+        self.clear_partner_inputs(ui);
+        self.partners.clear();
+        self.naming = false;
+        self.form += 1;
+    }
+
+    fn clear_partner_inputs(&self, ui: &mut Framework) {
+        ui.clear_input(&self.partner_id());
+        ui.clear_input(&self.partner_name());
+    }
+
+    pub fn editing_creation(&self) -> bool {
+        !matches!(self.submission, Some((_, Submission::Create)))
+    }
+
+    fn valid_partner(&self, id: Id, name: &str) -> Option<(Id, String)> {
+        (self.partners.len() < faith_client::MAX_MEMBERS - 1
+            && self.snapshot.auth != Some(id)
+            && !self.partners.iter().any(|(existing, _)| *existing == id))
+        .then(|| (id, name.trim().to_owned()))
+    }
+
+    pub fn add_partner(&mut self, ui: &mut Framework, partner: (Id, String)) {
+        self.partners.push(partner);
+        self.clear_partner_inputs(ui);
+        ui.focus_input(&self.partner_id());
+    }
+
+    pub fn default_title(&self) -> String {
+        let mut title = self
+            .partners
+            .iter()
+            .take(3)
+            .map(|(id, name)| partner_label(id, name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if self.partners.len() > 3 {
+            title.push_str(" & more");
+        }
+
+        title
+    }
+}
+
+fn partner_label(id: &Id, name: &str) -> String {
+    if name.is_empty() {
+        format!("{}…", &id.to_string()[..4])
+    } else {
+        name.to_owned()
+    }
+}
+
+fn input_style(ui: &Framework, enabled: bool) -> Style {
+    Style {
+        background: Some(ui.theme().input),
+        border_color: Some(ui.theme().border),
+        padding: 9.0,
+        radius: ui.corner_radii().control,
+        font_size: 14,
+        enabled,
+        ..ui.style()
+    }
+}
+
+fn bottom_inset(ui: &Framework, app: &App, normal: f32) -> f32 {
+    if ui.zoom_percent() != 100 {
+        64.0
+    } else if app.error.is_empty() {
+        normal
+    } else {
+        54.0
+    }
+}
+
+fn ready(app: &App) -> bool {
+    app.chat.snapshot.authorized
+        && !app.chat.snapshot.pending
+        && !app.chat.snapshot.delivering
+        && app.chat.submission.is_none()
+}
+
+fn compact_button(
+    ui: &mut Framework,
+    gpu: &mut Renderer,
+    text: &str,
+    enabled: bool,
+) -> anyhow::Result<bool> {
+    ui.push_style(Style {
+        enabled,
+        padding: 8.0,
+        font_size: 13,
+        radius: ui.corner_radii().control,
+        background: Some(ui.theme().button),
+        color: ui.theme().button_text,
+        ..ui.style()
+    });
+    let clicked = ui.button(gpu, text);
+    ui.pop_style();
+    clicked
+}
+
+pub fn creation(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Result<Action> {
+    let form = &app.chat;
+    let naming = form.naming;
+    let editing = form.editing_creation();
+    let width = (ui.div_width() - 48.0).clamp(1.0, 490.0);
+    let x = (ui.div_width() - width) * 0.5;
+    let bottom = (ui.div_height() - bottom_inset(ui, app, 24.0)).max(0.0);
+    let footer = (bottom - 42.0).max(26.0);
+    let title_id = form.title_id();
+    let mut action = Action::None;
+    let mut title = String::new();
+    let mut partner = None;
+    let can_continue;
+
+    ui.set_position(x, 14.0);
+    ui.div_begin_id(
+        if naming {
+            "chat-creation-name"
+        } else {
+            "chat-creation-partners"
+        },
+        DivOptions {
+            width: Some(width),
+            height: Some((footer - 28.0).max(1.0)),
+            scrollable: true,
+        },
+    )?;
+    label(
+        ui,
+        gpu,
+        if naming {
+            "Name your conversation"
+        } else {
+            "New conversation"
+        },
+        25,
+        true,
+        false,
+        false,
+    )?;
+    ui.space(24.0);
+
+    if naming {
+        let size = 76.0_f32.min(ui.div_width());
+        ui.set_position((ui.div_width() - size) * 0.5, ui.position().1);
+        ui.push_style(Style {
+            background: Some(ui.theme().primary),
+            radius: size * 0.5,
+            ..ui.style()
+        });
+        ui.div_begin(DivOptions {
+            width: Some(size),
+            height: Some(size),
+            ..Default::default()
+        })?;
+        ui.push_style(Style {
+            font_size: 32,
+            color: ui.theme().primary_text,
+            ..ui.style()
+        });
+        let icon_height = ui.text_size(GROUP, Some(Font::Icons))?.1;
+        ui.set_position(0.0, (size - icon_height) * 0.5);
+        ui.text_centered(gpu, GROUP, Some(Font::Icons))?;
+        ui.pop_style();
+        ui.div_end();
+        ui.pop_style();
+        ui.space(24.0);
+
+        title = form_input(
+            ui,
+            gpu,
+            "Conversation name",
+            &title_id,
+            "Name your group",
+            Some(256),
+            editing,
+        )?;
+        can_continue = !title.trim().is_empty() && ready(app);
+        if !editing {
+            ui.space(12.0);
+            label(ui, gpu, "Creating conversation…", 13, false, true, false)?;
+        } else if !ready(app) {
+            ui.space(12.0);
+            label(ui, gpu, &form.snapshot.status, 13, false, true, false)?;
+        }
+    } else {
+        let auth_id = form.partner_id();
+        let name_id = form.partner_name();
+        let auth = form_input(
+            ui,
+            gpu,
+            "Auth ID",
+            &auth_id,
+            "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+            None,
+            true,
+        )?;
+        ui.space(8.0);
+        label(
+            ui,
+            gpu,
+            "Paste the 32-character Auth ID from your partner",
+            12,
+            false,
+            true,
+            false,
+        )?;
+
+        ui.space(16.0);
+        let name = form_input(
+            ui,
+            gpu,
+            "Display name (optional)",
+            &name_id,
+            "Enter a display name",
+            Some(80),
+            true,
+        )?;
+        ui.space(8.0);
+        label(
+            ui,
+            gpu,
+            "The name displayed locally when texting your partner",
+            12,
+            false,
+            true,
+            false,
+        )?;
+
+        let entered_auth = auth.trim();
+        let parsed_auth = entered_auth.parse::<Id>().ok();
+        partner = parsed_auth.and_then(|id| form.valid_partner(id, &name));
+        let draft_empty = entered_auth.is_empty() && name.trim().is_empty();
+        can_continue = partner.is_some() || draft_empty && !form.partners.is_empty();
+        ui.space(12.0);
+        let add = command_button(
+            ui,
+            gpu,
+            "chat-add-partner",
+            ADD,
+            "Add partner",
+            partner.is_some(),
+            false,
+        )?;
+        if let Some((id, name)) = partner.as_ref()
+            && (add || ui.input_submitted(&auth_id) || ui.input_submitted(&name_id))
+        {
+            action = Action::AddChatPartner(*id, name.clone());
+        }
+
+        if !entered_auth.is_empty() && parsed_auth.is_none() {
+            ui.space(8.0);
+            label(
+                ui,
+                gpu,
+                "Enter a valid 32-character hex Auth ID from a partner. Ask them to send them theirs for you to paste it here.",
+                12,
+                false,
+                true,
+                false,
+            )?;
+        }
+
+        if !form.partners.is_empty() {
+            ui.space(22.0);
+            label(ui, gpu, "Partners", 13, true, false, false)?;
+            ui.space(8.0);
+            let mut x = 0.0;
+            let mut y = ui.position().1;
+            for (index, (id, name)) in form.partners.iter().enumerate() {
+                let title = partner_label(id, name);
+                ui.push_style(Style {
+                    font_size: 13,
+                    ..ui.style()
+                });
+                let width = (ui.text_size(&title, None)?.0 + 48.0).min(ui.div_width());
+                ui.pop_style();
+                if x > 0.0 && x + width > ui.div_width() {
+                    x = 0.0;
+                    y += 40.0;
+                }
+
+                ui.set_position(x, y);
+                ui.push_sizing(Some(width), Some(32.0));
+                if command_button(
+                    ui,
+                    gpu,
+                    &format!("chat-remove-{id}"),
+                    "\u{ea76}",
+                    &title,
+                    true,
+                    false,
+                )? {
+                    action = Action::RemoveChatPartner(index);
+                }
+
+                ui.pop_sizing();
+                x += width + 8.0;
+            }
+        }
+    }
+
+    ui.div_end();
+    ui.set_position(x, footer);
+    if command_button(
+        ui,
+        gpu,
+        "chat-cancel",
+        "",
+        if naming {
+            "Back"
+        } else {
+            "Cancel"
+        },
+        editing,
+        false,
+    )? {
+        action = if naming {
+            Action::EditChatPartners
+        } else {
+            Action::CancelConversation
+        };
+    }
+
+    let button_width = (if naming {
+        185.0_f32
+    } else {
+        112.0
+    })
+    .min(width);
+    ui.set_position(x + width - button_width, footer);
+    ui.push_sizing(Some(button_width), Some(42.0));
+    let advance = command_button(
+        ui,
+        gpu,
+        "chat-advance",
+        if naming {
+            NEW_CHAT
+        } else {
+            ""
+        },
+        if naming {
+            "Create conversation"
+        } else {
+            "Continue"
+        },
+        can_continue,
+        true,
+    )?;
+    ui.pop_sizing();
+    if can_continue && (advance || naming && ui.input_submitted(&title_id)) {
+        action = if naming {
+            Action::CreateConversation {
+                title: title.trim().to_owned(),
+                partners: form.partners.clone(),
+            }
+        } else {
+            Action::NameNewConversation(partner)
+        };
+    }
+
+    Ok(action)
+}
+
+fn form_input(
+    ui: &mut Framework,
+    gpu: &mut Renderer,
+    title: &str,
+    id: &str,
+    hint: &str,
+    max_chars: Option<usize>,
+    enabled: bool,
+) -> anyhow::Result<String> {
+    label(ui, gpu, title, 13, true, true, false)?;
+    ui.space(10.0);
+    ui.push_style(Style {
+        enabled,
+        ..crate::profile_input_style(ui)
+    });
+    let result = ui.input_with_hint(
+        gpu,
+        id,
+        InputOptions {
+            max_chars,
+            ..Default::default()
+        },
+        hint,
+    );
+    ui.pop_style();
+    result
+}
+
+fn command_button(
+    ui: &mut Framework,
+    gpu: &mut Renderer,
+    id: &str,
+    glyph: &str,
+    title: &str,
+    enabled: bool,
+    primary: bool,
+) -> anyhow::Result<bool> {
+    ui.push_style(Style {
+        enabled,
+        font_size: 13,
+        icon_font_size: Some(15),
+        padding: 10.0,
+        radius: 20.0,
+        center_button_content: true,
+        background: Some(if primary && enabled {
+            ui.theme().primary
+        } else {
+            ui.theme().button
+        }),
+        color: if !enabled {
+            ui.theme().muted
+        } else if primary {
+            ui.theme().primary_text
+        } else {
+            ui.theme().button_text
+        },
+        ..ui.style()
+    });
+    let result = ui.icon_label_button(gpu, id, glyph, title);
+    ui.pop_style();
+    result
+}
+
+fn conversation_overview(
+    ui: &mut Framework,
+    gpu: &mut Renderer,
+    app: &App,
+    snapshot: &client::Snapshot,
+) -> anyhow::Result<Action> {
+    let width = ui.div_width();
+    ui.set_position(28.0, 24.0);
+    ui.div_begin(DivOptions {
+        width: Some((width - 56.0).max(1.0)),
+        ..Default::default()
+    })?;
+    label(
+        ui,
+        gpu,
+        app.selected
+            .as_ref()
+            .map_or("Conversations", |p| p.alias.as_str()),
+        20,
+        true,
+        false,
+        false,
+    )?;
+
+    if !snapshot.status.is_empty() {
+        ui.push_style(Style {
+            font_size: 13,
+            color: if snapshot.authorized {
+                ui.theme().success
+            } else {
+                ui.theme().warning
+            },
+            ..ui.style()
+        });
+
+        ui.text(gpu, &snapshot.status, None)?;
+        ui.pop_style();
+    }
+
+    if let Some(notice) = snapshot.notices.last() {
+        label(ui, gpu, notice, 12, false, true, false)?;
+    }
+
+    let mut action = Action::None;
+    if snapshot.pending
+        && !snapshot.delivering
+        && let Some(profile) = &app.selected
+    {
+        if compact_button(ui, gpu, "Retry delivery", snapshot.authorized)? {
+            action = Action::RetryDelivery(profile.clone());
+        }
+
+        if compact_button(ui, gpu, "Discard pending delivery", true)? {
+            action = Action::DiscardDelivery(profile.clone());
+        }
+    }
+
+    ui.div_end();
+    let header_bottom = ui.position().1;
+
+    // Center the empty conversation view in its own column.
+    let top = (ui.div_height() * 0.5 - 38.0)
+        .max(200.0)
+        .max(header_bottom + 16.0);
+    ui.set_position(24.0, top);
+    ui.div_begin(DivOptions {
+        width: Some((width - 48.0).max(1.0)),
+        ..Default::default()
+    })?;
+
+    ui.push_style(Style {
+        font_size: 36,
+        color: ui.theme().muted,
+        ..ui.style()
+    });
+
+    ui.text_centered(gpu, CHATS, Some(Font::Icons))?;
+    ui.pop_style();
+    label(
+        ui,
+        gpu,
+        "A space for your conversations",
+        23,
+        true,
+        false,
+        true,
+    )?;
+    label(
+        ui,
+        gpu,
+        "Choose a conversation from the list to get started.",
+        14,
+        false,
+        true,
+        true,
+    )?;
+    ui.div_end();
+
+    if app.selected.is_some() && !snapshot.authorized {
+        // Centered reconnect button with centered content.
+        let button_width = (width - 56.0).min(220.0);
+        panel(
+            ui,
+            (width - button_width) / 2.0,
+            (ui.div_height() - 90.0)
+                .max(280.0)
+                .max(ui.position().1 + 16.0),
+            button_width,
+            52.0,
+            false,
+        )?;
+
+        ui.push_style(Style {
+            center_button_content: true,
+            ..ui.style()
+        });
+
+        let reconnect = row_button(ui, gpu, "reconnect", REFRESH, "Reconnect", false, false);
+        ui.pop_style();
+
+        if reconnect? {
+            action = Action::Retry;
+        }
+
+        end_panel(ui);
+    }
+
+    Ok(action)
+}
+
+pub fn conversation(
+    ui: &mut Framework,
+    gpu: &mut Renderer,
+    app: &App,
+    show_clipboard: bool,
+) -> anyhow::Result<(Action, Option<[f32; 2]>)> {
+    let snapshot = &app.chat.snapshot;
+    let Some(profile) = &app.selected else {
+        return Ok((conversation_overview(ui, gpu, app, snapshot)?, None));
+    };
+    let Some(chat) = snapshot
+        .conversations
+        .iter()
+        .find(|chat| Some(chat.id) == app.conversation)
+    else {
+        return Ok((conversation_overview(ui, gpu, app, snapshot)?, None));
+    };
+    let width = ui.div_width();
+    let height = ui.div_height();
+    let inner_width = (width - 40.0).max(1.0);
+    let mut action = Action::None;
+    ui.set_position(20.0, 12.0);
+    ui.div_begin(DivOptions {
+        width: Some(inner_width),
+        ..Default::default()
+    })?;
+    label(ui, gpu, &chat.title, 20, true, false, false)?;
+
+    if !snapshot.status.is_empty()
+        && (!snapshot.authorized || snapshot.pending || snapshot.delivering)
+    {
+        label(ui, gpu, &snapshot.status, 13, false, true, false)?;
+    }
+
+    if snapshot.pending && !snapshot.delivering {
+        if compact_button(ui, gpu, "Retry delivery", snapshot.authorized)? {
+            action = Action::RetryDelivery(profile.clone());
+        }
+
+        if compact_button(ui, gpu, "Discard pending delivery", true)? {
+            action = Action::DiscardDelivery(profile.clone());
+        }
+    } else if !snapshot.authorized
+        && !snapshot.status.is_empty()
+        && icon(ui, gpu, "reconnect", REFRESH, false, "Reconnect")?
+    {
+        action = Action::Retry;
+    }
+
+    ui.div_end();
+    let header = ui.position().1 + 10.0;
+
+    let bottom = (height - bottom_inset(ui, app, 18.0)).max(0.0);
+    let composer = (bottom - 47.0).max(header);
+    let clipboard_position = show_clipboard.then_some([20.0, (composer - 24.0).max(0.0)]);
+    let history_bottom = clipboard_position.map_or(composer, |position| position[1]);
+    let history = (history_bottom - header - 9.0).max(0.0);
+    if history > 0.0 {
+        messages(ui, gpu, app, chat.id, [20.0, header, inner_width, history])?;
+    }
+
+    let send_width = 44.0_f32.min(inner_width);
+    let input_width = (inner_width - send_width - 8.0).max(1.0);
+    let composer_id = app.chat.composer_id(chat.id);
+    panel(ui, 20.0, composer, input_width, 44.0, false)?;
+    ui.push_style(Style {
+        radius: 22.0,
+        padding: 12.0,
+        ..input_style(ui, app.chat.submission.is_none())
+    });
+    ui.push_sizing(None, Some(44.0));
+    let body = ui.input_with_hint(gpu, &composer_id, InputOptions::default(), "Message")?;
+    ui.pop_sizing();
+    ui.pop_style();
+    end_panel(ui);
+    ui.set_position(28.0 + input_width, composer);
+    ui.push_sizing(Some(send_width), Some(44.0));
+    let can_send = ready(app) && !body.trim().is_empty();
+    ui.push_style(Style {
+        font_size: 18,
+        radius: 22.0,
+        padding: 0.0,
+        background: Some(ui.theme().primary),
+        color: ui.theme().primary_text,
+        enabled: can_send,
+        ..ui.style()
+    });
+    let send = ui.icon_button(gpu, "chat-send", "")?;
+    ui.pop_style();
+    ui.pop_sizing();
+
+    if can_send && (send || ui.input_submitted(&composer_id)) {
+        action = Action::SendMessage { id: chat.id, body };
+    }
+
+    Ok((action, clipboard_position))
+}
+
+struct Bubble {
+    y: f32,
+    height: f32,
+    width: f32,
+}
+
+struct HistoryLayout {
+    messages: Arc<[client::Message]>,
+    limit: f32,
+    scale: f32,
+    extent: f32,
+    bubbles: Vec<Bubble>,
+}
+
+impl HistoryLayout {
+    fn measure(
+        ui: &mut Framework,
+        snapshot: &client::Snapshot,
+        limit: f32,
+    ) -> anyhow::Result<Self> {
+        let padding = limit.min(20.0) * 0.5;
+        let content = (limit - padding * 2.0).max(1.0);
+        let mut extent = 0.0;
+        let mut bubbles = Vec::with_capacity(snapshot.messages.len());
+        for message in snapshot.messages.iter() {
+            let author = author(snapshot, message);
+            ui.push_style(Style {
+                font_size: 14,
+                ..ui.style()
+            });
+            let body = ui.wrapped_text_size(&message.body, None, content);
+            ui.pop_style();
+            ui.push_style(Style {
+                font_size: 12,
+                ..ui.style()
+            });
+            let name = ui.wrapped_text_size(author, Some(Font::Bold), content);
+            ui.pop_style();
+            let (body, name) = (body?, name?);
+            let width = (body.0.max(name.0).ceil() + 2.0 * padding + 1.0).min(limit);
+            let height = body.1 + name.1 + 2.0 * padding;
+            bubbles.push(Bubble {
+                y: extent,
+                height,
+                width,
+            });
+            extent += height + 8.0;
+        }
+
+        Ok(Self {
+            messages: snapshot.messages.clone(),
+            limit,
+            scale: ui.layout_scale(),
+            extent,
+            bubbles,
+        })
+    }
+}
+
+fn author<'a>(snapshot: &client::Snapshot, message: &'a client::Message) -> &'a str {
+    if snapshot.auth == Some(message.sender) {
+        "You"
+    } else {
+        &message.author
+    }
+}
+
+fn messages(
+    ui: &mut Framework,
+    gpu: &mut Renderer,
+    app: &App,
+    chat: Id,
+    [x, y, width, height]: [f32; 4],
+) -> anyhow::Result<()> {
+    let snapshot = &app.chat.snapshot;
+    ui.set_position(x, y);
+    ui.div_begin_id(
+        &app.chat.composer_id(chat),
+        DivOptions {
+            width: Some(width),
+            height: Some(height),
+            scrollable: true,
+        },
+    )?;
+    ui.follow_scroll_end();
+
+    if snapshot.selected == Some(chat) {
+        let available = (ui.div_width() - 12.0).max(1.0);
+        let limit = (available * 0.77).clamp(1.0, 520.0);
+        if snapshot.messages.is_empty() {
+            label(ui, gpu, "No messages yet", 13, false, true, true)?;
+        }
+
+        let mut cache = app.chat.history_layout.borrow_mut();
+        if cache.as_ref().is_none_or(|layout| {
+            layout.limit != limit
+                || layout.scale != ui.layout_scale()
+                || !Arc::ptr_eq(&layout.messages, &snapshot.messages)
+        }) {
+            *cache = Some(HistoryLayout::measure(ui, snapshot, limit)?);
+        }
+
+        let layout = cache.as_ref().unwrap();
+        let top = ui.scroll_offset()[1];
+        let start = layout
+            .bubbles
+            .partition_point(|bubble| bubble.y + bubble.height < top);
+        let end = layout
+            .bubbles
+            .partition_point(|bubble| bubble.y <= top + height);
+        ui.space(layout.extent);
+        for (message, bubble) in snapshot.messages[start..end]
+            .iter()
+            .zip(&layout.bubbles[start..end])
+        {
+            let mine = snapshot.auth == Some(message.sender);
+            ui.set_position(
+                if mine {
+                    available - bubble.width
+                } else {
+                    0.0
+                },
+                bubble.y,
+            );
+            ui.push_style(Style {
+                padding: limit.min(20.0) * 0.5,
+                radius: ui.corner_radii().row,
+                background: Some(if mine {
+                    ui.theme().primary
+                } else {
+                    ui.theme().surface
+                }),
+                ..ui.style()
+            });
+            ui.div_begin_id(
+                &message.row_id.to_string(),
+                DivOptions {
+                    width: Some(bubble.width),
+                    height: Some(bubble.height),
+                    ..Default::default()
+                },
+            )?;
+            ui.push_style(Style {
+                padding: 0.0,
+                background: None,
+                ..ui.style()
+            });
+            if mine {
+                ui.push_style(Style {
+                    font_size: 12,
+                    color: ui.theme().primary_text,
+                    ..ui.style()
+                });
+                ui.text(gpu, author(snapshot, message), Some(Font::Bold))?;
+                ui.pop_style();
+                ui.push_style(Style {
+                    font_size: 14,
+                    color: ui.theme().primary_text,
+                    ..ui.style()
+                });
+                ui.text(gpu, &message.body, None)?;
+                ui.pop_style();
+            } else {
+                label(ui, gpu, author(snapshot, message), 12, true, true, false)?;
+                label(ui, gpu, &message.body, 14, false, false, false)?;
+            }
+
+            ui.pop_style();
+            ui.div_end();
+            ui.pop_style();
+        }
+    }
+
+    ui.div_end();
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn group_title_uses_three_partners_and_shortens_unnamed_ids() {
+        let state = State {
+            partners: vec![
+                (Id([1; 16]), "Alice".into()),
+                (Id([2; 16]), String::new()),
+                (Id([3; 16]), "Caren".into()),
+                (Id([4; 16]), "Dana".into()),
+            ],
+            ..State::default()
+        };
+
+        assert_eq!(state.default_title(), "Alice, 0202…, Caren & more");
+    }
+}

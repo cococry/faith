@@ -217,6 +217,20 @@ impl Platform {
         Ok(events)
     }
 
+    pub fn copy_text(&mut self, text: String) -> anyhow::Result<()> {
+        match self {
+            Self::X11(platform) => platform.copy_text(text),
+            Self::Wayland(platform) => platform.copy_text(text),
+        }
+    }
+
+    pub fn paste_text(&mut self, target: String) -> anyhow::Result<()> {
+        match self {
+            Self::X11(platform) => platform.paste_text(target),
+            Self::Wayland(platform) => platform.paste_text(target),
+        }
+    }
+
     /// Pointer snapshot for the most recent poll_events() batch.
     #[allow(dead_code)]
     pub fn mouse(&self) -> &Mouse {
