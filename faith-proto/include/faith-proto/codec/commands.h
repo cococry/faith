@@ -16,6 +16,13 @@
 #define FAITH_CONVERSATION_SIGNED_RESPONSE_SIZE \
   (FAITH_CONVERSATION_RESPONSE_SIZE + FAITH_ED25519_SIGNATURE_SIZE)
 
+/* Extended requests append the force flag. Extended signed responses append
+ * the force flag and opt-in flag to the decision before the signature. */
+#define FAITH_CONVERSATION_POLICY_REQUEST_SIZE (FAITH_CONVERSATION_REQUEST_SIZE + 1)
+#define FAITH_CONVERSATION_POLICY_RESPONSE_SIZE (FAITH_CONVERSATION_RESPONSE_SIZE + 2)
+#define FAITH_CONVERSATION_SIGNED_POLICY_RESPONSE_SIZE \
+  (FAITH_CONVERSATION_POLICY_RESPONSE_SIZE + FAITH_ED25519_SIGNATURE_SIZE)
+
 #define FAITH_COMMAND_ID_SIZE 16
 #define FAITH_COMMAND_TYPES(X)                                                 \
   X(FAITH_COMMAND_CREATE_CONVERSATION, 0)                                      \

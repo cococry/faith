@@ -1109,12 +1109,23 @@ client_dispatch_event(faith_client_t               *client,
   case FAITH_EVENT_CONVERSATION_REQUEST:
   case FAITH_EVENT_CONVERSATION_RESPONSE: {
     bool request = event->type == FAITH_EVENT_CONVERSATION_REQUEST;
-    size_t size = request ? FAITH_CONVERSATION_REQUEST_SIZE
-                          : FAITH_CONVERSATION_RESPONSE_SIZE;
+    bool force = request && event->data_size > FAITH_CONVERSATION_REQUEST_SIZE;
+    char inviter[FAITH_USERNAME_MAX + 1] = {0};
 
-    if (event->data_size != size ||
-        (!request && event->data[FAITH_CONVERSATION_REQUEST_SIZE] > 1))
+    if (force) {
+      size_t size = event->data_size - FAITH_CONVERSATION_POLICY_REQUEST_SIZE;
+      const char *name = (const char *)event->data + FAITH_CONVERSATION_POLICY_REQUEST_SIZE;
+
+      if (!size || event->data[FAITH_CONVERSATION_REQUEST_SIZE] != 1 ||
+          !faith_username_valid(name, size))
+        return FAITH_ERR_BAD_ENVELOPE;
+
+      memcpy(inviter, name, size);
+    } else if (request ? event->data_size != FAITH_CONVERSATION_REQUEST_SIZE
+                       : event->data_size != FAITH_CONVERSATION_RESPONSE_SIZE ||
+                             event->data[FAITH_CONVERSATION_REQUEST_SIZE] > 1) {
       return FAITH_ERR_BAD_ENVELOPE;
+    }
 
     if (client->store_event) {
       _FH_CHECK_RETURN(client->store_event(
@@ -1126,8 +1137,54 @@ client_dispatch_event(faith_client_t               *client,
     _FH_CHECK_RETURN(client_push_event_ex(
         client, request ? FAITH_EVENT_CONVERSATION_REQUEST_RECEIVED
                         : FAITH_EVENT_CONVERSATION_RESPONSE_RECEIVED,
-        event->seq_num, request ? 0 : event->data[FAITH_CONVERSATION_REQUEST_SIZE],
-        event->data, event->data + FAITH_CONVERSATION_ID_SIZE, NULL, NULL, 0));
+        event->seq_num, request ? force : event->data[FAITH_CONVERSATION_REQUEST_SIZE],
+        event->data, event->data + FAITH_CONVERSATION_ID_SIZE, inviter, NULL, 0));
+    break;
+  }
+
+  case FAITH_EVENT_CONVERSATION_USERNAMES: {
+    size_t offset = FAITH_CONVERSATION_ID_SIZE;
+
+    if (event->data_size <= offset)
+      return FAITH_ERR_BAD_ENVELOPE;
+
+    while (offset < event->data_size) {
+      if (event->data_size - offset < FAITH_CONVERSATION_USERNAME_ENTRY_FIXED)
+        return FAITH_ERR_BAD_ENVELOPE;
+
+      size_t size = event->data[offset + FAITH_AUTH_ID_SIZE];
+      offset += FAITH_CONVERSATION_USERNAME_ENTRY_FIXED;
+
+      if (!size || size > event->data_size - offset ||
+          !faith_username_valid((const char *)event->data + offset, size))
+        return FAITH_ERR_BAD_ENVELOPE;
+
+      offset += size;
+    }
+
+    if (client->store_event) {
+      _FH_CHECK_RETURN(client->store_event(
+          client->store_event_context, &client->ident.auth_id,
+          &client->ident.device_id, event->seq_num, event->type, event->data,
+          event->data_size));
+    }
+
+    char *copy = malloc(event->data_size);
+
+    if (!copy)
+      return FAITH_ERR_NOMEM;
+
+    memcpy(copy, event->data, event->data_size);
+    faith_status_code_t rc = client_push_event_ex(
+        client, FAITH_EVENT_CONVERSATION_USERNAMES_RECEIVED, event->seq_num, 0,
+        event->data, NULL, NULL, copy, event->data_size);
+
+    if (rc != FAITH_OK) {
+      free(copy);
+
+      return rc;
+    }
+
     break;
   }
 
@@ -2831,16 +2888,26 @@ faith_status_code_t faith_client_identity(faith_client_t    *client,
 faith_status_code_t faith_client_request_conversation(
     faith_client_t *client, const faith_conversation_id_t *conversation,
     const faith_auth_id_t *recipient) {
+  return faith_client_request_conversation_with_policy(
+      client, conversation, recipient, false);
+}
+
+faith_status_code_t faith_client_request_conversation_with_policy(
+    faith_client_t *client, const faith_conversation_id_t *conversation,
+    const faith_auth_id_t *recipient, bool force_username_disclosure) {
   if (!client || !conversation || !recipient ||
       faith_client_id_equal(*recipient, client->ident.auth_id))
     return FAITH_ERR_INVALID;
 
-  uint8_t payload[FAITH_CONVERSATION_REQUEST_SIZE];
+  uint8_t payload[FAITH_CONVERSATION_POLICY_REQUEST_SIZE];
   memcpy(payload, conversation->bytes, FAITH_CONVERSATION_ID_SIZE);
   memcpy(payload + FAITH_CONVERSATION_ID_SIZE, recipient->bytes,
          FAITH_AUTH_ID_SIZE);
+  payload[FAITH_CONVERSATION_REQUEST_SIZE] = force_username_disclosure;
 
-  return client_send_command(client, payload, sizeof(payload),
+  return client_send_command(client, payload,
+                             force_username_disclosure ? sizeof(payload)
+                                                       : FAITH_CONVERSATION_REQUEST_SIZE,
                              FAITH_COMMAND_CONVERSATION_REQUEST,
                              _notify_command_result);
 }
@@ -2848,27 +2915,47 @@ faith_status_code_t faith_client_request_conversation(
 faith_status_code_t faith_client_respond_conversation(
     faith_client_t *client, const faith_conversation_id_t *conversation,
     const faith_auth_id_t *requester, bool accepted) {
+  return faith_client_respond_conversation_with_policy(
+      client, conversation, requester, accepted, false, false);
+}
+
+faith_status_code_t faith_client_respond_conversation_with_policy(
+    faith_client_t *client, const faith_conversation_id_t *conversation,
+    const faith_auth_id_t *requester, bool accepted,
+    bool force_username_disclosure, bool disclose_username) {
   if (!client || !conversation || !requester ||
-      faith_client_id_equal(*requester, client->ident.auth_id))
+      faith_client_id_equal(*requester, client->ident.auth_id) ||
+      (disclose_username && (!accepted || force_username_disclosure)))
     return FAITH_ERR_INVALID;
 
-  uint8_t payload[FAITH_CONVERSATION_SIGNED_RESPONSE_SIZE];
+  uint8_t payload[FAITH_CONVERSATION_SIGNED_POLICY_RESPONSE_SIZE];
   memcpy(payload, conversation->bytes, FAITH_CONVERSATION_ID_SIZE);
   memcpy(payload + FAITH_CONVERSATION_ID_SIZE, requester->bytes,
          FAITH_AUTH_ID_SIZE);
   payload[FAITH_CONVERSATION_REQUEST_SIZE] = accepted;
+  payload[FAITH_CONVERSATION_RESPONSE_SIZE] = force_username_disclosure;
+  payload[FAITH_CONVERSATION_RESPONSE_SIZE + 1] = disclose_username;
 
-  uint8_t msg[FAITH_SIGNATURE_CONVERSATION_RESPONSE_SIZE];
-  faith_gen_sign_buf_conversation_response(msg, payload,
-                                          &client->ident.auth_id,
-                                          &client->ident.device_id);
+  uint8_t msg[FAITH_SIGNATURE_CONVERSATION_POLICY_RESPONSE_SIZE];
+  size_t msg_size = FAITH_SIGNATURE_CONVERSATION_RESPONSE_SIZE;
+  size_t signature_offset = FAITH_CONVERSATION_RESPONSE_SIZE;
+
+  if (force_username_disclosure || disclose_username) {
+    faith_gen_sign_buf_conversation_policy_response(
+        msg, payload, &client->ident.auth_id, &client->ident.device_id);
+    msg_size = FAITH_SIGNATURE_CONVERSATION_POLICY_RESPONSE_SIZE;
+    signature_offset = FAITH_CONVERSATION_POLICY_RESPONSE_SIZE;
+  } else {
+    faith_gen_sign_buf_conversation_response(
+        msg, payload, &client->ident.auth_id, &client->ident.device_id);
+  }
 
   size_t signature_size = 0;
   _FH_CHECK_RETURN(faith_gen_signature(
-      client->ident.keypair, payload + FAITH_CONVERSATION_RESPONSE_SIZE,
-      &signature_size, msg, sizeof(msg)));
+      client->ident.keypair, payload + signature_offset,
+      &signature_size, msg, msg_size));
 
-  return client_send_command(client, payload, sizeof(payload),
+  return client_send_command(client, payload, signature_offset + signature_size,
                              FAITH_COMMAND_CONVERSATION_RESPONSE,
                              _notify_command_result);
 }

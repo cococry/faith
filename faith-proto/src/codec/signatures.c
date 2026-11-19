@@ -85,3 +85,16 @@ void faith_gen_sign_buf_conversation_response(
   memcpy(out + domain_size + FAITH_CONVERSATION_RESPONSE_SIZE + FAITH_AUTH_ID_SIZE,
          device->bytes, FAITH_DEVICE_ID_SIZE);
 }
+
+void faith_gen_sign_buf_conversation_policy_response(
+    uint8_t out[FAITH_SIGNATURE_CONVERSATION_POLICY_RESPONSE_SIZE],
+    const uint8_t response[FAITH_CONVERSATION_POLICY_RESPONSE_SIZE],
+    const faith_auth_id_t *recipient, const faith_device_id_t *device) {
+  const size_t domain_size = sizeof(FAITH_CONVERSATION_POLICY_RESPONSE_DOMAIN) - 1;
+  memcpy(out, FAITH_CONVERSATION_POLICY_RESPONSE_DOMAIN, domain_size);
+  memcpy(out + domain_size, response, FAITH_CONVERSATION_POLICY_RESPONSE_SIZE);
+  memcpy(out + domain_size + FAITH_CONVERSATION_POLICY_RESPONSE_SIZE,
+         recipient->bytes, FAITH_AUTH_ID_SIZE);
+  memcpy(out + domain_size + FAITH_CONVERSATION_POLICY_RESPONSE_SIZE + FAITH_AUTH_ID_SIZE,
+         device->bytes, FAITH_DEVICE_ID_SIZE);
+}

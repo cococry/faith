@@ -29,7 +29,8 @@
   X(FAITH_EVENT_CONVERSATION_READY, 16)                                        \
   X(FAITH_EVENT_GROUP_RECEIVED, 17) \
   X(FAITH_EVENT_CONVERSATION_REQUEST_RECEIVED, 18) \
-  X(FAITH_EVENT_CONVERSATION_RESPONSE_RECEIVED, 19)
+  X(FAITH_EVENT_CONVERSATION_RESPONSE_RECEIVED, 19) \
+  X(FAITH_EVENT_CONVERSATION_USERNAMES_RECEIVED, 20)
 
 typedef enum {
 #define X(name, value) name = value,
@@ -125,15 +126,29 @@ faith_status_code_t faith_client_identity(faith_client_t    *client,
 /* Request each peer's approval before delivering packets for this conversation.
  * Request and response events carry the sequence in value0, conversation ID
  * in value0_128, and peer auth ID in value1_128. For responses, value1 is 1
- * on acceptance and 0 on denial. The store callback receives these events
+ * on acceptance and 0 on denial. For requests, value1 is 1 when usernames
+ * are required and message contains the inviter's disclosed username.
+ * Username notifications carry the conversation ID in value0_128 and the
+ * username event body in chat_message. The store callback receives these events
  * before acknowledgment, using the payload format in codec/commands.h. */
 faith_status_code_t faith_client_request_conversation(
     faith_client_t *client, const faith_conversation_id_t *conversation,
     const faith_auth_id_t *recipient);
 
+faith_status_code_t faith_client_request_conversation_with_policy(
+    faith_client_t *client, const faith_conversation_id_t *conversation,
+    const faith_auth_id_t *recipient, bool force_username_disclosure);
+
 faith_status_code_t faith_client_respond_conversation(
     faith_client_t *client, const faith_conversation_id_t *conversation,
     const faith_auth_id_t *requester, bool accepted);
+
+/* For a forced request, pass its policy flag and leave disclose_username false.
+ * For an optional request, disclose_username is signed along with acceptance. */
+faith_status_code_t faith_client_respond_conversation_with_policy(
+    faith_client_t *client, const faith_conversation_id_t *conversation,
+    const faith_auth_id_t *requester, bool accepted,
+    bool force_username_disclosure, bool disclose_username);
 
 /* Deliver a group packet after peers accept the conversation request. */
 faith_status_code_t
