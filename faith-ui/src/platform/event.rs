@@ -3,6 +3,9 @@ use super::mouse::{CursorPosition, MouseButton, ScrollDelta};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
     Enter,
+    SelectAll,
+    Copy,
+    Paste,
     Backspace,
     Delete,
     Left,
@@ -29,6 +32,10 @@ pub enum WindowEvent {
     },
     /// Committed UTF-8, after keyboard layout and compose processing.
     TextInput(String),
+    ClipboardText {
+        target: String,
+        text: String,
+    },
     KeyPressed {
         key: Key,
         control: bool,

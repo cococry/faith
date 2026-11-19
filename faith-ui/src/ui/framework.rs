@@ -54,6 +54,7 @@ pub struct Style {
     pub enabled: bool,
     /// Prefer this selected control when restoring keyboard focus.
     pub selected: bool,
+    pub tooltip: Option<&'static str>,
     /* siblings in this group share one moving selection background */
     pub selection_group: Option<&'static str>,
 }
@@ -78,6 +79,7 @@ impl Default for Style {
             rounded_corners: [true; 4],
             enabled: true,
             selected: false,
+            tooltip: None,
             selection_group: None,
         }
     }
@@ -116,6 +118,7 @@ struct OpenDiv {
     style: Style,
     decorations: Vec<super::renderer::BoxDecoration>,
     scroll_id: Option<u64>,
+    follow_scroll_end: bool,
     outer_clip: Bounds,
 }
 
@@ -189,7 +192,25 @@ pub struct ActionRow<'a> {
     pub selected: bool,
 }
 
+pub enum ClipboardAction {
+    Copy(String),
+    Paste(String),
+}
+
+#[derive(Clone, Copy)]
+struct Tooltip {
+    id: u64,
+    anchor: Bounds,
+    text: &'static str,
+}
+
 pub struct Framework {
+    hovered_tooltip: Option<Tooltip>,
+    tooltip_hover: Option<(u64, Instant)>,
+    tooltip: Option<Tooltip>,
+    tooltip_presence: Presence,
+    clipboard_actions: Vec<ClipboardAction>,
+    submitted_input: Option<String>,
     zoom: f32,
     zoom_step: u32,
     zoom_remainder: f64,
@@ -268,6 +289,12 @@ impl Framework {
     ) -> anyhow::Result<Self> {
         let (w, h) = platform.size();
         let mut framework = Self {
+            hovered_tooltip: None,
+            tooltip_hover: None,
+            tooltip: None,
+            tooltip_presence: Presence::default(),
+            clipboard_actions: Vec::new(),
+            submitted_input: None,
             zoom: 1.0,
             zoom_step: 10,
             zoom_remainder: 0.0,
@@ -944,6 +971,8 @@ impl Framework {
     }
 
     pub fn begin(&mut self, platform: &Platform, events: &[WindowEvent]) {
+        self.submitted_input = None;
+        self.hovered_tooltip = None;
         self.text_cursor = false;
         self.frame_time = Instant::now();
         self.layout_resized = events
@@ -1172,6 +1201,7 @@ impl Framework {
                 !matches!(
                     event,
                     WindowEvent::TextInput(_)
+                        | WindowEvent::ClipboardText { .. }
                         | WindowEvent::KeyPressed { .. }
                         | WindowEvent::FocusNext { .. }
                         | WindowEvent::MouseButtonPressed { .. }
@@ -1197,6 +1227,7 @@ impl Framework {
                         | WindowEvent::MouseButtonReleased { .. }
                         | WindowEvent::MouseScrolled { .. }
                         | WindowEvent::TextInput(_)
+                        | WindowEvent::ClipboardText { .. }
                         | WindowEvent::KeyPressed { .. }
                 )
             });
@@ -1229,6 +1260,72 @@ impl Framework {
         }
     }
 
+    fn render_tooltip<G: GraphicsDevice>(&mut self, gpu: &mut G) -> anyhow::Result<()> {
+        let mut show = false;
+        if let Some(hovered) = self.hovered_tooltip.take() {
+            let (_, since) = self
+                .tooltip_hover
+                .filter(|(id, _)| *id == hovered.id)
+                .unwrap_or((hovered.id, self.frame_time));
+            self.tooltip_hover = Some((hovered.id, since));
+            let deadline = since + Duration::from_secs(1);
+            show = self.frame_time >= deadline;
+            if show {
+                self.tooltip = Some(hovered);
+            } else {
+                self.animate_until(deadline);
+            }
+        } else {
+            self.tooltip_hover = None;
+        }
+
+        let Some(Tooltip { anchor, text, .. }) = self.tooltip else {
+            return Ok(());
+        };
+        let mut presence = std::mem::take(&mut self.tooltip_presence);
+        let reveal = self.presence(&mut presence, show);
+        self.tooltip_presence = presence;
+
+        if reveal <= 0.0 {
+            if !show {
+                self.tooltip = None;
+            }
+
+            return Ok(());
+        }
+
+        let font = self.font_at(Font::Regular, 12)?;
+        let metrics = self.text_renderer.measure(text, font)?;
+        let window = self.layouts[0].bounds;
+        let width = metrics.width + 18.0;
+        let height = metrics.height + 12.0;
+        let [x, y] = tooltip_position(anchor, window, width, height);
+        let mark = self.ui_renderer.mark();
+        self.set_position(x, y);
+        self.push_style(Style {
+            font_size: 12,
+            radius: self.corner_radii().control,
+            background: Some(self.theme.surface),
+            border_color: Some(self.theme.border),
+            ..self.base_style()
+        });
+        self.div_begin_reveal(
+            "tooltip",
+            DivOptions {
+                width: Some(width),
+                height: Some(height),
+                ..Default::default()
+            },
+            reveal,
+        )?;
+        self.set_position(9.0, 6.0);
+        let result = self.text(gpu, text, None);
+        self.div_end();
+        self.pop_style();
+        self.ui_renderer.fade_since(mark, reveal);
+        result
+    }
+
     pub fn end<G: GraphicsDevice>(&mut self, gpu: &mut G) -> anyhow::Result<()> {
         anyhow::ensure!(self.layouts.len() == 1, "unclosed div");
 
@@ -1252,6 +1349,7 @@ impl Framework {
         }
 
         self.pending_popups = popups;
+        self.render_tooltip(gpu)?;
 
         self.buttons.retain(|(label, occurrence), _| {
             self.button_occurrences
@@ -1308,6 +1406,10 @@ impl Framework {
 
     pub fn div_width(&self) -> f32 {
         self.layouts.last().unwrap().bounds.width
+    }
+
+    pub fn layout_scale(&self) -> f32 {
+        self.scale
     }
 
     pub fn div_height(&self) -> f32 {
@@ -1527,6 +1629,7 @@ impl Framework {
             style: s,
             decorations,
             scroll_id: options.scrollable.then_some(id),
+            follow_scroll_end: false,
             outer_clip: scroll_clip,
         });
 
@@ -1594,6 +1697,12 @@ impl Framework {
         Ok(())
     }
 
+    pub fn follow_scroll_end(&mut self) {
+        if let Some(div) = self.divs.last_mut() {
+            div.follow_scroll_end = true;
+        }
+    }
+
     pub fn div_end(&mut self) {
         assert!(self.layouts.len() > 1);
         self.ui_renderer.pop_clip();
@@ -1631,6 +1740,7 @@ impl Framework {
                 bounds,
                 extent,
                 [div.width.is_some(), div.height.is_some()],
+                div.follow_scroll_end,
             );
 
             if div.width.is_none() {
@@ -2480,6 +2590,50 @@ impl Framework {
             .image(rect[0], rect[1], rect[2], rect[3], image)
     }
 
+    fn paint_button(
+        &mut self,
+        key: (String, usize),
+        bounds: Bounds,
+        mut style: Style,
+        hovered: bool,
+        pressed: bool,
+    ) -> anyhow::Result<Style> {
+        let grouped = style.selection_group.is_some();
+        let morph = grouped && self.morphing();
+        if morph {
+            style = self.selection_style(bounds, style)?;
+        } else if grouped && !style.selected && style.background == Some(self.theme.surface) {
+            style.background = None;
+        }
+
+        let style = button::appearance(style, hovered, pressed);
+        let layout = *self.layouts.last().unwrap();
+        let geometry_key = morph.then(|| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            "button-hover".hash(&mut hasher);
+            key.hash(&mut hasher);
+            (layout.id, hasher.finish())
+        });
+        let style = self.animate_style(key, style);
+        let mut background = bounds;
+        if let Some(geometry_key) = geometry_key
+            && style.background.is_some()
+        {
+            if !hovered && !pressed {
+                let inset = [bounds.width * 0.03, bounds.height * 0.03];
+                background.x += inset[0];
+                background.y += inset[1];
+                background.width -= inset[0] * 2.0;
+                background.height -= inset[1] * 2.0;
+            }
+
+            background = self.animate_bounds(geometry_key, background, layout.bounds);
+        }
+
+        self.paint_style(background, style)?;
+        Ok(style)
+    }
+
     pub fn action_row<G: GraphicsDevice>(
         &mut self,
         gpu: &mut G,
@@ -2487,30 +2641,34 @@ impl Framework {
         row: ActionRow<'_>,
     ) -> anyhow::Result<button::Response> {
         let bounds = self.place_named(self.div_width(), 56.0, Some(id));
-        let hit = self.hit_bounds(bounds);
         let key = (id.to_owned(), 0);
         self.button_occurrences.insert(id.to_owned(), 1);
-        let response =
-            self.buttons
-                .entry(key)
-                .or_default()
-                .update(hit, self.batch_pointer, &self.events);
-        let highlighted = row.selected;
+        let response = if self.overlay {
+            let hit = self.hit_bounds(bounds);
+            self.buttons.entry(key.clone()).or_default().update(
+                hit,
+                self.batch_pointer,
+                &self.events,
+            )
+        } else {
+            self.button_response(key.clone(), bounds, self.style().enabled, row.selected)
+        };
+        let hovered = !self.overlay && response.hovered;
+        let pressed = !self.overlay && response.pressed;
         let style = Style {
-            background: highlighted
-                .then_some(button::highlight(self.theme.button, self.theme.button_text)),
-            color: if highlighted {
+            background: row.selected.then_some(self.theme.button),
+            color: if row.selected {
                 self.theme.button_text
             } else {
                 self.theme.text
             },
+            hover_text_color: Some(self.theme.button_text),
             radius: self.corner_radii().row,
             selected: row.selected,
             selection_group: Some("action-rows"),
             ..self.base_style()
         };
-        let style = self.selection_style(bounds, style)?;
-        self.paint_style(bounds, style)?;
+        let style = self.paint_button(key, bounds, style, hovered, pressed)?;
         let icons = self.font_at(Font::Icons, 20)?;
         let title = self.font_at(Font::Regular, 14)?;
         let detail = self.font_at(Font::Regular, 12)?;
@@ -2604,7 +2762,7 @@ impl Framework {
             .as_ref()
             .map_or(0.0, |(_, layout)| layout.width + 16.0);
 
-        let gap = if label.is_empty() {
+        let gap = if label.is_empty() || icon.is_empty() {
             0.0
         } else {
             10.0
@@ -2632,10 +2790,25 @@ impl Framework {
             return Ok(response.clicked);
         }
 
-        let s = self.selection_style(b, s)?;
-        let s = button::appearance(s, response.hovered, response.pressed);
-        let s = self.animate_style(key, s);
-        self.paint_style(b, s)?;
+        if let Some(tooltip) = s.tooltip
+            && s.enabled
+            && (!self.modal_input || self.overlay)
+            && self.active_dropdown.is_none()
+            && self
+                .pointer
+                .is_some_and(|pointer| contains(self.hit_bounds(b), pointer))
+        {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            self.layouts.last().unwrap().id.hash(&mut hasher);
+            key.hash(&mut hasher);
+            self.hovered_tooltip = Some(Tooltip {
+                id: hasher.finish(),
+                anchor: b,
+                text: tooltip,
+            });
+        }
+
+        let s = self.paint_button(key, b, s, response.hovered, response.pressed)?;
         // Keep horizontal padding while allowing the independently sized icon
         // and centered label to use the row's full height.
         self.ui_renderer.push_clip([
@@ -2751,9 +2924,12 @@ impl Framework {
         Ok(response.clicked)
     }
 
-    #[allow(dead_code)]
-    pub fn input<G: GraphicsDevice>(&mut self, gpu: &mut G, id: &str) -> anyhow::Result<String> {
-        self.input_with_options(gpu, id, InputOptions::default())
+    pub fn take_clipboard_actions(&mut self) -> Vec<ClipboardAction> {
+        std::mem::take(&mut self.clipboard_actions)
+    }
+
+    pub fn input_submitted(&self, id: &str) -> bool {
+        self.submitted_input.as_deref() == Some(id)
     }
 
     pub fn set_input(&mut self, id: &str, text: &str) {
@@ -2781,6 +2957,16 @@ impl Framework {
         id: &str,
         options: InputOptions,
     ) -> anyhow::Result<String> {
+        self.input_with_hint(gpu, id, options, "")
+    }
+
+    pub fn input_with_hint<G: GraphicsDevice>(
+        &mut self,
+        gpu: &mut G,
+        id: &str,
+        options: InputOptions,
+        hint: &str,
+    ) -> anyhow::Result<String> {
         let font = self.font(Font::Regular)?;
         let s = self.style();
         let b = self.place_named(
@@ -2803,7 +2989,7 @@ impl Framework {
         {
             self.text_cursor = true;
         }
-        if visible {
+        if s.enabled && (visible || self.reveal_focus && self.focused.as_deref() == Some(id)) {
             self.register_control(id, b, FocusKind::Input, false);
         }
 
@@ -2812,14 +2998,35 @@ impl Framework {
             .entry(id.into())
             .or_insert_with(|| InputField::new(4096));
         field.set_options(options);
-        dispatch_input(
-            field,
-            &mut self.focused,
-            id,
-            hit,
-            &self.events,
-            self.batch_pointer,
-        );
+        if visible
+            && s.enabled
+            && (!self.modal_input || self.overlay)
+            && self.active_dropdown.is_none()
+        {
+            let response = dispatch_input(
+                field,
+                &mut self.focused,
+                id,
+                hit,
+                &self.events,
+                self.batch_pointer,
+            );
+            if response.submitted.is_some() {
+                self.submitted_input = Some(id.to_owned());
+            }
+
+            if let Some(text) = response.copied {
+                self.clipboard_actions.push(ClipboardAction::Copy(text));
+            }
+
+            if response.paste {
+                self.clipboard_actions
+                    .push(ClipboardAction::Paste(id.to_owned()));
+            }
+        } else {
+            field.set_focused(false);
+        }
+
         if !visible {
             return Ok(field.text().to_owned());
         }
@@ -2845,10 +3052,72 @@ impl Framework {
             gpu,
             &mut self.ui_renderer,
         );
-        self.ui_renderer.pop_clip();
+        if field.text().is_empty() && !hint.is_empty() {
+            self.text_renderer.color = self.theme.muted;
+            let hint_result = self.text_renderer.render(
+                b.x + s.padding + 4.0,
+                b.y + s.padding,
+                hint,
+                font,
+                gpu,
+                &mut self.ui_renderer,
+            );
+            self.ui_renderer.pop_clip();
+            hint_result?;
+        } else {
+            self.ui_renderer.pop_clip();
+        }
+
         result?;
         Ok(field.text().to_owned())
     }
+}
+
+fn tooltip_position(anchor: Bounds, window: Bounds, width: f32, height: f32) -> [f32; 2] {
+    const GAP: f32 = 10.0;
+    let right = anchor.x + anchor.width;
+    let bottom = anchor.y + anchor.height;
+    let window_right = window.x + window.width;
+    let window_bottom = window.y + window.height;
+    let x_center = anchor.x + (anchor.width - width) * 0.5;
+    let y_center = anchor.y + (anchor.height - height) * 0.5;
+    let vertical = [
+        (window_bottom - bottom - height, [x_center, bottom + GAP]),
+        (
+            anchor.y - window.y - height,
+            [x_center, anchor.y - GAP - height],
+        ),
+    ];
+    let horizontal = [
+        (window_right - right - width, [right + GAP, y_center]),
+        (
+            anchor.x - window.x - width,
+            [anchor.x - GAP - width, y_center],
+        ),
+    ];
+    let near_side = (anchor.x - window.x).min(window_right - right) < anchor.width
+        || x_center < window.x
+        || x_center + width > window_right;
+    let (preferred, alternate) = if near_side {
+        (horizontal, vertical)
+    } else {
+        (vertical, horizontal)
+    };
+    let [x, y] = preferred
+        .into_iter()
+        .chain(alternate)
+        .find(|(space, _)| *space >= GAP)
+        .or_else(|| {
+            preferred
+                .into_iter()
+                .chain(alternate)
+                .max_by(|a, b| a.0.total_cmp(&b.0))
+        })
+        .map_or([x_center, y_center], |(_, position)| position);
+    [
+        x.clamp(window.x, (window_right - width).max(window.x)),
+        y.clamp(window.y, (window_bottom - height).max(window.y)),
+    ]
 }
 
 fn dispatch_input(
@@ -2858,7 +3127,8 @@ fn dispatch_input(
     bounds: Bounds,
     events: &[WindowEvent],
     mut pointer: Option<CursorPosition>,
-) {
+) -> super::widgets::input::InputResponse {
+    let mut result = super::widgets::input::InputResponse::default();
     field.set_focused(focused.as_deref() == Some(id));
 
     for event in events {
@@ -2883,10 +3153,26 @@ fn dispatch_input(
             _ => {}
         }
 
-        if !matches!(event, WindowEvent::FocusChanged(true)) {
-            field.handle(event);
-        }
+        let response = match event {
+            WindowEvent::ClipboardText { target, text }
+                if target == id && focused.as_deref() == Some(id) =>
+            {
+                field.handle(&WindowEvent::TextInput(text.clone()))
+            }
+
+            WindowEvent::FocusChanged(true) => {
+                field.set_focused(focused.as_deref() == Some(id));
+                continue;
+            }
+
+            _ => field.handle(event),
+        };
+        result.submitted = response.submitted.or(result.submitted);
+        result.copied = response.copied.or(result.copied);
+        result.paste |= response.paste;
     }
+
+    result
 }
 
 fn content_clip(b: Bounds, style: Style) -> [f32; 4] {
@@ -2904,4 +3190,38 @@ fn contains(b: Bounds, p: CursorPosition) -> bool {
         && p.y >= b.y as f64
         && p.x < (b.x + b.width) as f64
         && p.y < (b.y + b.height) as f64
+}
+
+#[cfg(test)]
+mod tooltip_tests {
+    use super::*;
+
+    #[test]
+    fn tooltips_use_the_side_with_clearance_at_window_edges() {
+        let window = Bounds {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 200.0,
+        };
+        let mut anchor = Bounds {
+            x: 16.0,
+            y: 16.0,
+            width: 40.0,
+            height: 40.0,
+        };
+        assert_eq!(tooltip_position(anchor, window, 120.0, 28.0), [66.0, 22.0]);
+
+        anchor.x = 344.0;
+        assert_eq!(tooltip_position(anchor, window, 120.0, 28.0), [214.0, 22.0]);
+
+        anchor.x = 180.0;
+        assert_eq!(tooltip_position(anchor, window, 120.0, 28.0), [140.0, 66.0]);
+
+        anchor.y = 150.0;
+        assert_eq!(
+            tooltip_position(anchor, window, 120.0, 28.0),
+            [140.0, 112.0]
+        );
+    }
 }

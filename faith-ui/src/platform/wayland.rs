@@ -7,7 +7,12 @@ use super::keyboard::{KeyRepeat, Keyboard};
 use super::mouse::{CursorPosition, Mouse, MouseButton, ScrollDelta};
 use super::window::WindowConfig;
 use crate::platform::window::WindowHandleInfo;
-use std::io::Read;
+use std::{
+    io::{Read, Write},
+    os::{fd::AsRawFd, unix::net::UnixStream},
+    sync::mpsc::{self, Receiver, Sender},
+    time::Duration,
+};
 use xkbcommon::xkb;
 
 use ash::vk::WaylandSurfaceCreateInfoKHR;
@@ -19,7 +24,8 @@ use nix::{
 use wayland_client::{
     Connection, Dispatch, EventQueue, Proxy, QueueHandle,
     protocol::{
-        wl_compositor, wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat, wl_surface,
+        wl_compositor, wl_data_device, wl_data_device_manager, wl_data_offer, wl_data_source,
+        wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat, wl_surface,
     },
 };
 
@@ -71,6 +77,12 @@ pub struct WaylandState {
     repeat: KeyRepeat,
     focused: bool,
     input_error: Option<String>,
+    data_manager: Option<wl_data_device_manager::WlDataDeviceManager>,
+    data_device: Option<wl_data_device::WlDataDevice>,
+    selection: Option<wl_data_offer::WlDataOffer>,
+    offers: Vec<(wl_data_offer::WlDataOffer, Option<String>)>,
+    source: Option<wl_data_source::WlDataSource>,
+    keyboard_serial: u32,
 }
 
 /// Wayland window platform implementation.
@@ -87,6 +99,9 @@ pub struct WaylandPlatform {
     // Eventfd used to wake the blocking Wayland
     // event poll from another thread.
     wake_fd: Arc<EventFd>,
+    pasted: Receiver<WindowEvent>,
+    paste_sender: Sender<WindowEvent>,
+    paste_in_progress: bool,
 }
 
 /// Marker type used as user data for Wayland
@@ -124,6 +139,14 @@ impl WaylandWaker {
 }
 
 impl WaylandState {
+    fn create_data_device(&mut self, qh: &QueueHandle<Self>) {
+        if self.data_device.is_none()
+            && let (Some(manager), Some(seat)) = (&self.data_manager, &self.seat)
+        {
+            self.data_device = Some(manager.get_data_device(seat, qh, ()));
+        }
+    }
+
     fn apply_cursor(&self) {
         if let (Some(device), Some(serial)) = (&self.cursor_device, self.cursor_serial) {
             device.set_shape(
@@ -279,6 +302,11 @@ impl Dispatch<wl_registry::WlRegistry, WaylandHandler> for WaylandState {
                     state.outputs.push((name, output, 0));
                 }
 
+                "wl_data_device_manager" => {
+                    state.data_manager = Some(registry.bind(name, version.min(3), qh, ()));
+                    state.create_data_device(qh);
+                }
+
                 "wl_seat" if state.seat.is_none() => {
                     state.seat = Some(registry.bind::<wl_seat::WlSeat, _, _>(
                         name,
@@ -287,6 +315,7 @@ impl Dispatch<wl_registry::WlRegistry, WaylandHandler> for WaylandState {
                         WaylandHandler,
                     ));
                     state.seat_name = Some(name);
+                    state.create_data_device(qh);
                 }
 
                 "wl_compositor" => {
@@ -356,6 +385,17 @@ impl Dispatch<wl_registry::WlRegistry, WaylandHandler> for WaylandState {
                 seat.release();
             }
 
+            if let Some(device) = state.data_device.take()
+                && device.version() >= 2
+            {
+                device.release();
+            }
+
+            for (offer, _) in state.offers.drain(..) {
+                offer.destroy();
+            }
+
+            state.selection = None;
             state.seat_name = None;
             state.keyboard = None;
             state.focused = false;
@@ -457,10 +497,11 @@ impl Dispatch<wl_keyboard::WlKeyboard, WaylandHandler> for WaylandState {
                 }
             }
 
-            wl_keyboard::Event::Enter { surface, .. }
-                if state.surface.as_ref() == Some(&surface) =>
-            {
+            wl_keyboard::Event::Enter {
+                surface, serial, ..
+            } if state.surface.as_ref() == Some(&surface) => {
                 state.focused = true;
+                state.keyboard_serial = serial;
                 state.repeat.cancel();
                 state.pending_events.push(WindowEvent::FocusChanged(true));
             }
@@ -498,21 +539,134 @@ impl Dispatch<wl_keyboard::WlKeyboard, WaylandHandler> for WaylandState {
             wl_keyboard::Event::RepeatInfo { rate, delay } => state.repeat.configure(rate, delay),
             wl_keyboard::Event::Key {
                 key,
+                serial,
                 state: WEnum::Value(key_state),
                 ..
             } if state.focused => {
+                state.keyboard_serial = serial;
                 let code = key + 8;
 
                 if key_state == wl_keyboard::KeyState::Pressed {
                     if let Some(keyboard) = &mut state.keyboard {
-                        state.pending_events.extend(keyboard.press(code));
-                        state
-                            .repeat
-                            .press(code, keyboard.keymap.key_repeats(xkb::Keycode::new(code)));
+                        let events = keyboard.press(code);
+                        let clipboard = events.iter().any(|event| {
+                            matches!(
+                                event,
+                                WindowEvent::KeyPressed {
+                                    key: super::event::Key::Copy | super::event::Key::Paste,
+                                    ..
+                                }
+                            )
+                        });
+                        state.pending_events.extend(events);
+                        state.repeat.press(
+                            code,
+                            !clipboard && keyboard.keymap.key_repeats(xkb::Keycode::new(code)),
+                        );
                     }
                 } else {
                     state.repeat.release(code);
                 }
+            }
+
+            _ => {}
+        }
+    }
+}
+
+const CLIPBOARD_UTF8: &str = "text/plain;charset=utf-8";
+
+wayland_client::delegate_noop!(WaylandState: ignore wl_data_device_manager::WlDataDeviceManager);
+
+impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandState {
+    wayland_client::event_created_child!(WaylandState, wl_data_device::WlDataDevice, [
+        wl_data_device::EVT_DATA_OFFER_OPCODE => (wl_data_offer::WlDataOffer, ()),
+    ]);
+
+    fn event(
+        state: &mut Self,
+        _: &wl_data_device::WlDataDevice,
+        event: wl_data_device::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_data_device::Event::DataOffer { id } => state.offers.push((id, None)),
+            wl_data_device::Event::Selection { id } => {
+                if let Some(previous) = state.selection.take()
+                    && Some(&previous) != id.as_ref()
+                {
+                    state.offers.retain(|(offer, _)| *offer != previous);
+                    previous.destroy();
+                }
+
+                state.selection = id;
+            }
+
+            wl_data_device::Event::Enter {
+                id: Some(offer), ..
+            } => {
+                state.offers.retain(|(other, _)| *other != offer);
+                offer.destroy();
+            }
+
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<wl_data_offer::WlDataOffer, ()> for WaylandState {
+    fn event(
+        state: &mut Self,
+        offer: &wl_data_offer::WlDataOffer,
+        event: wl_data_offer::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_data_offer::Event::Offer { mime_type } = event
+            && let Some((_, mime)) = state.offers.iter_mut().find(|(id, _)| id == offer)
+            && (mime_type.eq_ignore_ascii_case(CLIPBOARD_UTF8)
+                || mime.is_none() && mime_type == "text/plain")
+        {
+            *mime = Some(mime_type);
+        }
+    }
+}
+
+impl Dispatch<wl_data_source::WlDataSource, String> for WaylandState {
+    fn event(
+        state: &mut Self,
+        source: &wl_data_source::WlDataSource,
+        event: wl_data_source::Event,
+        text: &String,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_data_source::Event::Send { fd, .. } => {
+                // clipboard text from a field fits in a Linux pipe
+                let flags = unsafe { nix::libc::fcntl(fd.as_raw_fd(), nix::libc::F_GETFL) };
+                if flags >= 0
+                    && unsafe {
+                        nix::libc::fcntl(
+                            fd.as_raw_fd(),
+                            nix::libc::F_SETFL,
+                            flags | nix::libc::O_NONBLOCK,
+                        )
+                    } >= 0
+                {
+                    let _ = std::fs::File::from(fd).write_all(text.as_bytes());
+                }
+            }
+
+            wl_data_source::Event::Cancelled => {
+                if state.source.as_ref() == Some(source) {
+                    state.source = None;
+                }
+
+                source.destroy();
             }
 
             _ => {}
@@ -707,6 +861,12 @@ impl WaylandPlatform {
             repeat: KeyRepeat::default(),
             focused: false,
             input_error: None,
+            data_manager: None,
+            data_device: None,
+            selection: None,
+            offers: Vec::new(),
+            source: None,
+            keyboard_serial: 0,
         };
 
         conn.display().get_registry(&handle, WaylandHandler);
@@ -722,13 +882,70 @@ impl WaylandPlatform {
             EfdFlags::EFD_NONBLOCK | EfdFlags::EFD_CLOEXEC,
         )?);
 
+        let (paste_sender, pasted) = mpsc::channel();
         Ok(Self {
             conn,
             ev_queue,
             state,
             mouse: Mouse::default(),
             wake_fd,
+            pasted,
+            paste_sender,
+            paste_in_progress: false,
         })
+    }
+
+    pub fn copy_text(&mut self, text: String) -> anyhow::Result<()> {
+        let (Some(manager), Some(device)) = (&self.state.data_manager, &self.state.data_device)
+        else {
+            anyhow::bail!("Wayland clipboard is unavailable");
+        };
+        let source = manager.create_data_source(&self.ev_queue.handle(), text);
+        source.offer(CLIPBOARD_UTF8.into());
+        source.offer("text/plain".into());
+        device.set_selection(Some(&source), self.state.keyboard_serial);
+        self.state.source = Some(source);
+        self.flush_pending()?;
+        Ok(())
+    }
+
+    pub fn paste_text(&mut self, target: String) -> anyhow::Result<()> {
+        if self.paste_in_progress {
+            return Ok(());
+        }
+
+        let Some((offer, Some(mime))) = self
+            .state
+            .offers
+            .iter()
+            .find(|(offer, _)| Some(offer) == self.state.selection.as_ref())
+        else {
+            return Ok(());
+        };
+        let (reader, writer) = UnixStream::pair()?;
+        reader.set_read_timeout(Some(Duration::from_secs(2)))?;
+        let sender = self.paste_sender.clone();
+        let waker = self.waker();
+        std::thread::Builder::new()
+            .name("faith-clipboard".into())
+            .spawn(move || {
+                let mut bytes = Vec::new();
+                let _ = reader.take(16 * 1024).read_to_end(&mut bytes);
+                let text = String::from_utf8_lossy(&bytes).into_owned();
+                let _ = sender.send(WindowEvent::ClipboardText { target, text });
+                let _ = waker.request_redraw();
+            })?;
+        self.paste_in_progress = true;
+        offer.receive(mime.clone(), writer.as_fd());
+        self.flush_pending()?;
+        Ok(())
+    }
+
+    fn collect_clipboard(&mut self) {
+        if let Ok(event) = self.pasted.try_recv() {
+            self.paste_in_progress = false;
+            self.state.pending_events.push(event);
+        }
     }
 
     fn drain_wake_fd(&self) -> anyhow::Result<()> {
@@ -777,6 +994,7 @@ impl WaylandPlatform {
     }
 
     pub fn poll_events(&mut self) -> anyhow::Result<Vec<WindowEvent>> {
+        self.collect_clipboard();
         // Collect any already queued events
         while self.ev_queue.dispatch_pending(&mut self.state)? > 0 {}
 
@@ -871,6 +1089,7 @@ impl WaylandPlatform {
         // Respond to a requested redraw event
         if wake_readable {
             self.drain_wake_fd()?;
+            self.collect_clipboard();
             self.state.pending_events.push(WindowEvent::RedrawRequested);
         }
 

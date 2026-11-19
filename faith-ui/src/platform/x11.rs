@@ -21,7 +21,8 @@ use x11rb::protocol::Event;
 use x11rb::protocol::randr::{ConnectionExt as _, ModeFlag, NotifyMask};
 use x11rb::protocol::xproto::ConnectionExt as _;
 use x11rb::protocol::xproto::{
-    AtomEnum, CreateWindowAux, EventMask, PixmapEnum, PropMode, WindowClass,
+    AtomEnum, CreateWindowAux, EventMask, PixmapEnum, PropMode, Property, SELECTION_NOTIFY_EVENT,
+    SelectionNotifyEvent, SelectionRequestEvent, WindowClass,
 };
 
 use x11rb::wrapper::ConnectionExt as _;
@@ -33,6 +34,41 @@ use nix::unistd::read;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use x11::xlib::{_XDisplay, XDefaultScreen, XOpenDisplay};
 use x11::xlib_xcb::{XEventQueueOwner::XCBOwnsEventQueue, XGetXCBConnection, XSetEventQueueOwner};
+
+struct Clipboard {
+    selection: u32,
+    utf8: u32,
+    targets: u32,
+    property: u32,
+    incr: u32,
+    owned: Option<String>,
+    paste: Option<X11Paste>,
+}
+
+struct X11Paste {
+    target: String,
+    incremental: bool,
+    bytes: Vec<u8>,
+}
+
+impl Clipboard {
+    fn new(conn: &XCBConnection) -> anyhow::Result<Self> {
+        let selection = conn.intern_atom(false, b"CLIPBOARD")?;
+        let utf8 = conn.intern_atom(false, b"UTF8_STRING")?;
+        let targets = conn.intern_atom(false, b"TARGETS")?;
+        let property = conn.intern_atom(false, b"FAITH_CLIPBOARD")?;
+        let incr = conn.intern_atom(false, b"INCR")?;
+        Ok(Self {
+            selection: selection.reply()?.atom,
+            utf8: utf8.reply()?.atom,
+            targets: targets.reply()?.atom,
+            property: property.reply()?.atom,
+            incr: incr.reply()?.atom,
+            owned: None,
+            paste: None,
+        })
+    }
+}
 
 /// X11 window platform implementation.
 ///
@@ -58,6 +94,7 @@ pub struct X11Platform {
     context: xkb::Context,
     keyboard_device: i32,
     pending_input: Vec<WindowEvent>,
+    clipboard: Clipboard,
 
     // Eventfd used to wake the blocking X11
     // event poll from another thread.
@@ -164,7 +201,8 @@ impl X11Platform {
                         | EventMask::BUTTON_PRESS
                         | EventMask::BUTTON_RELEASE
                         | EventMask::ENTER_WINDOW
-                        | EventMask::LEAVE_WINDOW,
+                        | EventMask::LEAVE_WINDOW
+                        | EventMask::PROPERTY_CHANGE,
                 ),
         )?;
 
@@ -274,6 +312,7 @@ impl X11Platform {
             root,
             NotifyMask::SCREEN_CHANGE | NotifyMask::CRTC_CHANGE | NotifyMask::OUTPUT_CHANGE,
         );
+        let clipboard = Clipboard::new(&conn)?;
         let platform = Self {
             frame_timing: super::window::FrameTiming::default(),
             width: window_config.width,
@@ -289,6 +328,7 @@ impl X11Platform {
             context,
             keyboard_device,
             pending_input: Vec::new(),
+            clipboard,
             wake_fd,
         };
         let _ = platform.update_frame_timing();
@@ -389,6 +429,153 @@ impl X11Platform {
         Ok(())
     }
 
+    pub fn copy_text(&mut self, text: String) -> anyhow::Result<()> {
+        self.xcb_conn.set_selection_owner(
+            self.window,
+            self.clipboard.selection,
+            x11rb::CURRENT_TIME,
+        )?;
+        self.clipboard.owned = Some(text);
+        self.xcb_conn.flush()?;
+        Ok(())
+    }
+
+    pub fn paste_text(&mut self, target: String) -> anyhow::Result<()> {
+        self.clipboard.paste = Some(X11Paste {
+            target,
+            incremental: false,
+            bytes: Vec::new(),
+        });
+        self.request_clipboard(self.clipboard.utf8)?;
+        Ok(())
+    }
+
+    fn request_clipboard(&self, format: u32) -> anyhow::Result<()> {
+        self.xcb_conn.convert_selection(
+            self.window,
+            self.clipboard.selection,
+            format,
+            self.clipboard.property,
+            x11rb::CURRENT_TIME,
+        )?;
+        self.xcb_conn.flush()?;
+        Ok(())
+    }
+
+    fn serve_clipboard(&self, event: SelectionRequestEvent) -> anyhow::Result<()> {
+        let mut property = if event.property == 0 {
+            event.target
+        } else {
+            event.property
+        };
+        if let Some(text) = &self.clipboard.owned {
+            if event.target == self.clipboard.targets {
+                self.xcb_conn.change_property32(
+                    PropMode::REPLACE,
+                    event.requestor,
+                    property,
+                    AtomEnum::ATOM,
+                    &[
+                        self.clipboard.targets,
+                        self.clipboard.utf8,
+                        AtomEnum::STRING.into(),
+                    ],
+                )?;
+            } else if event.target == self.clipboard.utf8 {
+                self.xcb_conn.change_property8(
+                    PropMode::REPLACE,
+                    event.requestor,
+                    property,
+                    event.target,
+                    text.as_bytes(),
+                )?;
+            } else if event.target == u32::from(AtomEnum::STRING) {
+                let bytes: Vec<_> = text
+                    .chars()
+                    .map(|c| u8::try_from(c).unwrap_or(b'?'))
+                    .collect();
+                self.xcb_conn.change_property8(
+                    PropMode::REPLACE,
+                    event.requestor,
+                    property,
+                    event.target,
+                    &bytes,
+                )?;
+            } else {
+                property = 0;
+            }
+        } else {
+            property = 0;
+        }
+
+        self.xcb_conn.send_event(
+            false,
+            event.requestor,
+            EventMask::NO_EVENT,
+            SelectionNotifyEvent {
+                response_type: SELECTION_NOTIFY_EVENT,
+                sequence: 0,
+                time: event.time,
+                requestor: event.requestor,
+                selection: event.selection,
+                target: event.target,
+                property,
+            },
+        )?;
+        self.xcb_conn.flush()?;
+        Ok(())
+    }
+
+    fn read_clipboard(&mut self) -> anyhow::Result<()> {
+        let Some(paste) = &mut self.clipboard.paste else {
+            return Ok(());
+        };
+        let reply = self
+            .xcb_conn
+            .get_property(
+                true,
+                self.window,
+                self.clipboard.property,
+                AtomEnum::ANY,
+                0,
+                4096,
+            )?
+            .reply()?;
+        if reply.type_ == self.clipboard.incr {
+            paste.incremental = true;
+            return Ok(());
+        }
+
+        if reply.bytes_after != 0 {
+            self.xcb_conn
+                .delete_property(self.window, self.clipboard.property)?;
+            self.xcb_conn.flush()?;
+        }
+
+        if reply.format != 8 {
+            self.clipboard.paste = None;
+            return Ok(());
+        }
+
+        let remaining = 16384usize.saturating_sub(paste.bytes.len());
+        paste.bytes.extend(reply.value.iter().take(remaining));
+        if (!paste.incremental || reply.value.is_empty())
+            && let Some(paste) = self.clipboard.paste.take()
+        {
+            let text = if reply.type_ == u32::from(AtomEnum::STRING) {
+                paste.bytes.into_iter().map(char::from).collect()
+            } else {
+                String::from_utf8_lossy(&paste.bytes).into_owned()
+            };
+            self.pending_input.push(WindowEvent::ClipboardText {
+                target: paste.target,
+                text,
+            });
+        }
+
+        Ok(())
+    }
+
     fn collect_event(
         &mut self,
         raw_ev: Event,
@@ -398,6 +585,49 @@ impl X11Platform {
     ) {
         // Simply respond to a single event
         match raw_ev {
+            Event::SelectionRequest(e) if e.selection == self.clipboard.selection => {
+                if let Err(error) = self.serve_clipboard(e) {
+                    tracing::debug!("Could not serve X11 clipboard: {error}");
+                }
+            }
+
+            Event::SelectionClear(e) if e.selection == self.clipboard.selection => {
+                self.clipboard.owned = None;
+            }
+
+            Event::SelectionNotify(e)
+                if e.selection == self.clipboard.selection && e.requestor == self.window =>
+            {
+                let result = if e.property == self.clipboard.property {
+                    self.read_clipboard()
+                } else if e.property == 0
+                    && e.target == self.clipboard.utf8
+                    && self.clipboard.paste.is_some()
+                {
+                    self.request_clipboard(AtomEnum::STRING.into())
+                } else {
+                    self.clipboard.paste = None;
+                    Ok(())
+                };
+
+                if let Err(error) = result {
+                    self.clipboard.paste = None;
+                    tracing::debug!("Could not read X11 clipboard: {error}");
+                }
+            }
+
+            Event::PropertyNotify(e)
+                if e.window == self.window
+                    && e.atom == self.clipboard.property
+                    && e.state == Property::NEW_VALUE
+                    && self.clipboard.paste.as_ref().is_some_and(|p| p.incremental) =>
+            {
+                if let Err(error) = self.read_clipboard() {
+                    self.clipboard.paste = None;
+                    tracing::debug!("Could not read X11 clipboard: {error}");
+                }
+            }
+
             Event::ClientMessage(e) if e.data.as_data32()[0] == self.wm_delete_window => {
                 *close_requested = true;
             }

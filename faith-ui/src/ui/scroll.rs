@@ -528,9 +528,11 @@ impl Areas {
         bounds: Bounds,
         extent: [f32; 2],
         axes: [bool; 2],
+        follow_end: bool,
     ) -> (View, bool) {
         let state = self.states.get_mut(&id).unwrap();
         let old = state.view;
+        let at_end = state.target[1] >= old.maximum[1] - 1.0;
         state.extent = extent;
         state.configure(bounds, axes);
         let bounds = Bounds {
@@ -549,6 +551,12 @@ impl Areas {
             ..bounds
         };
         state.configure(bounds, axes);
+        if follow_end && at_end && old.maximum[1] != state.view.maximum[1] {
+            state.view.offset[1] = state.view.maximum[1];
+            state.target[1] = state.view.maximum[1];
+            state.from[1] = state.view.maximum[1];
+        }
+
         let changed = (axes[0] && old.viewport.width != state.view.viewport.width)
             || (axes[1] && old.viewport.height != state.view.viewport.height)
             || old.offset != state.view.offset;
