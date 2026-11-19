@@ -205,6 +205,9 @@ pub struct Framework {
     theme_animating: bool,
     animations: bool,
     layout_morphing: bool,
+    morph_duration: std::time::Duration,
+    morph_curve: Curve,
+    morph_strength: f32,
     layout_resized: bool,
     curve: Curve,
     transitions: HashMap<(String, usize), Transition>,
@@ -280,6 +283,9 @@ impl Framework {
             theme_animating: false,
             animations: true,
             layout_morphing: false,
+            morph_duration: MORPH_DURATION,
+            morph_curve: Curve::Cubic,
+            morph_strength: 0.5,
             layout_resized: false,
             curve: Curve::default(),
             transitions: HashMap::new(),
@@ -769,8 +775,14 @@ impl Framework {
         self.layout_morphing = enabled;
     }
 
+    pub fn set_morph_parameters(&mut self, duration_ms: u32, curve: Curve, strength: u32) {
+        self.morph_duration = std::time::Duration::from_millis(duration_ms.clamp(20, 1000) as u64);
+        self.morph_curve = curve;
+        self.morph_strength = strength.min(100) as f32 / 100.0;
+    }
+
     fn morphing(&self) -> bool {
-        self.animations && self.layout_morphing && !self.layout_resized
+        self.animations && self.layout_morphing && self.morph_strength > 0.0 && !self.layout_resized
     }
 
     pub fn animate_until(&mut self, at: Instant) {
@@ -822,15 +834,16 @@ impl Framework {
         let (value, active) = motion.update(
             target,
             self.frame_time,
-            Curve::Cubic,
+            self.morph_curve,
             enabled,
-            MORPH_DURATION,
+            self.morph_duration,
         );
 
         if active {
             self.animate_until(self.frame_time);
         }
 
+        let value = super::animation::morph_strength(target, value, self.morph_strength);
         Bounds {
             x: origin.x + value[0],
             y: origin.y + value[1],
@@ -1472,6 +1485,7 @@ impl Framework {
         let mut b = self.animate_bounds((id, u64::MAX), b, parent.bounds);
 
         if self.morphing() {
+            let reveal = 1.0 - (1.0 - reveal.clamp(0.0, 1.0)) * self.morph_strength;
             let revealed_width =
                 b.width.min(1.0) + (b.width - 1.0).max(0.0) * reveal.clamp(0.0, 1.0);
             let revealed_height =
