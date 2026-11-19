@@ -92,6 +92,25 @@ faith_status_code_t db_identity_resolve(faith_db_t        *db,
   else
     rc = job->link ? FAITH_ERR_UNAUTHORIZED : FAITH_ERR_NOT_FOUND;
 
+  if (rc == FAITH_OK && job->username[0]) {
+    const char *username_values[] = {values[0], job->username};
+    const int username_lengths[] = {lengths[0], 0};
+    const int username_formats[] = {1, 0};
+
+    res = PQexecParams(db->conn,
+                       "UPDATE users SET username = $2 WHERE auth_id = $1 "
+                       "AND username IS DISTINCT FROM $2",
+                       2, NULL, username_values, username_lengths,
+                       username_formats, 0);
+
+    if (!res || PQresultStatus(res) != PGRES_COMMAND_OK) {
+      const char *sqlstate = res ? PQresultErrorField(res, PG_DIAG_SQLSTATE) : NULL;
+      rc = sqlstate && strcmp(sqlstate, "23505") == 0
+               ? FAITH_ERR_ALREADY_EXISTS
+               : FAITH_ERR_IO;
+    }
+  }
+
 done:
   PQclear(res);
 

@@ -64,6 +64,8 @@ typedef struct {
   faith_client_store_event_fn store_event;
   void                       *store_event_context;
 
+  /* Optional account username to claim during authentication. */
+  const char *username;
 } faith_client_config_t;
 
 typedef struct {

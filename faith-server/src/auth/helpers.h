@@ -14,6 +14,7 @@ typedef struct {
   uint8_t           public_key[FAITH_ED25519_PUBLIC_KEY_SIZE];
   faith_auth_id_t   sender_auth_id;
   faith_device_id_t device_id;
+  char              username[FAITH_USERNAME_MAX + 1];
 } client_auth_handshake_params_t;
 
 #define _FH_FOR_EACH_AUTH_DEVICE_CONNECTION(SERVER, AUTH_ID, RECIPIENT,        \

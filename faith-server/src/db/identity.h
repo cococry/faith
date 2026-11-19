@@ -7,6 +7,7 @@ typedef struct {
   faith_auth_id_t     auth_id;
   db_user_device_t    device;
   bool                link;
+  char                username[FAITH_USERNAME_MAX + 1];
   faith_device_id_t   approver_id;
   uint8_t             approver_key[FAITH_ED25519_PUBLIC_KEY_SIZE];
   faith_status_code_t status;

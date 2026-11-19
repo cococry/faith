@@ -53,7 +53,9 @@ static void _identity_complete(void *owner, void *data,
   if (rc != FAITH_OK) {
     server_client_queue_disconnect(s, cl, FAITH_DISCONNECT_AUTH_FAILED,
                                    FAITH_CLIENT_RECONNECT_FORBIDDEN, 0, 0,
-                                   "Identity verification failed.");
+                                   rc == FAITH_ERR_ALREADY_EXISTS
+                                       ? "Username already taken."
+                                       : "Identity verification failed.");
   }
 }
 
@@ -85,7 +87,7 @@ faith_status_code_t auth_handle_hello(server_state_t *s, client_conn_t *cl,
     return FAITH_ERR_BAD_ENVELOPE;
   }
 
-  faith_envl_cts_hello_t hello;
+  faith_envl_cts_hello_t hello = {0};
   _FH_CHECK_RETURN(
       faith_decode_hello_body(hello_envl->body, hello_envl->body_size, &hello));
 
@@ -103,6 +105,7 @@ faith_status_code_t auth_handle_hello(server_state_t *s, client_conn_t *cl,
 
   params->server_nonce = server_nonce;
   params->nonce = hello.client_nonce;
+  memcpy(params->username, hello.username, sizeof(params->username));
 
   /* Send CHALLENGE envelope. */
 
@@ -217,9 +220,10 @@ faith_status_code_t auth_handle_challenge_response(
 
   sign_msg.client_nonce = params->nonce;
   sign_msg.server_nonce = params->server_nonce;
+  memcpy(sign_msg.username, params->username, sizeof(sign_msg.username));
 
   size_t  msg_size = 0;
-  uint8_t msg_buf[FAITH_SIGNATURE_HELLO_HANDSHAKE_SIZE];
+  uint8_t msg_buf[FAITH_SIGNATURE_HELLO_HANDSHAKE_SIZE_MAX];
   {
     _FH_CHECK(faith_gen_sign_buf_hello_handshake(msg_buf, &msg_size,
                                                  sizeof(msg_buf), &sign_msg));
@@ -238,7 +242,7 @@ faith_status_code_t auth_handle_challenge_response(
   faith_status_code_t verification_rc = FAITH_ERR_UNAUTHORIZED;
   {
     _FH_CHECK(faith_verify_signature_raw_pubkey(
-        verification_public_key, msg_buf, sizeof(msg_buf), client_signature,
+        verification_public_key, msg_buf, msg_size, client_signature,
         sizeof(client_signature)));
 
     verification_rc = _fh_rc;
@@ -254,12 +258,13 @@ faith_status_code_t auth_handle_challenge_response(
   /* Client passed authorization */
   /* =============================== */
 
-  if (!sess || faith_now_ms() - sess->verified_at_ms >= 30000) {
+  if (params->username[0] || !sess || faith_now_ms() - sess->verified_at_ms >= 30000) {
     db_identity_job_t job = {
         .client_id = cl->conn.id,
         .auth_id = params->sender_auth_id,
         .device.device_id = params->device_id,
     };
+    memcpy(job.username, params->username, sizeof(job.username));
     memcpy(job.device.public_key, params->public_key,
            FAITH_ED25519_PUBLIC_KEY_SIZE);
 

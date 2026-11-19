@@ -510,7 +510,14 @@ faith_status_code_t faith_encode_hello_body(uint8_t           *out_buf,
   FAITH_ENCODE_U64_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
                              in->client_nonce);
 
-  FAITH_ENCODE_EPILOGUE(FAITH_ENVL_CTS_HELLO_BODY_SIZE, !=);
+  size_t username_size = strnlen(in->username, sizeof(in->username));
+
+  if (!faith_username_valid(in->username, username_size))
+    return FAITH_ERR_INVALID;
+
+  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, in->username,
+                      username_size);
+  *out_size = offset;
 
   return FAITH_OK;
 }
@@ -519,7 +526,7 @@ faith_status_code_t faith_decode_hello_body(const uint8_t    *payload,
                                             faith_body_size_t payload_size,
                                             faith_envl_cts_hello_t *out) {
 
-  FAITH_DECODE_PROLOGUE(FAITH_ENVL_CTS_HELLO_BODY_SIZE, !=);
+  FAITH_DECODE_PROLOGUE(FAITH_ENVL_CTS_HELLO_BODY_SIZE, <);
 
   size_t offset = 0;
 
@@ -531,7 +538,13 @@ faith_status_code_t faith_decode_hello_body(const uint8_t    *payload,
 
   FAITH_DECODE_U64_BE_RETURN(payload, payload_size, offset, out->client_nonce);
 
-  FAITH_DECODE_EPILOGUE(FAITH_ENVL_CTS_HELLO_BODY_SIZE, !=);
+  size_t username_size = payload_size - offset;
+
+  if (!faith_username_valid((const char *)payload + offset, username_size))
+    return FAITH_ERR_INVALID;
+
+  memcpy(out->username, payload + offset, username_size);
+  out->username[username_size] = '\0';
 
   return FAITH_OK;
 }

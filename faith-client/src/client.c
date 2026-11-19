@@ -114,6 +114,7 @@ struct faith_client {
   uint16_t proto_ver;
 
   client_side_identity_t ident;
+  char username[FAITH_USERNAME_MAX + 1];
 
   faith_envl_stc_device_link_req_t *pending_device_link_req;
 
@@ -1753,13 +1754,14 @@ static faith_status_code_t faith_client_send_hello(faith_client_t *client) {
 
   faith_envl_cts_hello_t hello = {0};
   hello.device_id = client->ident.device_id;
+  memcpy(hello.username, client->username, sizeof(hello.username));
   memcpy(hello.public_key, client->ident.public_key,
          FAITH_ED25519_PUBLIC_KEY_SIZE);
 
   _FH_CHECK_RETURN(faith_random_bytes((uint8_t *)&hello.client_nonce,
                                       sizeof(hello.client_nonce)));
 
-  uint8_t           body[FAITH_ENVL_CTS_HELLO_BODY_SIZE] = {0};
+  uint8_t           body[FAITH_ENVL_CTS_HELLO_BODY_SIZE_MAX] = {0};
   faith_body_size_t body_size = 0;
 
   _FH_CHECK_RETURN(
@@ -1773,7 +1775,7 @@ static faith_status_code_t faith_client_send_hello(faith_client_t *client) {
   envl.sender_id = client->ident.auth_id;
 
   envl.body = body;
-  envl.body_size = sizeof(body);
+  envl.body_size = body_size;
 
   _FH_CHECK(client_send_envelope_locked(client, &envl));
 
@@ -1847,9 +1849,10 @@ client_handle_challenge(faith_client_t   *client,
 
   sign_msg.client_nonce = client->nonce_tmp;
   sign_msg.server_nonce = server_nonce;
+  memcpy(sign_msg.username, client->username, sizeof(sign_msg.username));
 
   size_t  msg_size = 0;
-  uint8_t msg_buf[FAITH_SIGNATURE_HELLO_HANDSHAKE_SIZE];
+  uint8_t msg_buf[FAITH_SIGNATURE_HELLO_HANDSHAKE_SIZE_MAX];
   {
     _FH_CHECK(faith_gen_sign_buf_hello_handshake(msg_buf, &msg_size,
                                                  sizeof(msg_buf), &sign_msg));
@@ -1871,7 +1874,7 @@ client_handle_challenge(faith_client_t   *client,
     /* This returns FAITH_ERR_SSL if signature_size !=
      * FAITH_ED25519_SIGNATURE_SIZE */
     _FH_CHECK(faith_gen_signature(client->ident.keypair, signature,
-                                  &signature_size, msg_buf, sizeof(msg_buf)));
+                                  &signature_size, msg_buf, msg_size));
 
     if (_fh_rc != FAITH_OK) {
       nob_log(ERROR, "Failed to generate signature for CHALLENGE_RESPONSE.");
@@ -2287,12 +2290,22 @@ faith_client_t *faith_client_create(const faith_client_config_t *cfg) {
   if (!cfg || !cfg->host)
     return NULL;
 
+  size_t username_size = cfg->username
+                             ? strnlen(cfg->username, FAITH_USERNAME_MAX + 1)
+                             : 0;
+
+  if (!faith_username_valid(cfg->username, username_size))
+    return NULL;
+
   faith_client_t *client = calloc(1, sizeof(*client));
 
   if (!client)
     return NULL;
 
   nob_set_log_handler(faith_log_handler);
+
+  if (username_size)
+    memcpy(client->username, cfg->username, username_size);
 
   client->sockfd = -1;
   client->event_fd = -1;
