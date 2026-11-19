@@ -281,6 +281,8 @@ device_link_handle_device_response(server_state_t *s, client_conn_t *cl,
         .link = true,
         .approver_id = cl->ident.device_id,
     };
+    memcpy(job.username, req_cl->temp_handshake_params.username,
+           sizeof(job.username));
     memcpy(job.device.public_key, req->public_key_new_device,
            FAITH_ED25519_PUBLIC_KEY_SIZE);
 

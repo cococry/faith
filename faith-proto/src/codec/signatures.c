@@ -25,7 +25,14 @@ faith_status_code_t faith_gen_sign_buf_hello_handshake(
   FAITH_ENCODE_U64_BE_RETURN(out_buf, buf_cap_in_bytes, offset,
                              in->server_nonce);
 
-  FAITH_ENCODE_EPILOGUE(FAITH_SIGNATURE_HELLO_HANDSHAKE_SIZE, !=);
+  size_t username_size = strnlen(in->username, sizeof(in->username));
+
+  if (!faith_username_valid(in->username, username_size))
+    return FAITH_ERR_INVALID;
+
+  FAITH_APPEND_RETURN(out_buf, buf_cap_in_bytes, offset, in->username,
+                      username_size);
+  *out_size = offset;
 
   return FAITH_OK;
 }

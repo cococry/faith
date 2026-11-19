@@ -266,11 +266,16 @@ pub struct Client {
 
 impl Client {
     pub fn new(config: Config) -> Result<Self> {
+        Self::new_with_username(config, None)
+    }
+
+    pub fn new_with_username(config: Config, username: Option<&str>) -> Result<Self> {
         static INIT: OnceLock<sys::faith_status_code_t> = OnceLock::new();
         status(*INIT.get_or_init(|| unsafe { sys::faith_client_init_global(0) }))?;
         fn string(bytes: &[u8]) -> Result<CString> {
             CString::new(bytes).map_err(|_| Error::Invalid("configuration contains NUL"))
         }
+        let username = username.map(|name| string(name.as_bytes())).transpose()?;
         let host = string(config.host.as_bytes())?;
         if host.as_bytes().len() >= 256 || config.port == 0 {
             return Err(Error::Invalid("invalid host or port"));
@@ -295,6 +300,7 @@ impl Client {
         let mut store = config.store.map(|s| Box::new(StoreContext(s)));
         let raw_config = sys::faith_client_config_t {
             host: host.as_ptr(),
+            username: username.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
             port: config.port,
             identity_path: identity.as_ptr(),
             server_name: name.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),

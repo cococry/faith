@@ -26,6 +26,9 @@
    FAITH_ED25519_PUBLIC_KEY_SIZE /* client public key */ +                     \
    sizeof(uint64_t) /* client nonce */ + sizeof(uint64_t) /* server nonce */)
 
+#define FAITH_SIGNATURE_HELLO_HANDSHAKE_SIZE_MAX \
+  (FAITH_SIGNATURE_HELLO_HANDSHAKE_SIZE + FAITH_USERNAME_MAX)
+
 typedef struct {
   faith_auth_id_t   auth_id;
   faith_device_id_t device_id;
@@ -33,6 +36,7 @@ typedef struct {
   uint8_t  public_key[FAITH_ED25519_PUBLIC_KEY_SIZE];
   uint64_t client_nonce;
   uint64_t server_nonce;
+  char     username[FAITH_USERNAME_MAX + 1];
 
 } faith_signature_hello_handshake_t;
 
