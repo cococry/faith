@@ -22,7 +22,17 @@
   X(FAITH_EVENT_CONVERSATION_CREATED, 0)                                       \
   X(FAITH_EVENT_GROUP_PACKET, 1) \
   X(FAITH_EVENT_CONVERSATION_REQUEST, 2) \
-  X(FAITH_EVENT_CONVERSATION_RESPONSE, 3)
+  X(FAITH_EVENT_CONVERSATION_RESPONSE, 3) \
+  X(FAITH_EVENT_CONVERSATION_USERNAMES, 4)
+
+/* A forced invitation appends the force flag (1) and the requesting owner's
+ * username to the legacy request event. The username has no terminator. */
+#define FAITH_CONVERSATION_REQUEST_EVENT_MAX \
+  (FAITH_CONVERSATION_ID_SIZE + FAITH_AUTH_ID_SIZE + 1 + FAITH_USERNAME_MAX)
+
+/* Conversation ID followed by one or more (auth ID, size, username) entries.
+ * Each username is 1 to FAITH_USERNAME_MAX bytes with no terminator. */
+#define FAITH_CONVERSATION_USERNAME_ENTRY_FIXED (FAITH_AUTH_ID_SIZE + 1)
 
 #define FAITH_EVENT_BATCH_MAX_EVENTS 256u
 #define FAITH_EVENT_DATA_MAX_SIZE    (UINT16_MAX - 16u)

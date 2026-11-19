@@ -4,7 +4,7 @@
 //! automatic ACK, so implementations must durably commit before returning.
 use faith_client_sys as sys;
 use std::{
-    ffi::{c_void, CString},
+    ffi::{CString, c_void},
     fmt,
     marker::PhantomData,
     os::fd::{AsRawFd, BorrowedFd},
@@ -238,6 +238,7 @@ pub enum EventKind {
     GroupReceived,
     ConversationRequest,
     ConversationResponse,
+    ConversationUsernames,
     Unknown(u32),
 }
 
@@ -252,6 +253,31 @@ pub struct Event {
 }
 
 impl Event {
+    /// Returns the disclosure requirement for a conversation request.
+    /// For a forced request, the inviter's username is in `message`.
+    pub fn conversation_requires_username(&self) -> Option<bool> {
+        (self.kind == EventKind::ConversationRequest).then_some(self.value1 == 1)
+    }
+
+    /// Returns the disclosed auth IDs and names in a conversation event.
+    pub fn conversation_usernames(&self) -> Option<Vec<(Id, &str)>> {
+        if self.kind != EventKind::ConversationUsernames {
+            return None;
+        }
+
+        let mut data = self.data.get(16..)?;
+        let mut names = Vec::new();
+        while !data.is_empty() {
+            let auth = Id(data.get(..16)?.try_into().ok()?);
+            let size = usize::from(*data.get(16)?);
+            let username = std::str::from_utf8(data.get(17..17 + size)?).ok()?;
+            names.push((auth, username));
+            data = &data[17 + size..];
+        }
+
+        Some(names)
+    }
+
     pub fn conversation_response(&self) -> Option<bool> {
         (self.kind == EventKind::ConversationResponse).then_some(self.value1 == 1)
     }
@@ -357,12 +383,26 @@ impl Client {
         Ok((Id(auth.bytes), Id(device.bytes)))
     }
     pub fn request_conversation(&self, conversation: Id, recipient: Id) -> Result<()> {
+        self.request_conversation_with_policy(conversation, recipient, false)
+    }
+
+    pub fn request_conversation_with_policy(
+        &self,
+        conversation: Id,
+        recipient: Id,
+        force_username_disclosure: bool,
+    ) -> Result<()> {
         let conversation = sys::faith_conversation_id_t {
             bytes: conversation.0,
         };
         let recipient = sys::faith_auth_id_t { bytes: recipient.0 };
         status(unsafe {
-            sys::faith_client_request_conversation(self.raw.as_ptr(), &conversation, &recipient)
+            sys::faith_client_request_conversation_with_policy(
+                self.raw.as_ptr(),
+                &conversation,
+                &recipient,
+                force_username_disclosure,
+            )
         })
     }
 
@@ -372,16 +412,29 @@ impl Client {
         requester: Id,
         accepted: bool,
     ) -> Result<()> {
+        self.respond_conversation_with_policy(conversation, requester, accepted, false, false)
+    }
+
+    pub fn respond_conversation_with_policy(
+        &self,
+        conversation: Id,
+        requester: Id,
+        accepted: bool,
+        force_username_disclosure: bool,
+        disclose_username: bool,
+    ) -> Result<()> {
         let conversation = sys::faith_conversation_id_t {
             bytes: conversation.0,
         };
         let requester = sys::faith_auth_id_t { bytes: requester.0 };
         status(unsafe {
-            sys::faith_client_respond_conversation(
+            sys::faith_client_respond_conversation_with_policy(
                 self.raw.as_ptr(),
                 &conversation,
                 &requester,
                 accepted,
+                force_username_disclosure,
+                disclose_username,
             )
         })
     }
@@ -462,6 +515,7 @@ impl Client {
             sys::FAITH_EVENT_GROUP_RECEIVED => EventKind::GroupReceived,
             sys::FAITH_EVENT_CONVERSATION_REQUEST_RECEIVED => EventKind::ConversationRequest,
             sys::FAITH_EVENT_CONVERSATION_RESPONSE_RECEIVED => EventKind::ConversationResponse,
+            sys::FAITH_EVENT_CONVERSATION_USERNAMES_RECEIVED => EventKind::ConversationUsernames,
             n => EventKind::Unknown(n),
         };
         let bytes: Vec<_> = raw

@@ -26,7 +26,7 @@ SELECT 'CREATE ROLE faith_app LOGIN' WHERE NOT EXISTS (SELECT 1 FROM pg_roles WH
 SELECT format('ALTER ROLE faith_app PASSWORD %L', :'app_password') \gexec
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 GRANT USAGE ON SCHEMA public TO faith_app;
-GRANT SELECT,INSERT,UPDATE,DELETE ON users,devices,device_event_inboxes,device_events,event_storage_usage TO faith_app;
+GRANT SELECT,INSERT,UPDATE,DELETE ON users,devices,device_event_inboxes,device_events,event_storage_usage,conversations,conversation_requests TO faith_app;
 GRANT EXECUTE ON FUNCTION expire_device_events() TO faith_app;
 COMMIT;
 SQL

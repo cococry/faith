@@ -16,6 +16,11 @@ typedef struct {
   faith_group_kind_t kind;
   faith_auth_id_t    targets[FAITH_GROUP_MAX_TARGETS];
   uint16_t           n_targets;
+  faith_auth_id_t    members[FAITH_GROUP_MAX_MEMBERS];
+  uint16_t           n_members;
+  faith_auth_id_t    removed[FAITH_GROUP_MAX_TARGETS];
+  uint16_t           n_removed;
+  uint64_t           revision;
   uint8_t           *payload;
   size_t             payload_size;
   db_events_job_t   *events;
@@ -24,6 +29,8 @@ typedef struct {
 static bool                _command(faith_db_t *db, const char *sql);
 static faith_status_code_t _check_approvals(faith_db_t *db,
                                             const conversation_job_t *job);
+static faith_status_code_t _remove_members(faith_db_t *db,
+                                           const conversation_job_t *job);
 static faith_status_code_t _create(faith_db_t *db, void *data);
 static void _complete(void *owner, void *data, faith_status_code_t status);
 static void _destroy(void *data);
@@ -39,14 +46,16 @@ static bool _command(faith_db_t *db, const char *sql) {
 static faith_status_code_t _check_approvals(faith_db_t *db,
                                             const conversation_job_t *job) {
   if (job->kind == FAITH_GROUP_CREATE)
-    _FH_CHECK_RETURN(conv_claim(db, job->conversation_id, &job->owner));
+    _FH_CHECK_RETURN(conv_claim(db, job->conversation_id, &job->owner, NULL));
 
   const char *values[] = {(const char *)job->conversation_id,
                           (const char *)job->owner.bytes,
-                          (const char *)job->targets};
+                          (const char *)job->members,
+                          (const char *)job->removed};
   const int lengths[] = {FAITH_CONVERSATION_ID_SIZE, FAITH_AUTH_ID_SIZE,
-                         job->n_targets * FAITH_AUTH_ID_SIZE};
-  const int formats[] = {1, 1, 1};
+                         job->n_members * FAITH_AUTH_ID_SIZE,
+                         job->n_removed * FAITH_AUTH_ID_SIZE};
+  const int formats[] = {1, 1, 1, 1};
   PGresult *res = PQexecParams(
       db->conn,
       "SELECT 1 FROM conversations c WHERE c.conversation_id = $1 "
@@ -56,8 +65,13 @@ static faith_status_code_t _check_approvals(faith_db_t *db,
       "AND NOT EXISTS (SELECT 1 FROM conversation_requests r "
       "WHERE r.conversation_id = c.conversation_id "
       "AND r.recipient_id = substring($3::bytea FROM t.pos FOR 16) "
-      "AND r.accepted IS TRUE))",
-      3, NULL, values, lengths, formats, 0);
+      "AND r.accepted IS TRUE)) AND NOT EXISTS ("
+      "SELECT 1 FROM generate_series(1, octet_length($4::bytea), 16) AS t(pos) "
+      "WHERE NOT EXISTS (SELECT 1 FROM conversation_requests r "
+      "WHERE r.conversation_id = c.conversation_id "
+      "AND r.recipient_id = substring($4::bytea FROM t.pos FOR 16) "
+      "AND (r.accepted IS TRUE OR r.removed))) FOR UPDATE OF c",
+      4, NULL, values, lengths, formats, 0);
   faith_status_code_t rc = FAITH_ERR_IO;
 
   if (res && PQresultStatus(res) == PGRES_TUPLES_OK)
@@ -68,6 +82,42 @@ static faith_status_code_t _check_approvals(faith_db_t *db,
   return rc;
 }
 
+static faith_status_code_t _remove_members(faith_db_t *db,
+                                           const conversation_job_t *job) {
+  char revision[21];
+  snprintf(revision, sizeof(revision), "%" PRIu64, job->revision);
+  const char *values[] = {(const char *)job->conversation_id, revision,
+                          (const char *)job->removed, (const char *)job->members};
+  const int lengths[] = {FAITH_CONVERSATION_ID_SIZE, 0,
+                         job->n_removed * FAITH_AUTH_ID_SIZE,
+                         job->n_members * FAITH_AUTH_ID_SIZE};
+  const int formats[] = {1, 0, 1, 1};
+  PGresult *res = PQexecParams(
+      db->conn,
+      "WITH revision AS (UPDATE conversations "
+      "SET disclosure_membership_revision = $2 WHERE conversation_id = $1 "
+      "AND (disclosure_membership_revision IS NULL OR disclosure_membership_revision < $2) "
+      "RETURNING conversation_id), membership AS ("
+      "SELECT r.recipient_id, r.recipient_id IN ("
+      "SELECT substring($4::bytea FROM t.pos FOR 16) "
+      "FROM generate_series(1, octet_length($4::bytea), 16) AS t(pos)) AS stays, "
+      "r.grouped OR r.recipient_id IN ("
+      "SELECT substring($3::bytea FROM t.pos FOR 16) "
+      "FROM generate_series(1, octet_length($3::bytea), 16) AS t(pos)) AS can_remove "
+      "FROM conversation_requests r JOIN revision USING (conversation_id) "
+      "WHERE r.accepted IS TRUE) "
+      "UPDATE conversation_requests r SET grouped = m.stays, "
+      "removed = NOT m.stays, accepted = m.stays, "
+      "disclosed_username = CASE WHEN m.stays THEN r.disclosed_username END "
+      "FROM membership m WHERE r.conversation_id = $1 AND r.recipient_id = m.recipient_id "
+      "AND (m.stays OR m.can_remove)",
+      4, NULL, values, lengths, formats, 0);
+  bool ok = res && PQresultStatus(res) == PGRES_COMMAND_OK;
+  PQclear(res);
+
+  return ok ? FAITH_OK : FAITH_ERR_IO;
+}
+
 static faith_status_code_t _create(faith_db_t *db, void *data) {
   conversation_job_t *job = data;
 
@@ -75,6 +125,9 @@ static faith_status_code_t _create(faith_db_t *db, void *data) {
     return FAITH_ERR_IO;
 
   faith_status_code_t rc = _check_approvals(db, job);
+
+  if (rc == FAITH_OK && job->kind != FAITH_GROUP_MESSAGE)
+    rc = _remove_members(db, job);
 
   for (size_t target = 0; target < job->n_targets && rc == FAITH_OK; target++) {
     db_user_device_list_t devices = {0};
@@ -192,6 +245,9 @@ conv_handle_group_delivery(server_state_t *s, client_conn_t *cl,
 
   job->owner = packet.members[0];
   job->kind = packet.kind;
+  job->revision = packet.revision;
+  job->n_members = packet.n_members;
+  memcpy(job->members, packet.members, packet.n_members * sizeof(packet.members[0]));
   memcpy(job->conversation_id, packet.conversation_id,
          sizeof(job->conversation_id));
   job->n_targets = count;
@@ -224,6 +280,19 @@ conv_handle_group_delivery(server_state_t *s, client_conn_t *cl,
       free(job);
 
       return FAITH_ERR_INVALID;
+    }
+  }
+
+  if (packet.kind == FAITH_GROUP_UPDATE) {
+    for (size_t i = 0; i < count; i++) {
+      bool stays = false;
+
+      for (size_t j = 0; j < packet.n_members; j++)
+        if (faith_client_id_equal(job->targets[i], packet.members[j]))
+          stays = true;
+
+      if (!stays)
+        job->removed[job->n_removed++] = job->targets[i];
     }
   }
 
