@@ -4,7 +4,7 @@
 //! automatic ACK, so implementations must durably commit before returning.
 use faith_client_sys as sys;
 use std::{
-    ffi::{CString, c_void},
+    ffi::{c_void, CString},
     fmt,
     marker::PhantomData,
     os::fd::{AsRawFd, BorrowedFd},
@@ -236,6 +236,8 @@ pub enum EventKind {
     CommandFailed,
     ConversationReady,
     GroupReceived,
+    ConversationRequest,
+    ConversationResponse,
     Unknown(u32),
 }
 
@@ -250,6 +252,10 @@ pub struct Event {
 }
 
 impl Event {
+    pub fn conversation_response(&self) -> Option<bool> {
+        (self.kind == EventKind::ConversationResponse).then_some(self.value1 == 1)
+    }
+
     pub fn group_result(&self) -> Option<bool> {
         (self.kind == EventKind::CommandResult
             && self.value0 == u64::from(sys::FAITH_COMMAND_GROUP_DELIVER))
@@ -350,6 +356,36 @@ impl Client {
         status(unsafe { sys::faith_client_identity(self.raw.as_ptr(), &mut auth, &mut device) })?;
         Ok((Id(auth.bytes), Id(device.bytes)))
     }
+    pub fn request_conversation(&self, conversation: Id, recipient: Id) -> Result<()> {
+        let conversation = sys::faith_conversation_id_t {
+            bytes: conversation.0,
+        };
+        let recipient = sys::faith_auth_id_t { bytes: recipient.0 };
+        status(unsafe {
+            sys::faith_client_request_conversation(self.raw.as_ptr(), &conversation, &recipient)
+        })
+    }
+
+    pub fn respond_conversation(
+        &self,
+        conversation: Id,
+        requester: Id,
+        accepted: bool,
+    ) -> Result<()> {
+        let conversation = sys::faith_conversation_id_t {
+            bytes: conversation.0,
+        };
+        let requester = sys::faith_auth_id_t { bytes: requester.0 };
+        status(unsafe {
+            sys::faith_client_respond_conversation(
+                self.raw.as_ptr(),
+                &conversation,
+                &requester,
+                accepted,
+            )
+        })
+    }
+
     pub fn deliver_group(&self, packet: &GroupPacket, targets: &[Id]) -> Result<()> {
         if targets.is_empty() || targets.len() > sys::FAITH_GROUP_MAX_TARGETS as usize {
             return Err(Error::Invalid("invalid delivery targets"));
@@ -424,6 +460,8 @@ impl Client {
             sys::FAITH_EVENT_COMMAND_FAILED => EventKind::CommandFailed,
             sys::FAITH_EVENT_CONVERSATION_READY => EventKind::ConversationReady,
             sys::FAITH_EVENT_GROUP_RECEIVED => EventKind::GroupReceived,
+            sys::FAITH_EVENT_CONVERSATION_REQUEST_RECEIVED => EventKind::ConversationRequest,
+            sys::FAITH_EVENT_CONVERSATION_RESPONSE_RECEIVED => EventKind::ConversationResponse,
             n => EventKind::Unknown(n),
         };
         let bytes: Vec<_> = raw

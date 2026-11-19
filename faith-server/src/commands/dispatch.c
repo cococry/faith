@@ -114,8 +114,25 @@ faith_status_code_t command_dispatch(server_state_t *s, client_conn_t *cl,
   s->command_count++;
 
   switch (cmd.type) {
+  case FAITH_COMMAND_CONVERSATION_REQUEST:
+  case FAITH_COMMAND_CONVERSATION_RESPONSE:
   case FAITH_COMMAND_GROUP_DELIVER: {
-    faith_status_code_t rc = conv_handle_group_delivery(s, cl, &cmd);
+    faith_status_code_t rc;
+
+    if (cmd.type == FAITH_COMMAND_CONVERSATION_REQUEST)
+      rc = conv_handle_conversation_request(s, cl, &cmd);
+    else if (cmd.type == FAITH_COMMAND_CONVERSATION_RESPONSE)
+      rc = conv_handle_conversation_response(s, cl, &cmd);
+    else
+      rc = conv_handle_group_delivery(s, cl, &cmd);
+
+    if (rc == FAITH_ERR_INVALID || rc == FAITH_ERR_UNAUTHORIZED ||
+        rc == FAITH_ERR_NOT_EQUAL)
+      rc = command_queue_result(s, cl, &cmd.cmd_id, cmd.type,
+                                rc == FAITH_ERR_INVALID
+                                    ? FAITH_COMMAND_ERR_BAD_COMMAND
+                                    : FAITH_COMMAND_ERR_UNAUTHORIZED,
+                                FAITH_COMMAND_RESULT_REJECTED);
     free(cmd.payload);
 
     return rc;

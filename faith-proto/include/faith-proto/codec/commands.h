@@ -3,13 +3,25 @@
 #include <stdint.h>
 
 #include "../core/core.h"
+#include "application.h"
 #include "auth.h"
 #include "core_types.h"
+
+/* Request command/event: conversation ID, then peer auth ID.
+ * Response command/event: same fields, followed by decision (0 deny, 1 accept).
+ * Response commands append the device signature. */
+#define FAITH_CONVERSATION_REQUEST_SIZE \
+  (FAITH_CONVERSATION_ID_SIZE + FAITH_AUTH_ID_SIZE)
+#define FAITH_CONVERSATION_RESPONSE_SIZE (FAITH_CONVERSATION_REQUEST_SIZE + 1)
+#define FAITH_CONVERSATION_SIGNED_RESPONSE_SIZE \
+  (FAITH_CONVERSATION_RESPONSE_SIZE + FAITH_ED25519_SIGNATURE_SIZE)
 
 #define FAITH_COMMAND_ID_SIZE 16
 #define FAITH_COMMAND_TYPES(X)                                                 \
   X(FAITH_COMMAND_CREATE_CONVERSATION, 0)                                      \
-  X(FAITH_COMMAND_GROUP_DELIVER, 1)
+  X(FAITH_COMMAND_GROUP_DELIVER, 1) \
+  X(FAITH_COMMAND_CONVERSATION_REQUEST, 2) \
+  X(FAITH_COMMAND_CONVERSATION_RESPONSE, 3)
 
 typedef enum {
 #define X(name, value) name = value,
