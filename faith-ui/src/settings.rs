@@ -27,6 +27,9 @@ pub struct Settings {
     #[serde(default = "animations_default")]
     pub animations: bool,
     pub layout_morphing: bool,
+    pub morph_duration_ms: u32,
+    pub morph_curve: Curve,
+    pub morph_strength: u32,
     pub animation_curve: Curve,
     pub smooth_scrolling: bool,
     pub zoom_step: u32,
@@ -39,6 +42,8 @@ impl Settings {
             Ok(bytes) => {
                 let mut settings: Self = serde_json::from_slice(&bytes)
                     .with_context(|| format!("Could not read settings from {}", path.display()))?;
+                settings.morph_strength = settings.morph_strength.min(100);
+                settings.morph_duration_ms = settings.morph_duration_ms.clamp(20, 1000);
                 settings.zoom_step = settings.zoom_step.clamp(1, 50);
                 settings.default_zoom = crate::ui::widgets::slider::Options {
                     min: 50,
@@ -187,6 +192,9 @@ impl Default for Settings {
             rounded_corners: true,
             animations: true,
             layout_morphing: false,
+            morph_duration_ms: crate::ui::animation::MORPH_DURATION.as_millis() as u32,
+            morph_curve: Curve::Cubic,
+            morph_strength: 50,
             animation_curve: Curve::default(),
             smooth_scrolling: false,
             zoom_step: 10,
@@ -210,6 +218,24 @@ pub fn confirmation_deadline(saved: Instant, now: Instant, enabled: bool) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn morph_parameters_preserve_legacy_defaults_and_custom_values() {
+        let mut settings: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.morph_duration_ms, 100);
+        assert_eq!(settings.morph_strength, 50);
+        assert_eq!(settings.morph_curve, Curve::Cubic);
+        for curve in Curve::ALL {
+            settings.morph_duration_ms = 1000;
+            settings.morph_strength = 35;
+            settings.morph_curve = curve;
+            let saved = serde_json::to_string(&settings).unwrap();
+            let restored: Settings = serde_json::from_str(&saved).unwrap();
+            assert_eq!(restored.morph_duration_ms, 1000);
+            assert_eq!(restored.morph_strength, 35);
+            assert_eq!(restored.morph_curve, curve);
+        }
+    }
 
     #[test]
     fn layout_morphing_is_opt_in_and_persists_independently() {

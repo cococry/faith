@@ -434,3 +434,28 @@ mod responsiveness_tests {
         }
     }
 }
+
+// Scale visual displacement while preserving the final layout bounds.
+pub fn morph_strength(target: [f32; 4], animated: [f32; 4], strength: f32) -> [f32; 4] {
+    std::array::from_fn(|i| target[i] + (animated[i] - target[i]) * strength.clamp(0.0, 1.0))
+}
+
+#[cfg(test)]
+mod strength_tests {
+    use super::*;
+
+    #[test]
+    fn strength_scales_displacement_and_preserves_final_bounds() {
+        let target = [100.0, 200.0, 300.0, 400.0];
+        let animated = [20.0, 40.0, 60.0, 80.0];
+        assert_eq!(morph_strength(target, animated, 0.0), target);
+        assert_eq!(morph_strength(target, animated, 1.0), animated);
+        assert_eq!(
+            morph_strength(target, animated, 0.5),
+            [60.0, 120.0, 180.0, 240.0]
+        );
+        for strength in [0.0, 0.25, 0.5, 1.0] {
+            assert_eq!(morph_strength(target, target, strength), target);
+        }
+    }
+}

@@ -97,6 +97,10 @@ enum Action {
     Rounded(bool),
     Animations(bool),
     LayoutMorphing(bool),
+    ToggleMorphAdvanced,
+    MorphStrength(u32),
+    MorphDuration(u32),
+    MorphCurve(Curve),
     AnimationCurve(Curve),
     SmoothScrolling(bool),
     ZoomStep(u32),
@@ -122,6 +126,10 @@ struct App {
     rounded: bool,
     animations: bool,
     layout_morphing: bool,
+    morph_duration_ms: u32,
+    morph_curve: Curve,
+    morph_strength: u32,
+    morph_advanced: bool,
     animation_curve: Curve,
     smooth_scrolling: bool,
     zoom_step: u32,
@@ -162,6 +170,9 @@ impl App {
             rounded_corners: self.rounded,
             animations: self.animations,
             layout_morphing: self.layout_morphing,
+            morph_duration_ms: self.morph_duration_ms,
+            morph_curve: self.morph_curve,
+            morph_strength: self.morph_strength,
             animation_curve: self.animation_curve,
             smooth_scrolling: self.smooth_scrolling,
             zoom_step: self.zoom_step,
@@ -402,6 +413,38 @@ impl App {
             Action::LayoutMorphing(enabled) => {
                 self.layout_morphing = enabled;
                 ui.set_layout_morphing(enabled);
+                self.save_settings();
+            }
+
+            Action::ToggleMorphAdvanced => self.morph_advanced = !self.morph_advanced,
+
+            Action::MorphStrength(strength) => {
+                self.morph_strength = strength.min(100);
+                ui.set_morph_parameters(
+                    self.morph_duration_ms,
+                    self.morph_curve,
+                    self.morph_strength,
+                );
+                self.save_settings();
+            }
+
+            Action::MorphDuration(duration) => {
+                self.morph_duration_ms = duration.clamp(20, 1000);
+                ui.set_morph_parameters(
+                    self.morph_duration_ms,
+                    self.morph_curve,
+                    self.morph_strength,
+                );
+                self.save_settings();
+            }
+
+            Action::MorphCurve(curve) => {
+                self.morph_curve = curve;
+                ui.set_morph_parameters(
+                    self.morph_duration_ms,
+                    self.morph_curve,
+                    self.morph_strength,
+                );
                 self.save_settings();
             }
 
@@ -1425,6 +1468,10 @@ fn misc_settings_page(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyh
     ui.pop_sizing();
     ui.space(24.0);
     let animations = ui.checkbox(gpu, "settings-animations", "UI animations", app.animations)?;
+    let mut toggle_morph_advanced = false;
+    let mut morph_strength = None;
+    let mut morph_duration = None;
+    let mut morph_curve = None;
     let layout_morphing = if app.animations {
         ui.space(8.0);
         let y = ui.position().1;
@@ -1442,6 +1489,88 @@ fn misc_settings_page(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyh
             "Layout morphing animations",
             app.layout_morphing,
         )?;
+        ui.space(8.0);
+        ui.push_style(Style {
+            font_size: 13,
+            icon_font_size: Some(16),
+            padding: 6.0,
+            color: ui.theme().muted,
+            background: None,
+            border_color: None,
+            radius: ui.corner_radii().control,
+            selected: false,
+            selection_group: None,
+            ..ui.style()
+        });
+        ui.push_sizing(Some(ui.div_width().min(200.0)), Some(32.0));
+        toggle_morph_advanced = ui.icon_label_button(
+            gpu,
+            "settings-morph-advanced",
+            if app.morph_advanced {
+                "\u{f0143}"
+            } else {
+                "\u{f0140}"
+            },
+            "Advanced options",
+        )?;
+        ui.pop_sizing();
+        ui.pop_style();
+        if app.morph_advanced {
+            ui.space(16.0);
+            ui.push_sizing(Some(ui.div_width().min(340.0)), None);
+            morph_strength = ui.slider(
+                gpu,
+                "settings-morph-strength",
+                "Morph strength",
+                app.morph_strength,
+                ui::widgets::slider::Options {
+                    min: 0,
+                    max: 100,
+                    step: 1,
+                    suffix: "%",
+                },
+            )?;
+            ui.space(16.0);
+            morph_duration = ui.slider(
+                gpu,
+                "settings-morph-duration",
+                "Morph duration",
+                app.morph_duration_ms,
+                ui::widgets::slider::Options {
+                    min: 20,
+                    max: 1000,
+                    step: 1,
+                    suffix: " ms",
+                },
+            )?;
+            ui.space(16.0);
+            label(ui, gpu, "Morph interpolation", 13, true, true, false)?;
+            ui.space(10.0);
+            ui.push_style(Style {
+                font_size: 15,
+                padding: 12.0,
+                background: Some(ui.theme().input),
+                border_color: Some(ui.theme().border),
+                radius: ui.corner_radii().control,
+                ..ui.style()
+            });
+            morph_curve = ui.dropdown(
+                gpu,
+                "settings-morph-curve",
+                &[
+                    "Linear",
+                    "Quadratic ease out",
+                    "Cubic ease out (default)",
+                    "Smoothstep",
+                ],
+                Curve::ALL
+                    .iter()
+                    .position(|curve| *curve == app.morph_curve)
+                    .unwrap_or(2),
+            )?;
+            ui.pop_style();
+            ui.pop_sizing();
+        }
         ui.div_end();
         change
     } else {
@@ -1546,6 +1675,14 @@ fn misc_settings_page(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyh
         Action::Animations(enabled)
     } else if let Some(enabled) = layout_morphing {
         Action::LayoutMorphing(enabled)
+    } else if toggle_morph_advanced {
+        Action::ToggleMorphAdvanced
+    } else if let Some(strength) = morph_strength {
+        Action::MorphStrength(strength)
+    } else if let Some(duration) = morph_duration {
+        Action::MorphDuration(duration)
+    } else if let Some(index) = morph_curve {
+        Action::MorphCurve(Curve::ALL[index])
     } else if let Some(enabled) = smooth {
         Action::SmoothScrolling(enabled)
     } else if let Some(step) = zoom_step {
@@ -1888,6 +2025,11 @@ fn main() -> anyhow::Result<()> {
     ui.set_rounded_corners(preferences.rounded_corners);
     ui.set_animations(preferences.animations, preferences.animation_curve);
     ui.set_layout_morphing(preferences.layout_morphing);
+    ui.set_morph_parameters(
+        preferences.morph_duration_ms,
+        preferences.morph_curve,
+        preferences.morph_strength,
+    );
     ui.set_smooth_scrolling(preferences.smooth_scrolling);
     ui.set_zoom_step(preferences.zoom_step);
     ui.set_startup_zoom(preferences.default_zoom);
@@ -1912,6 +2054,10 @@ fn main() -> anyhow::Result<()> {
         rounded: preferences.rounded_corners,
         animations: preferences.animations,
         layout_morphing: preferences.layout_morphing,
+        morph_duration_ms: preferences.morph_duration_ms,
+        morph_curve: preferences.morph_curve,
+        morph_strength: preferences.morph_strength,
+        morph_advanced: false,
         animation_curve: preferences.animation_curve,
         smooth_scrolling: preferences.smooth_scrolling,
         zoom_step: preferences.zoom_step,
