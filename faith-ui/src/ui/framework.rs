@@ -52,6 +52,8 @@ pub struct Style {
     /// Rounded corners clockwise from top-left; false keeps a corner square.
     pub rounded_corners: [bool; 4],
     pub enabled: bool,
+    pub focus_when_disabled: bool,
+    pub focus_outline: bool,
     /// Prefer this selected control when restoring keyboard focus.
     pub selected: bool,
     pub tooltip: Option<&'static str>,
@@ -78,6 +80,8 @@ impl Default for Style {
             radius: 0.0,
             rounded_corners: [true; 4],
             enabled: true,
+            focus_when_disabled: false,
+            focus_outline: false,
             selected: false,
             tooltip: None,
             selection_group: None,
@@ -416,12 +420,20 @@ impl Framework {
         &mut self,
         key: (String, usize),
         bounds: Bounds,
-        enabled: bool,
-        selected: bool,
+        style: Style,
     ) -> button::Response {
         let id = format!("button:{}:{}", key.0, key.1);
-        if !enabled {
+        if !style.enabled {
             self.buttons.insert(key, button::State::default());
+            if style.focus_when_disabled {
+                self.register_control(&id, bounds, FocusKind::DisabledButton, false);
+                return button::Response {
+                    clicked: false,
+                    hovered: self.keyboard_focus_visible && self.focused.as_deref() == Some(&id),
+                    pressed: false,
+                };
+            }
+
             let pressed = if let Some(&until) = self.keyboard_presses.get(&id) {
                 self.animate_until(until);
                 true
@@ -434,7 +446,7 @@ impl Framework {
                 pressed,
             };
         }
-        self.register_control(&id, bounds, FocusKind::Button, selected);
+        self.register_control(&id, bounds, FocusKind::Button, style.selected);
         let hit = self.hit_bounds(bounds);
         let mut response =
             self.buttons
@@ -2651,7 +2663,14 @@ impl Framework {
                 &self.events,
             )
         } else {
-            self.button_response(key.clone(), bounds, self.style().enabled, row.selected)
+            self.button_response(
+                key.clone(),
+                bounds,
+                Style {
+                    selected: row.selected,
+                    ..self.style()
+                },
+            )
         };
         let hovered = !self.overlay && response.hovered;
         let pressed = !self.overlay && response.pressed;
@@ -2785,7 +2804,7 @@ impl Framework {
         let occurrence = self.button_occurrences.entry(id.to_owned()).or_default();
         let key = (id.to_owned(), *occurrence);
         *occurrence += 1;
-        let response = self.button_response(key.clone(), b, s.enabled, s.selected);
+        let response = self.button_response(key.clone(), b, s);
         if !self.visible(b) {
             return Ok(response.clicked);
         }
@@ -2808,6 +2827,17 @@ impl Framework {
             });
         }
 
+        let s = if s.focus_outline
+            && self.keyboard_focus_visible
+            && self.focused.as_deref() == Some(format!("button:{id}:{}", key.1).as_str())
+        {
+            Style {
+                border_color: Some(self.theme.selected_icon),
+                ..s
+            }
+        } else {
+            s
+        };
         let s = self.paint_button(key, b, s, response.hovered, response.pressed)?;
         // Keep horizontal padding while allowing the independently sized icon
         // and centered label to use the row's full height.
@@ -2900,7 +2930,7 @@ impl Framework {
         let occurrence = self.button_occurrences.entry(label.into()).or_default();
         let key = (label.to_owned(), *occurrence);
         *occurrence += 1;
-        let response = self.button_response(key.clone(), b, s.enabled, s.selected);
+        let response = self.button_response(key.clone(), b, s);
         if !self.visible(b) {
             return Ok(response.clicked);
         }

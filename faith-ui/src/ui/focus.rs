@@ -3,6 +3,7 @@ use super::widgets::input::Bounds;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Button,
+    DisabledButton,
     Input,
     Checkbox,
     Slider,

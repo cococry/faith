@@ -261,14 +261,14 @@ pub fn creation(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Re
             "Auth ID",
             &auth_id,
             "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
-            None,
+            Some(32),
             true,
         )?;
         ui.space(8.0);
         label(
             ui,
             gpu,
-            "Paste the 32-character Auth ID from your partner",
+            "Paste the 32-character Auth ID from your partner.",
             12,
             false,
             true,
@@ -282,14 +282,14 @@ pub fn creation(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Re
             "Display name (optional)",
             &name_id,
             "Enter a display name",
-            Some(80),
+            Some(20),
             true,
         )?;
         ui.space(8.0);
         label(
             ui,
             gpu,
-            "The name displayed locally when texting your partner",
+            "The name displayed locally when texting your partner.",
             12,
             false,
             true,
@@ -470,6 +470,8 @@ fn command_button(
 ) -> anyhow::Result<bool> {
     ui.push_style(Style {
         enabled,
+        focus_when_disabled: matches!(id, "chat-add-partner" | "chat-advance"),
+        focus_outline: matches!(id, "chat-add-partner" | "chat-advance" | "chat-cancel"),
         font_size: 13,
         icon_font_size: Some(15),
         padding: 10.0,
