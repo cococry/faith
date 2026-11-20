@@ -2902,6 +2902,14 @@ faith_status_code_t faith_client_request_conversation(
 faith_status_code_t faith_client_request_conversation_with_policy(
     faith_client_t *client, const faith_conversation_id_t *conversation,
     const faith_auth_id_t *recipient, bool force_username_disclosure) {
+  return faith_client_request_conversation_with_disclosure(
+      client, conversation, recipient, force_username_disclosure, false);
+}
+
+faith_status_code_t faith_client_request_conversation_with_disclosure(
+    faith_client_t *client, const faith_conversation_id_t *conversation,
+    const faith_auth_id_t *recipient, bool force_username_disclosure,
+    bool disclose_username) {
   if (!client || !conversation || !recipient ||
       faith_client_id_equal(*recipient, client->ident.auth_id))
     return FAITH_ERR_INVALID;
@@ -2910,11 +2918,13 @@ faith_status_code_t faith_client_request_conversation_with_policy(
   memcpy(payload, conversation->bytes, FAITH_CONVERSATION_ID_SIZE);
   memcpy(payload + FAITH_CONVERSATION_ID_SIZE, recipient->bytes,
          FAITH_AUTH_ID_SIZE);
-  payload[FAITH_CONVERSATION_REQUEST_SIZE] = force_username_disclosure;
+  uint8_t flags = force_username_disclosure ? FAITH_CONVERSATION_REQUEST_FORCE
+                  : disclose_username ? FAITH_CONVERSATION_REQUEST_DISCLOSE
+                                      : 0;
+  payload[FAITH_CONVERSATION_REQUEST_SIZE] = flags;
 
   return client_send_command(client, payload,
-                             force_username_disclosure ? sizeof(payload)
-                                                       : FAITH_CONVERSATION_REQUEST_SIZE,
+                             flags ? sizeof(payload) : FAITH_CONVERSATION_REQUEST_SIZE,
                              FAITH_COMMAND_CONVERSATION_REQUEST,
                              _notify_command_result);
 }

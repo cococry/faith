@@ -139,6 +139,11 @@ faith_status_code_t faith_client_request_conversation_with_policy(
     faith_client_t *client, const faith_conversation_id_t *conversation,
     const faith_auth_id_t *recipient, bool force_username_disclosure);
 
+faith_status_code_t faith_client_request_conversation_with_disclosure(
+    faith_client_t *client, const faith_conversation_id_t *conversation,
+    const faith_auth_id_t *recipient, bool force_username_disclosure,
+    bool disclose_username);
+
 faith_status_code_t faith_client_respond_conversation(
     faith_client_t *client, const faith_conversation_id_t *conversation,
     const faith_auth_id_t *requester, bool accepted);

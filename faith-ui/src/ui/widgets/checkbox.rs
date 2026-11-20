@@ -14,6 +14,8 @@ pub struct Checkbox {
     pub suffix: Option<Arc<TextLayout>>,
     pub suffix_inline: bool,
     pub label_height: f32,
+    pub size: f32,
+    pub text_offset: f32,
     pub icons: FontHandle,
     pub checked: bool,
     pub style: Style,
@@ -31,11 +33,13 @@ impl Checkbox {
     ) -> anyhow::Result<()> {
         let b = self.bounds;
         let center_y = b.y + b.height * 0.5;
-        let box_rect = if self.focused {
-            [b.x, center_y - 11.0, 22.0, 22.0]
-        } else {
-            [b.x, center_y - 10.0, 20.0, 20.0]
-        };
+        let size = self.size
+            + if self.focused {
+                2.0
+            } else {
+                0.0
+            };
+        let box_rect = [b.x, center_y - size * 0.5, size, size];
         let style = self.style;
         ui.rounded_box(
             box_rect,
@@ -61,9 +65,9 @@ impl Checkbox {
             )?;
         }
 
-        let x = b.x + 34.0;
+        let x = b.x + self.text_offset;
         let y = center_y - self.label_height * 0.5;
-        let width = (b.width - 34.0).max(1.0);
+        let width = (b.width - self.text_offset).max(1.0);
         text.color = theme.text;
         text.render_layout([x, y], &self.layout, width, false, gpu, ui)?;
 

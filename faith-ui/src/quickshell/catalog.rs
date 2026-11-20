@@ -22,9 +22,10 @@ impl Context {
         Self {
             kind: match app.page {
                 Page::Accounts | Page::Create | Page::CreateUsername => Kind::Profile,
-                Page::Conversations | Page::Requests | Page::CreateConversation => {
-                    Kind::Conversation
-                }
+                Page::Conversations
+                | Page::Requests
+                | Page::PendingInvites
+                | Page::CreateConversation => Kind::Conversation,
                 Page::Settings => Kind::Settings,
             },
             profile: app.selected.as_ref().map(|profile| profile.path.clone()),
@@ -490,6 +491,24 @@ pub fn build(app: &App, zoom: u32) -> Vec<Entry> {
             && app.chat.editing_creation()
             && snapshot.username.is_some()
         {
+            if !app.chat.require_username {
+                let disclose = !app.chat.discloses_username();
+                entries.push(
+                    Entry::new(
+                        "disclose-conversation-username",
+                        if disclose {
+                            "Disclose username"
+                        } else {
+                            "Keep username private"
+                        },
+                        Kind::Conversation,
+                        Action::DiscloseConversationUsername(disclose),
+                    )
+                    .search("disclose username", &["share username with invitees"])
+                    .owner(profile),
+                );
+            }
+
             entries.push(
                 Entry::new(
                     "require-conversation-username",
@@ -517,17 +536,23 @@ pub fn build(app: &App, zoom: u32) -> Vec<Entry> {
                     request.username.clone()
                 };
                 for (id, verb, accept, disclose) in [
-                    ("accept", "Accept", true, false),
+                    (
+                        "accept",
+                        if !request.required && snapshot.username.is_some() {
+                            "Accept privately"
+                        } else {
+                            "Accept"
+                        },
+                        true,
+                        false,
+                    ),
                     ("share", "Accept and share username for", true, true),
-                    ("decline", "Decline", false, false),
+                    ("decline", "Reject", false, false),
                 ] {
                     if accept
                         && request.required
                         && (snapshot.username.is_none() || snapshot.reject_required)
-                        || disclose
-                            && (request.required
-                                || snapshot.username.is_none()
-                                || snapshot.auto_disclose)
+                        || disclose && (request.required || snapshot.username.is_none())
                     {
                         continue;
                     }
@@ -680,6 +705,50 @@ pub fn build(app: &App, zoom: u32) -> Vec<Entry> {
                 Kind::Conversation,
                 Action::CancelConversation,
             ));
+        }
+
+        if let Some(id) = snapshot.selected.filter(|id| Some(*id) == app.conversation) {
+            let mut seen = std::collections::HashSet::new();
+            let children: Vec<_> = snapshot
+                .messages
+                .iter()
+                .filter(|message| {
+                    crate::chat_ui::can_name_sender(snapshot, message)
+                        && seen.insert(message.sender)
+                })
+                .map(|message| {
+                    let sender = message.sender;
+                    Entry::new(
+                        &format!("name-sender:{}:{id}:{sender}", profile.path.display()),
+                        &message.author,
+                        Kind::Conversation,
+                        Action::PromptSenderName {
+                            profile: profile.clone(),
+                            id,
+                            sender,
+                        },
+                    )
+                    .detail(&profile.alias)
+                    .owner(profile)
+                })
+                .collect();
+
+            if !children.is_empty() {
+                entries.push(
+                    Entry::new(
+                        "name-sender",
+                        "Name a sender locally",
+                        Kind::Conversation,
+                        Action::None,
+                    )
+                    .search(
+                        "name sender",
+                        &["local name participant contact message author"],
+                    )
+                    .list(children)
+                    .owner(profile),
+                );
+            }
         }
 
         if !snapshot.conversations.is_empty() {

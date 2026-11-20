@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use crate::{
     graphics::{FontHandle, GraphicsDevice},
     platform::event::{Key, WindowEvent},
@@ -29,8 +31,7 @@ pub struct InputOptions {
 }
 
 /// A single-line, UTF-8 input widget. Editing is grapheme-aware; platform text
-/// commits are distinct from navigation keys. No timer or rendering loop lives
-/// here. The caller redraws its bounds only when a response reports a change.
+/// commits are distinct from navigation keys. The caller schedules caret redraws.
 pub struct InputField {
     options: InputOptions,
     text: String,
@@ -39,6 +40,8 @@ pub struct InputField {
     focused: bool,
     max_bytes: usize,
     scroll_x: f32,
+    caret_since: Option<Instant>,
+    caret_visible: bool,
 }
 
 impl InputField {
@@ -51,6 +54,8 @@ impl InputField {
             focused: true,
             max_bytes,
             scroll_x: 0.0,
+            caret_since: None,
+            caret_visible: false,
         }
     }
 
@@ -217,6 +222,10 @@ impl InputField {
                 .map_or(self.text.len(), |(i, _)| i);
         }
 
+        if response.changed {
+            self.restart_caret();
+        }
+
         response
     }
 
@@ -225,10 +234,34 @@ impl InputField {
     }
 
     pub fn set_focused(&mut self, focused: bool) {
+        if self.focused != focused {
+            self.restart_caret();
+        }
+
         self.focused = focused;
         if !focused {
             self.selected = false;
         }
+    }
+
+    pub fn restart_caret(&mut self) {
+        self.caret_since = None;
+    }
+
+    pub fn update_caret(&mut self, now: Instant, window_focused: bool) -> Option<Instant> {
+        const HALF_PERIOD_MS: u128 = 500;
+
+        if !self.focused || !window_focused {
+            self.restart_caret();
+            self.caret_visible = false;
+            return None;
+        }
+
+        let since = *self.caret_since.get_or_insert(now);
+        let elapsed = now.saturating_duration_since(since).as_millis();
+        self.caret_visible = (elapsed / HALF_PERIOD_MS).is_multiple_of(2);
+        let next = (elapsed / HALF_PERIOD_MS + 1) * HALF_PERIOD_MS;
+        Some(since + Duration::from_millis(next as u64))
     }
 
     #[allow(dead_code)]
@@ -237,6 +270,7 @@ impl InputField {
         self.cursor = 0;
         self.scroll_x = 0.0;
         self.selected = false;
+        self.restart_caret();
     }
 
     pub fn render<G: GraphicsDevice>(
@@ -266,7 +300,7 @@ impl InputField {
 
             text.render(x - self.scroll_x, y, &self.text, font, gpu, ui)?;
 
-            if self.focused {
+            if self.caret_visible {
                 ui.quad(
                     [x + caret - self.scroll_x, y, caret_width, height],
                     style.color,
@@ -293,6 +327,30 @@ fn scroll_to_caret(scroll: f32, caret: f32, viewport: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn caret_blinks_only_while_the_window_and_field_are_focused() {
+        let mut field = InputField::new(32);
+        let start = Instant::now();
+        let half_period = Duration::from_millis(500);
+
+        assert_eq!(field.update_caret(start, true), Some(start + half_period));
+        assert!(field.caret_visible);
+        assert_eq!(
+            field.update_caret(start + half_period, true),
+            Some(start + half_period * 2)
+        );
+        assert!(!field.caret_visible);
+
+        assert_eq!(field.update_caret(start + half_period, false), None);
+        assert!(!field.caret_visible);
+        field.update_caret(start + half_period * 2, true);
+        assert!(field.caret_visible);
+
+        field.set_focused(false);
+        assert_eq!(field.update_caret(start + half_period * 3, true), None);
+        assert!(!field.caret_visible);
+    }
 
     #[test]
     fn clipboard_shortcuts_replace_the_selection_and_keep_utf8_within_the_limit() {

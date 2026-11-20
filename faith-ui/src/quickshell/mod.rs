@@ -15,6 +15,7 @@ use crate::{
 use catalog::{Context, Entry, Kind};
 
 const QUERY: &str = "quickshell-query";
+const NAME: &str = "quickshell-name";
 const ROW: f32 = 56.0;
 
 struct SearchResult {
@@ -132,7 +133,7 @@ struct Level {
 
 #[derive(Default)]
 pub struct Shell {
-    name_target: Option<(Profile, faith_client::Id)>,
+    name_target: Option<(Profile, faith_client::Id, Option<faith_client::Id>)>,
     open: bool,
     presence: crate::ui::animation::Presence,
     entries: Vec<Entry>,
@@ -196,8 +197,22 @@ impl Shell {
         profile: Profile,
         id: faith_client::Id,
     ) {
-        self.name_target = Some((profile, id));
-        ui.clear_input(QUERY);
+        self.name_target = Some((profile, id, None));
+        ui.clear_input(NAME);
+        ui.animate_until(std::time::Instant::now());
+    }
+
+    pub fn open_sender_name(
+        &mut self,
+        ui: &mut Framework,
+        profile: Profile,
+        id: faith_client::Id,
+        sender: faith_client::Id,
+    ) {
+        self.levels.clear();
+        self.open = true;
+        self.name_target = Some((profile, id, Some(sender)));
+        ui.clear_input(NAME);
         ui.animate_until(std::time::Instant::now());
     }
 
@@ -361,6 +376,120 @@ impl Shell {
         Some(entry.command.clone())
     }
 
+    fn render_name(
+        &mut self,
+        ui: &mut Framework,
+        gpu: &mut Renderer,
+        [x, y, width, height]: [f32; 4],
+    ) -> anyhow::Result<Option<Action>> {
+        let Some((profile, id, sender)) = &self.name_target else {
+            return Ok(None);
+        };
+        let (title, hint, max_chars) = if sender.is_some() {
+            ("Name sender locally", "Display name", 20)
+        } else {
+            ("Name conversation", "Conversation name", 256)
+        };
+
+        ui.set_position(x, y);
+        ui.push_style(Style {
+            padding: 16.0,
+            background: Some(ui.theme().surface),
+            border_color: Some(ui.theme().border),
+            radius: ui.corner_radii().popup,
+            ..ui.style()
+        });
+        ui.div_begin_id(
+            "name-popup",
+            DivOptions {
+                width: Some(width),
+                height: Some(height),
+                ..Default::default()
+            },
+        )?;
+        crate::label(ui, gpu, title, 15, true, false, false)?;
+        ui.space(12.0);
+
+        let width = ui.div_width();
+        let done_width = width.min(200.0) * 0.35;
+        let row_y = ui.position().1;
+        ui.push_style(Style {
+            font_size: 14,
+            padding: 9.0,
+            color: ui.theme().text,
+            background: Some(ui.theme().input),
+            border_color: Some(ui.theme().border),
+            radius: ui.corner_radii().control,
+            enabled: self.open,
+            ..ui.style()
+        });
+        ui.push_sizing(Some((width - done_width - 8.0).max(1.0)), Some(40.0));
+        if self.open {
+            ui.focus_control(NAME, false);
+        }
+
+        let name = ui.input_with_hint(
+            gpu,
+            NAME,
+            InputOptions {
+                max_chars: Some(max_chars),
+                filter: None,
+            },
+            hint,
+        )?;
+        ui.pop_sizing();
+        ui.pop_style();
+
+        let name = name.trim();
+        let enabled = self.open && !name.is_empty();
+        ui.set_position(width - done_width, row_y);
+        ui.push_style(Style {
+            font_size: 13,
+            color: if enabled {
+                ui.theme().primary_text
+            } else {
+                ui.theme().muted
+            },
+            background: Some(if enabled {
+                ui.theme().primary
+            } else {
+                ui.theme().button
+            }),
+            radius: ui.corner_radii().control,
+            center_button_content: true,
+            enabled,
+            ..ui.style()
+        });
+        ui.push_sizing(Some(done_width), Some(40.0));
+        let done = ui.icon_label_button(gpu, "quickshell-name-done", "", "Done")?;
+        ui.pop_sizing();
+        ui.pop_style();
+        ui.div_end();
+        ui.pop_style();
+
+        if enabled && (done || ui.input_submitted(NAME)) {
+            self.open = false;
+            let profile = profile.clone();
+            let id = *id;
+            let name = name.to_owned();
+            return Ok(Some(match sender {
+                Some(sender) => Action::NameSender {
+                    profile,
+                    id,
+                    sender: *sender,
+                    name,
+                },
+                None => Action::RenameConversation {
+                    profile,
+                    id,
+                    title: name,
+                },
+            }));
+        }
+
+        Ok(None)
+    }
+
     pub fn render(
         &mut self,
         ui: &mut Framework,
@@ -375,6 +504,10 @@ impl Shell {
         let mut presence = ui.presence(&mut self.presence, self.open);
         ui.overlay_opacity(presence);
         let naming = self.name_target.is_some();
+        let naming_sender = self
+            .name_target
+            .as_ref()
+            .is_some_and(|(_, _, sender)| sender.is_some());
 
         if !naming
             && !self.levels.is_empty()
@@ -392,7 +525,14 @@ impl Shell {
             ui.end_overlay()?;
             return Ok(None);
         }
-        let width = (ui.div_width() - 32.0).clamp(1.0, 640.0);
+        let width = (ui.div_width() - 32.0).clamp(
+            1.0,
+            if naming {
+                400.0
+            } else {
+                640.0
+            },
+        );
         let count = self.results.len().max(1);
         let rows = (((ui.div_height() - 72.0) / ROW).floor().max(1.0) as usize)
             .min(8)
@@ -418,7 +558,7 @@ impl Shell {
             ui.corner_radii().popup.max(1.0)
         };
         let height = if naming {
-            46.0
+            108.0
         } else {
             (if empty {
                 48.0
@@ -460,7 +600,7 @@ impl Shell {
                     }
                 )
             });
-            if naming && escape {
+            if naming && !naming_sender && escape {
                 self.name_target = None;
                 ui.set_input(QUERY, &self.query);
                 ui.animate_until(std::time::Instant::now());
@@ -474,6 +614,12 @@ impl Shell {
                 presence = ui.presence(&mut self.presence, false);
                 ui.overlay_opacity(presence);
             }
+        }
+
+        if naming {
+            let action = self.render_name(ui, gpu, [x, top, width, height])?;
+            ui.end_overlay()?;
+            return Ok(action);
         }
 
         ui.set_position(x, top);
@@ -509,10 +655,10 @@ impl Shell {
             background: Some(ui.theme().input),
             border_color: Some(ui.theme().border),
             radius: ui.corner_radii().popup,
-            rounded_corners: [naming || self.levels.is_empty(), !naming, false, naming],
+            rounded_corners: [self.levels.is_empty(), true, false, false],
             ..ui.style()
         });
-        let nested = !naming && !self.levels.is_empty();
+        let nested = !self.levels.is_empty();
         let mut go_back = false;
         if nested {
             ui.set_position(1.0, 1.0);
@@ -542,78 +688,20 @@ impl Shell {
         if self.open {
             ui.focus_control(QUERY, false);
         }
-        let done_width = 88.0_f32.min(width * 0.35);
-        if naming {
-            ui.push_sizing(Some((width - done_width).max(1.0)), Some(46.0));
-        }
-
         let query = ui.input_with_hint(
             gpu,
             QUERY,
             InputOptions {
-                max_chars: Some(if naming {
-                    256
-                } else {
-                    96
-                }),
+                max_chars: Some(96),
                 filter: None,
             },
-            if naming {
-                "Name conversation"
-            } else {
-                &self.placeholder
-            },
+            &self.placeholder,
         )?;
-        if nested || naming {
+        if nested {
             ui.pop_sizing();
         }
 
         ui.pop_style();
-        if naming {
-            ui.set_position(width - done_width, 0.0);
-            let enabled = self.open && !query.trim().is_empty();
-            ui.push_style(Style {
-                font_size: 16,
-                padding: 12.0,
-                color: if enabled {
-                    ui.theme().primary_text
-                } else {
-                    ui.theme().muted
-                },
-                background: Some(if enabled {
-                    ui.theme().primary
-                } else {
-                    ui.theme().button
-                }),
-                border_color: Some(ui.theme().border),
-                radius: ui.corner_radii().popup,
-                rounded_corners: [false, true, true, false],
-                center_button_content: true,
-                enabled,
-                ..ui.style()
-            });
-            ui.push_sizing(Some(done_width), Some(46.0));
-            let done = ui.icon_label_button(gpu, "quickshell-done", "", "Done")?;
-            ui.pop_sizing();
-            ui.pop_style();
-            ui.pop_style();
-            ui.div_end();
-            ui.pop_style();
-            ui.end_overlay()?;
-            if enabled
-                && (done || ui.input_submitted(QUERY))
-                && let Some((profile, id)) = &self.name_target
-            {
-                self.open = false;
-                return Ok(Some(Action::RenameConversation {
-                    profile: profile.clone(),
-                    id: *id,
-                    title: query.trim().to_owned(),
-                }));
-            }
-
-            return Ok(None);
-        }
 
         if self.open && query != self.query {
             self.search(&query);
@@ -701,6 +789,7 @@ impl Shell {
                     detail: &entry.detail,
                     icon: entry.icon(),
                     selected: rank == self.selected,
+                    badge: None,
                 },
             )?;
             if response.hovered && mouse_moved && self.selected != rank {

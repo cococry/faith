@@ -46,7 +46,7 @@ static bool _command(faith_db_t *db, const char *sql) {
 static faith_status_code_t _check_approvals(faith_db_t *db,
                                             const conversation_job_t *job) {
   if (job->kind == FAITH_GROUP_CREATE)
-    _FH_CHECK_RETURN(conv_claim(db, job->conversation_id, &job->owner, NULL));
+    _FH_CHECK_RETURN(conv_claim(db, job->conversation_id, &job->owner, NULL, false));
 
   const char *values[] = {(const char *)job->conversation_id,
                           (const char *)job->owner.bytes,
