@@ -27,6 +27,7 @@ const ACCOUNTS: &str = "\u{f0b55}";
 const ACCOUNTS_SELECTED: &str = "\u{f0009}";
 const GROUP: &str = "\u{f0849}";
 const COPY_AUTH: &str = "󰆏";
+const REQUESTS: &str = "\u{f01ee}";
 const NEW_CHAT: &str = "";
 const CHATS: &str = "\u{f0ede}";
 const CHATS_SELECTED: &str = "\u{f0b79}";
@@ -44,14 +45,19 @@ const REFRESH: &str = "\u{eb37}";
 enum Page {
     Accounts,
     Create,
+    CreateUsername,
     Conversations,
+    Requests,
     CreateConversation,
     Settings,
 }
 
 impl Page {
     fn is_chat(self) -> bool {
-        matches!(self, Self::Conversations | Self::CreateConversation)
+        matches!(
+            self,
+            Self::Conversations | Self::Requests | Self::CreateConversation
+        )
     }
 }
 
@@ -94,6 +100,13 @@ enum Action {
     },
     ResetZoom,
     Create(String),
+    ClaimUsername(bool),
+    ToggleUsernameHelp,
+    ProfileUsername(String),
+    ToggleUsernameAdvanced,
+    AutoDiscloseUsername(bool),
+    RejectRequiredUsername(bool),
+    CreateWithUsername(String),
     Choose,
     Back,
     Forward,
@@ -104,6 +117,14 @@ enum Action {
     ToggleMenu,
     ListPage(usize),
     NewConversation(Profile),
+    MessageRequests(Profile),
+    RequireConversationUsername(bool),
+    RespondToRequest {
+        profile: Profile,
+        conversation: faith_client::Id,
+        accept: bool,
+        disclose: bool,
+    },
     AddChatPartner(faith_client::Id, String),
     FocusChatPartner,
     NameNewConversation(Option<(faith_client::Id, String)>),
@@ -122,6 +143,7 @@ enum Action {
     CreateConversation {
         title: String,
         partners: Vec<(faith_client::Id, String)>,
+        require_username: bool,
     },
     SendMessage {
         id: faith_client::Id,
@@ -145,10 +167,33 @@ enum Action {
     DefaultZoom(u32),
 }
 
+struct ProfileForm {
+    claim: bool,
+    help: bool,
+    advanced: bool,
+    alias: String,
+    username: profiles::UsernameSettings,
+    pending: Option<(Profile, client::Session)>,
+}
+
+impl Default for ProfileForm {
+    fn default() -> Self {
+        Self {
+            claim: true,
+            help: false,
+            advanced: false,
+            alias: String::new(),
+            username: profiles::UsernameSettings::default(),
+            pending: None,
+        }
+    }
+}
+
 // State shared by the pages.
 struct App {
     root: std::path::PathBuf,
     profiles: Vec<Profile>,
+    profile_form: ProfileForm,
     selected: Option<Profile>,
     session: Option<client::Session>,
     chat: chat_ui::State,
@@ -249,8 +294,19 @@ impl App {
         self.page = Page::Conversations;
         self.selected = Some(profile.clone());
 
-        // The client worker handles connection and authentication.
-        match client::Session::start(
+        match Self::start_profile(&profile, None, cli, platform) {
+            Ok(session) => self.session = Some(session),
+            Err(error) => self.error = error.to_string(),
+        }
+    }
+
+    fn start_profile(
+        profile: &Profile,
+        claim: Option<profiles::UsernameSettings>,
+        cli: &cli::Cli,
+        platform: &Platform,
+    ) -> anyhow::Result<client::Session> {
+        client::Session::start(
             faith_client::Config {
                 host: cli.host.clone(),
                 port: cli.port,
@@ -259,11 +315,9 @@ impl App {
                 identity_path: profile.path.join("identity.bin"),
                 store: None,
             },
+            claim,
             platform.waker(),
-        ) {
-            Ok(session) => self.session = Some(session),
-            Err(error) => self.error = error.to_string(),
-        }
+        )
     }
 
     fn ensure_profile(
@@ -292,6 +346,39 @@ impl App {
     }
 
     fn refresh_chat(&mut self, ui: &mut Framework) {
+        if let Some((_, session)) = &self.profile_form.pending
+            && let Some(snapshot) = session.snapshot_since(0)
+        {
+            if snapshot.claim_completed {
+                let (profile, session) = self.profile_form.pending.take().unwrap();
+                self.profiles
+                    .retain(|existing| existing.path != profile.path);
+                self.profiles.push(profile.clone());
+                self.profiles.sort_by(|a, b| a.alias.cmp(&b.alias));
+                self.back_history
+                    .retain(|location| location.page != Page::CreateUsername);
+                self.forward_history
+                    .retain(|location| location.page != Page::CreateUsername);
+
+                if self.page == Page::CreateUsername {
+                    self.session = Some(session);
+                    self.selected = Some(profile);
+                    self.chat.reset();
+                    self.error.clear();
+                    self.conversation = None;
+                    self.list_offset = 0;
+                    self.page = Page::Conversations;
+                    ui.navigation_changed();
+                }
+            } else if let Some(error) = snapshot.auth_error {
+                self.profile_form.pending = None;
+
+                if self.page == Page::CreateUsername {
+                    self.error = error;
+                }
+            }
+        }
+
         let Some(snapshot) = self
             .session
             .as_ref()
@@ -374,6 +461,7 @@ impl App {
         let focus_requested = matches!(
             action,
             Action::New
+                | Action::ProfileUsername(_)
                 | Action::NewConversation(_)
                 | Action::OpenSettings {
                     control: Some(_),
@@ -384,8 +472,10 @@ impl App {
             action,
             Action::Select(_)
                 | Action::Create(_)
+                | Action::ProfileUsername(_)
                 | Action::OpenProfile(_)
                 | Action::OpenConversation { .. }
+                | Action::MessageRequests(_)
                 | Action::NewConversation(_)
                 | Action::OpenSettings { .. }
                 | Action::Choose
@@ -439,6 +529,32 @@ impl App {
                 self.submit_chat(client::Command::Select(id))?;
                 self.conversation = Some(id);
                 self.page = Page::Conversations;
+                self.error.clear();
+            }
+
+            Action::MessageRequests(profile) => {
+                self.ensure_profile(profile, cli, platform)?;
+                self.page = Page::Requests;
+                self.error.clear();
+            }
+
+            Action::RequireConversationUsername(value) => {
+                self.chat.require_username = value;
+            }
+
+            Action::RespondToRequest {
+                profile,
+                conversation,
+                accept,
+                disclose,
+            } => {
+                self.ensure_profile(profile, cli, platform)?;
+                self.submit_chat(client::Command::Respond {
+                    conversation,
+                    accept,
+                    disclose,
+                })?;
+                self.page = Page::Requests;
                 self.error.clear();
             }
 
@@ -498,8 +614,16 @@ impl App {
                 self.error.clear();
             }
 
-            Action::CreateConversation { title, partners } => {
-                let id = self.submit_chat(client::Command::Create { title, partners })?;
+            Action::CreateConversation {
+                title,
+                partners,
+                require_username,
+            } => {
+                let id = self.submit_chat(client::Command::Create {
+                    title,
+                    partners,
+                    require_username,
+                })?;
                 self.chat.submission = Some((id, chat_ui::Submission::Create));
                 self.error.clear();
             }
@@ -545,6 +669,53 @@ impl App {
                 }
             }
             Action::ResetZoom => ui.reset_zoom(),
+            Action::ClaimUsername(claim) => self.profile_form.claim = claim,
+            Action::ToggleUsernameHelp => self.profile_form.help = !self.profile_form.help,
+            Action::ToggleUsernameAdvanced => {
+                self.profile_form.advanced = !self.profile_form.advanced;
+            }
+
+            Action::AutoDiscloseUsername(value) => {
+                self.profile_form.advanced = true;
+                self.profile_form.username.auto_disclose = value;
+                ui.focus_control("auto-disclose-username", true);
+            }
+
+            Action::RejectRequiredUsername(value) => {
+                self.profile_form.advanced = true;
+                self.profile_form.username.reject_required = value;
+                ui.focus_control("reject-required-username", true);
+            }
+
+            Action::ProfileUsername(alias) => {
+                profiles::check_claim_alias(&self.root, &alias)?;
+
+                if self.profile_form.alias != alias {
+                    ui.set_input("new-profile-username", &alias);
+                    self.profile_form.alias = alias;
+                }
+
+                self.error.clear();
+                self.page = Page::CreateUsername;
+                ui.focus_control("new-profile-username", true);
+            }
+
+            Action::CreateWithUsername(username) => {
+                anyhow::ensure!(
+                    profiles::valid_username(&username),
+                    profiles::USERNAME_ERROR
+                );
+
+                if self.profile_form.pending.is_none() {
+                    let profile = profiles::prepare_claim(&self.root, &self.profile_form.alias)?;
+                    let mut settings = self.profile_form.username.clone();
+                    settings.username = Some(username);
+                    let session = Self::start_profile(&profile, Some(settings), cli, platform)?;
+                    self.profile_form.pending = Some((profile, session));
+                    self.error.clear();
+                }
+            }
+
             Action::Create(alias) => match profiles::create(&self.root, &alias) {
                 Ok(profile) => {
                     self.profiles.push(profile.clone());
@@ -581,8 +752,15 @@ impl App {
             // Start with an empty handle when opening the creation form.
             Action::New => {
                 self.error.clear();
+                if self.profile_form.pending.is_some() {
+                    self.page = Page::CreateUsername;
+                    return platform.request_redraw();
+                }
+
+                self.profile_form = ProfileForm::default();
+                ui.clear_input("new-profile-username");
                 ui.clear_input("new-profile-handle");
-                ui.focus_input("new-profile-handle");
+                ui.focus_control("new-profile-handle", true);
                 self.page = Page::Create;
             }
 
@@ -704,7 +882,9 @@ impl App {
 
         if (self.location() != previous || record_history) && !focus_requested {
             if self.page == Page::Create {
-                ui.focus_input("new-profile-handle");
+                ui.focus_control("new-profile-handle", true);
+            } else if self.page == Page::CreateUsername {
+                ui.focus_control("new-profile-username", true);
             } else {
                 ui.navigation_changed();
             }
@@ -913,7 +1093,10 @@ fn navigation(
         hit_padding: 8.0,
         ..ui.style()
     });
-    let accounts_selected = matches!(app.page, Page::Accounts | Page::Create);
+    let accounts_selected = matches!(
+        app.page,
+        Page::Accounts | Page::Create | Page::CreateUsername
+    );
 
     if icon(
         ui,
@@ -1114,7 +1297,7 @@ fn item_list(
     snapshot: &client::Snapshot,
     height: f32,
 ) -> anyhow::Result<Action> {
-    let (mut action, list_top) = list_header(
+    let (mut action, mut list_top) = list_header(
         ui,
         gpu,
         app,
@@ -1127,6 +1310,40 @@ fn item_list(
     let width = ui.div_width();
     let chats = app.page.is_chat();
 
+    if chats && let Some(profile) = &app.selected {
+        panel_named(
+            ui,
+            Some("request-navigation"),
+            [16.0, list_top, width - 32.0, 56.0],
+            true,
+        )?;
+        let pending;
+        let detail = if snapshot.requests.is_empty() {
+            "No pending requests"
+        } else {
+            pending = format!("{} pending", snapshot.requests.len());
+            &pending
+        };
+        if ui
+            .action_row(
+                gpu,
+                "message-requests",
+                ui::framework::ActionRow {
+                    icon: REQUESTS,
+                    title: "Message requests",
+                    detail,
+                    selected: app.page == Page::Requests,
+                },
+            )?
+            .clicked
+        {
+            action = Action::MessageRequests(profile.clone());
+        }
+
+        end_panel(ui);
+        list_top += 60.0;
+    }
+
     let count = if chats {
         snapshot.conversations.len()
     } else {
@@ -1138,12 +1355,19 @@ fn item_list(
     let offset = app
         .list_offset
         .min(count.saturating_sub(1) / per_page * per_page);
-    panel(
+    panel_named(
         ui,
-        16.0,
-        list_top,
-        width - 32.0,
-        (height - list_top - 132.0).max(0.0),
+        Some(if chats {
+            "conversation-list"
+        } else {
+            "profile-list"
+        }),
+        [
+            16.0,
+            list_top,
+            width - 32.0,
+            (height - list_top - 132.0).max(0.0),
+        ],
         true,
     )?;
 
@@ -1279,7 +1503,12 @@ fn item_list(
 
     // The list footer shows account status or the create button.
     let footer_y = height - 70.0;
-    panel(ui, 16.0, footer_y, width - 32.0, 54.0, true)?;
+    panel_named(
+        ui,
+        Some("profile-footer"),
+        [16.0, footer_y, width - 32.0, 54.0],
+        true,
+    )?;
 
     if chats {
         if let Some(profile) = &app.selected {
@@ -1289,22 +1518,59 @@ fn item_list(
                 ui.push_sizing(Some((copy_x - 8.0).max(1.0)), None);
             }
 
-            label(ui, gpu, &profile.alias, 15, true, false, false)?;
+            let hovered = ui.div_hovered();
             label(
                 ui,
                 gpu,
-                if snapshot.authorized {
-                    "Connected securely"
-                } else if snapshot.status.is_empty() {
+                snapshot.username.as_deref().unwrap_or(&profile.alias),
+                15,
+                true,
+                false,
+                false,
+            )?;
+            if snapshot.authorized {
+                let reveal = if app.layout_morphing && app.morph_strength > 0 {
+                    ui.presence(&mut app.chat.footer_hover.borrow_mut(), hovered)
+                } else {
+                    f32::from(hovered)
+                };
+                let width = if has_auth {
+                    (copy_x - 8.0).max(1.0)
+                } else {
+                    ui.div_width()
+                };
+                let y = ui.position().1;
+
+                if reveal < 1.0 {
+                    footer_label(
+                        ui,
+                        gpu,
+                        "profile-connected",
+                        "Connected securely",
+                        [width, y],
+                        1.0 - reveal,
+                    )?;
+                }
+
+                if reveal > 0.0 {
+                    footer_label(
+                        ui,
+                        gpu,
+                        "profile-hover",
+                        &format!("Profile: {}", profile.alias),
+                        [width, y],
+                        reveal,
+                    )?;
+                }
+            } else {
+                let status = if snapshot.status.is_empty() {
                     "Connecting…"
                 } else {
                     &snapshot.status
-                },
-                12,
-                false,
-                true,
-                false,
-            )?;
+                };
+                label(ui, gpu, status, 12, false, true, false)?;
+            }
+
             if has_auth {
                 ui.pop_sizing();
                 ui.set_position(copy_x, 7.0);
@@ -1337,6 +1603,39 @@ fn item_list(
 
     end_panel(ui);
     Ok(action)
+}
+
+fn footer_label(
+    ui: &mut Framework,
+    gpu: &mut Renderer,
+    id: &str,
+    text: &str,
+    [width, y]: [f32; 2],
+    reveal: f32,
+) -> anyhow::Result<()> {
+    ui.set_position(0.0, y);
+    ui.div_begin_reveal_from_left(
+        id,
+        DivOptions {
+            width: Some(width),
+            height: Some(18.0),
+            ..Default::default()
+        },
+        reveal,
+    )?;
+    let muted = ui.theme().muted;
+    ui.push_style(Style {
+        font_size: 12,
+        color: graphics::Color {
+            a: muted.a * reveal,
+            ..muted
+        },
+        ..ui.style()
+    });
+    let result = ui.text(gpu, text, None);
+    ui.pop_style();
+    ui.div_end();
+    result
 }
 
 /* we give the history arrows plenty of room to click */
@@ -1502,7 +1801,7 @@ fn profile_input_style(ui: &Framework) -> Style {
 fn profile_creation_page(
     ui: &mut Framework,
     gpu: &mut Renderer,
-    has_profiles: bool,
+    app: &App,
 ) -> anyhow::Result<Action> {
     // Keep the form narrow and centered in the main pane.
     let width = (ui.div_width() - 64.0).clamp(1.0, 380.0);
@@ -1514,10 +1813,16 @@ fn profile_creation_page(
         ..ui.style()
     });
 
-    ui.div_begin(DivOptions {
-        width: Some(width),
-        ..Default::default()
-    })?;
+    let username_page = app.page == Page::CreateUsername;
+    let form = &app.profile_form;
+    ui.div_begin_id(
+        "profile-creation",
+        DivOptions {
+            width: Some(width),
+            height: Some((ui.div_height() - y - 54.0).max(1.0)),
+            scrollable: true,
+        },
+    )?;
 
     ui.push_style(Style {
         font_size: 28,
@@ -1531,7 +1836,9 @@ fn profile_creation_page(
     label(
         ui,
         gpu,
-        if has_profiles {
+        if username_page {
+            "Create user for profile"
+        } else if !app.profiles.is_empty() {
             "Create a new profile"
         } else {
             "Create your first profile"
@@ -1541,6 +1848,25 @@ fn profile_creation_page(
         false,
         false,
     )?;
+    ui.div_begin_id(
+        if username_page {
+            "profile-username-fields"
+        } else {
+            "profile-handle-fields"
+        },
+        DivOptions {
+            width: Some(ui.div_width()),
+            ..Default::default()
+        },
+    )?;
+
+    if username_page {
+        let action = profile_username_form(ui, gpu, form)?;
+        ui.div_end();
+        end_panel(ui);
+        return Ok(action);
+    }
+
     ui.space(12.0);
     label(
         ui,
@@ -1552,7 +1878,7 @@ fn profile_creation_page(
         false,
     )?;
     ui.space(28.0);
-    label(ui, gpu, "Account handle", 13, true, true, false)?;
+    label(ui, gpu, "Profile name", 13, true, true, false)?;
     ui.space(10.0);
     ui.push_style(profile_input_style(ui));
 
@@ -1579,20 +1905,241 @@ fn profile_creation_page(
     ui.space(24.0);
     let mut action = Action::None;
 
-    // Empty or invalid handles cannot be submitted by mouse or keyboard.
+    let y = ui.position().1;
+    ui.push_sizing(Some((width - 42.0).max(1.0)), None);
+    ui.push_style(Style {
+        font_size: 13,
+        ..ui.style()
+    });
+    let claim = ui.checkbox_with_suffix(
+        gpu,
+        "claim-username",
+        "Claim username",
+        Some("(optional)"),
+        form.claim,
+    );
+    ui.pop_style();
+
+    if let Some(claim) = claim? {
+        action = Action::ClaimUsername(claim);
+    }
+
+    ui.pop_sizing();
+    ui.set_position((width - 40.0).max(0.0), (y + ui.position().1 - 40.0) * 0.5);
+    ui.push_style(Style {
+        tooltip: Some("How usernames work"),
+        font_size: 20,
+        padding: 4.0,
+        radius: ui.corner_radii().icon,
+        color: ui.theme().muted,
+        background: None,
+        ..ui.style()
+    });
+    ui.push_sizing(Some(40.0), Some(40.0));
+    let help_clicked = ui.icon_button(gpu, "username-help", "");
+    ui.pop_sizing();
+    ui.pop_style();
+
+    if help_clicked? {
+        action = Action::ToggleUsernameHelp;
+    }
+
+    disclosure_text(
+        ui,
+        gpu,
+        "username-help-text",
+        "Ticking this will let you claim a username for your profile. Usernames are globally unique and can be used to identify you. If left unticked, this profile will be anonymous, letting others only ever see your Auth ID.",
+        form.help,
+    )?;
+
+    ui.space(24.0);
     let can_create = profiles::valid_alias(&alias);
     ui.push_style(Style {
         enabled: can_create,
         ..ui.style()
     });
-    let clicked = row_button(ui, gpu, "submit-create", ADD, "Create profile", false, true);
+    let clicked = row_button(
+        ui,
+        gpu,
+        "submit-create",
+        if form.claim {
+            NEXT
+        } else {
+            ADD
+        },
+        if form.claim {
+            "Next"
+        } else {
+            "Create profile"
+        },
+        false,
+        true,
+    )?;
     ui.pop_style();
-    if clicked? && can_create {
-        action = Action::Create(alias);
+
+    if can_create && (clicked || ui.input_submitted("new-profile-handle")) {
+        action = if form.claim {
+            Action::ProfileUsername(alias)
+        } else {
+            Action::Create(alias)
+        };
     }
 
+    ui.div_end();
     end_panel(ui);
     Ok(action)
+}
+
+fn disclosure_text(
+    ui: &mut Framework,
+    gpu: &mut Renderer,
+    id: &str,
+    text: &str,
+    open: bool,
+) -> anyhow::Result<()> {
+    if open {
+        ui.div_begin_id(
+            id,
+            DivOptions {
+                width: Some(ui.div_width()),
+                ..Default::default()
+            },
+        )?;
+        ui.space(8.0);
+        label(ui, gpu, text, 13, false, true, false)?;
+        ui.div_end();
+    }
+
+    Ok(())
+}
+
+fn profile_username_form(
+    ui: &mut Framework,
+    gpu: &mut Renderer,
+    form: &ProfileForm,
+) -> anyhow::Result<Action> {
+    let mut action = Action::None;
+    let editing = form.pending.is_none();
+    ui.space(28.0);
+    label(ui, gpu, "Username", 13, true, true, false)?;
+    ui.space(10.0);
+    ui.push_style(Style {
+        enabled: editing,
+        ..profile_input_style(ui)
+    });
+    let username = ui.input_with_options(
+        gpu,
+        "new-profile-username",
+        InputOptions {
+            max_chars: Some(profiles::USERNAME_MAX),
+            filter: Some(profiles::username_char),
+        },
+    )?;
+    ui.pop_style();
+    ui.space(8.0);
+    label(ui, gpu, profiles::USERNAME_ERROR, 12, false, true, false)?;
+    ui.space(16.0);
+
+    ui.push_style(Style {
+        enabled: editing,
+        ..ui.style()
+    });
+    let advanced = advanced_button(ui, gpu, "username-advanced", form.advanced && editing);
+    ui.pop_style();
+
+    if advanced? {
+        action = Action::ToggleUsernameAdvanced;
+    }
+
+    if editing && form.advanced {
+        ui.div_begin_id(
+            "username-preferences",
+            DivOptions {
+                width: Some(ui.div_width()),
+                ..Default::default()
+            },
+        )?;
+        ui.space(8.0);
+        if let Some(value) = ui.checkbox(
+            gpu,
+            "auto-disclose-username",
+            "Disclose username automatically",
+            form.username.auto_disclose,
+        )? {
+            action = Action::AutoDiscloseUsername(value);
+        }
+
+        if let Some(value) = ui.checkbox(
+            gpu,
+            "reject-required-username",
+            "Automatically reject requests that require username disclosure",
+            form.username.reject_required,
+        )? {
+            action = Action::RejectRequiredUsername(value);
+        }
+
+        ui.div_end();
+    }
+
+    ui.space(24.0);
+    ui.push_style(Style {
+        enabled: editing,
+        ..ui.style()
+    });
+    let clicked = row_button(
+        ui,
+        gpu,
+        "submit-username",
+        ADD,
+        if editing {
+            "Create profile"
+        } else {
+            "Claiming username…"
+        },
+        false,
+        true,
+    )?;
+    ui.pop_style();
+
+    if editing && (clicked || ui.input_submitted("new-profile-username")) {
+        action = Action::CreateWithUsername(username);
+    }
+
+    Ok(action)
+}
+
+fn advanced_button(
+    ui: &mut Framework,
+    gpu: &mut Renderer,
+    id: &str,
+    expanded: bool,
+) -> anyhow::Result<bool> {
+    ui.push_style(Style {
+        font_size: 13,
+        icon_font_size: Some(16),
+        padding: 6.0,
+        color: ui.theme().muted,
+        background: None,
+        border_color: None,
+        radius: ui.corner_radii().control,
+        selected: false,
+        selection_group: None,
+        ..ui.style()
+    });
+    ui.push_sizing(Some(ui.div_width().min(200.0)), Some(32.0));
+    let clicked = ui.icon_label_button(
+        gpu,
+        id,
+        if expanded {
+            "\u{f0143}"
+        } else {
+            "\u{f0140}"
+        },
+        "Advanced options",
+    );
+    ui.pop_sizing();
+    ui.pop_style();
+    clicked
 }
 
 fn misc_settings_page(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Result<Action> {
@@ -1669,31 +2216,8 @@ fn misc_settings_page(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyh
             app.layout_morphing,
         )?;
         ui.space(8.0);
-        ui.push_style(Style {
-            font_size: 13,
-            icon_font_size: Some(16),
-            padding: 6.0,
-            color: ui.theme().muted,
-            background: None,
-            border_color: None,
-            radius: ui.corner_radii().control,
-            selected: false,
-            selection_group: None,
-            ..ui.style()
-        });
-        ui.push_sizing(Some(ui.div_width().min(200.0)), Some(32.0));
-        toggle_morph_advanced = ui.icon_label_button(
-            gpu,
-            "settings-morph-advanced",
-            if app.morph_advanced {
-                "\u{f0143}"
-            } else {
-                "\u{f0140}"
-            },
-            "Advanced options",
-        )?;
-        ui.pop_sizing();
-        ui.pop_style();
+        toggle_morph_advanced =
+            advanced_button(ui, gpu, "settings-morph-advanced", app.morph_advanced)?;
         if app.morph_advanced {
             ui.space(16.0);
             ui.push_sizing(Some(ui.div_width().min(340.0)), None);
@@ -1954,8 +2478,8 @@ fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyh
     // Reserve enough room for the full heading and its controls.
     let title = match app.page {
         Page::Settings => "Settings",
-        Page::Conversations | Page::CreateConversation => "Conversations",
-        Page::Accounts | Page::Create => "Profiles",
+        Page::Conversations | Page::Requests | Page::CreateConversation => "Conversations",
+        Page::Accounts | Page::Create | Page::CreateUsername => "Profiles",
     };
     ui.push_style(Style {
         font_size: if app.page.is_chat() {
@@ -2082,13 +2606,14 @@ fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyh
     let content_action = match app.page {
         Page::Accounts => brand_page(ui, gpu, logo, app.profiles.is_empty())?,
 
-        Page::Create => profile_creation_page(ui, gpu, !app.profiles.is_empty())?,
+        Page::Create | Page::CreateUsername => profile_creation_page(ui, gpu, app)?,
         Page::Conversations => {
             let (action, position) = chat_ui::conversation(ui, gpu, app, show_clipboard)?;
             clipboard_position = position;
             action
         }
 
+        Page::Requests => chat_ui::requests(ui, gpu, app)?,
         Page::CreateConversation => chat_ui::creation(ui, gpu, app)?,
         Page::Settings => settings_page(ui, gpu, app)?,
     };
@@ -2269,6 +2794,7 @@ fn main() -> anyhow::Result<()> {
     let mut app = App {
         root,
         profiles,
+        profile_form: ProfileForm::default(),
         selected: None,
         session: None,
         chat: chat_ui::State::default(),

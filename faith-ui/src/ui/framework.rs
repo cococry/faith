@@ -313,7 +313,7 @@ impl Framework {
             theme_transition: None,
             theme_animating: false,
             animations: true,
-            layout_morphing: false,
+            layout_morphing: true,
             morph_duration: MORPH_DURATION,
             morph_curve: Curve::Cubic,
             morph_strength: 0.5,
@@ -524,6 +524,14 @@ impl Framework {
         } else {
             crate::platform::window::CursorIcon::Default
         }
+    }
+
+    pub fn div_hovered(&self) -> bool {
+        !self.modal_input
+            && self.pointer.is_some_and(|pointer| {
+                let bounds = self.layouts.last().unwrap().bounds;
+                contains(scroll::intersect(bounds, self.clip_bounds()), pointer)
+            })
     }
 
     pub fn pointer_position(&self) -> Option<CursorPosition> {
@@ -1543,12 +1551,12 @@ impl Framework {
     }
 
     pub fn div_begin(&mut self, options: DivOptions) -> anyhow::Result<()> {
-        self.div_begin_impl(None, options, 1.0)
+        self.div_begin_impl(None, options, 1.0, 0.5)
     }
 
     /* names keep scroll positions stable when surrounding containers change */
     pub fn div_begin_id(&mut self, id: &str, options: DivOptions) -> anyhow::Result<()> {
-        self.div_begin_impl(Some(id), options, 1.0)
+        self.div_begin_impl(Some(id), options, 1.0, 0.5)
     }
 
     /* reveal grows from the center on both axes while the target layout stays stable */
@@ -1558,7 +1566,16 @@ impl Framework {
         options: DivOptions,
         reveal: f32,
     ) -> anyhow::Result<()> {
-        self.div_begin_impl(Some(id), options, reveal)
+        self.div_begin_impl(Some(id), options, reveal, 0.5)
+    }
+
+    pub fn div_begin_reveal_from_left(
+        &mut self,
+        id: &str,
+        options: DivOptions,
+        reveal: f32,
+    ) -> anyhow::Result<()> {
+        self.div_begin_impl(Some(id), options, reveal, 0.0)
     }
 
     fn div_begin_impl(
@@ -1566,6 +1583,7 @@ impl Framework {
         name: Option<&str>,
         options: DivOptions,
         reveal: f32,
+        anchor_x: f32,
     ) -> anyhow::Result<()> {
         let s = self.style();
         let sizing = *self.sizing.last().unwrap();
@@ -1604,7 +1622,7 @@ impl Framework {
                 b.width.min(1.0) + (b.width - 1.0).max(0.0) * reveal.clamp(0.0, 1.0);
             let revealed_height =
                 b.height.min(1.0) + (b.height - 1.0).max(0.0) * reveal.clamp(0.0, 1.0);
-            b.x += (b.width - revealed_width) * 0.5;
+            b.x += (b.width - revealed_width) * anchor_x;
             b.y += (b.height - revealed_height) * 0.5;
             b.width = revealed_width;
             b.height = revealed_height;
@@ -2079,17 +2097,40 @@ impl Framework {
         label: &str,
         checked: bool,
     ) -> anyhow::Result<Option<bool>> {
+        self.checkbox_with_suffix(gpu, id, label, None, checked)
+    }
+
+    pub fn checkbox_with_suffix<G: GraphicsDevice>(
+        &mut self,
+        gpu: &mut G,
+        id: &str,
+        label: &str,
+        suffix: Option<&str>,
+        checked: bool,
+    ) -> anyhow::Result<Option<bool>> {
         let font = self.font(Font::Regular)?;
         let icons = self.font(Font::Icons)?;
         let width = self.sizing.last().unwrap().0.unwrap_or(self.div_width());
-        let layout = self.text_renderer.measure_with_options(
-            label,
-            font,
-            TextLayoutOptions {
-                max_width: (width - 34.0).max(1.0),
-            },
-        )?;
-        let bounds = self.place(width, layout.height.max(20.0) + 12.0);
+        let max_width = (width - 34.0).max(1.0);
+        let options = TextLayoutOptions { max_width };
+        let layout = self
+            .text_renderer
+            .measure_with_options(label, font, options)?;
+        let suffix = suffix
+            .map(|suffix| {
+                self.text_renderer
+                    .measure_with_options(suffix, font, options)
+            })
+            .transpose()?;
+        let suffix_inline = suffix
+            .as_ref()
+            .is_some_and(|suffix| layout.width + checkbox::SUFFIX_GAP + suffix.width <= max_width);
+        let label_height = layout.height
+            + suffix
+                .as_ref()
+                .filter(|_| !suffix_inline)
+                .map_or(0.0, |suffix| suffix.height);
+        let bounds = self.place_named(width, label_height.max(20.0) + 12.0, Some(id));
         self.register_control(id, bounds, FocusKind::Checkbox, false);
         self.checkbox_ids.insert(id.to_owned());
         let occurrence = self.button_occurrences.entry(id.to_owned()).or_default();
@@ -2166,6 +2207,9 @@ impl Framework {
         let widget = checkbox::Checkbox {
             bounds,
             layout,
+            suffix,
+            suffix_inline,
+            label_height,
             icons,
             checked,
             style,

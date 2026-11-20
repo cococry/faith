@@ -191,7 +191,7 @@ impl Default for Settings {
             theme: DEFAULT_ID.to_owned(),
             rounded_corners: true,
             animations: true,
-            layout_morphing: false,
+            layout_morphing: true,
             morph_duration_ms: crate::ui::animation::MORPH_DURATION.as_millis() as u32,
             morph_curve: Curve::Cubic,
             morph_strength: 50,
@@ -238,14 +238,14 @@ mod tests {
     }
 
     #[test]
-    fn layout_morphing_is_opt_in_and_persists_independently() {
+    fn layout_morphing_defaults_on_and_persists_independently() {
         let mut settings: Settings = serde_json::from_str("{}").unwrap();
-        assert!(!settings.layout_morphing);
-        settings.animations = false;
-        settings.layout_morphing = true;
+        assert!(settings.layout_morphing);
+        settings.animations = true;
+        settings.layout_morphing = false;
         let saved = serde_json::to_string(&settings).unwrap();
         let restored: Settings = serde_json::from_str(&saved).unwrap();
-        assert!(!restored.animations);
-        assert!(restored.layout_morphing);
+        assert!(restored.animations);
+        assert!(!restored.layout_morphing);
     }
 }

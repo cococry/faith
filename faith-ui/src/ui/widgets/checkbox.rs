@@ -6,9 +6,14 @@ use crate::{
 
 use std::sync::Arc;
 
+pub const SUFFIX_GAP: f32 = 4.0;
+
 pub struct Checkbox {
     pub bounds: Bounds,
     pub layout: Arc<TextLayout>,
+    pub suffix: Option<Arc<TextLayout>>,
+    pub suffix_inline: bool,
+    pub label_height: f32,
     pub icons: FontHandle,
     pub checked: bool,
     pub style: Style,
@@ -25,10 +30,11 @@ impl Checkbox {
         theme: Theme,
     ) -> anyhow::Result<()> {
         let b = self.bounds;
+        let center_y = b.y + b.height * 0.5;
         let box_rect = if self.focused {
-            [b.x, b.y + 5.0, 22.0, 22.0]
+            [b.x, center_y - 11.0, 22.0, 22.0]
         } else {
-            [b.x, b.y + 6.0, 20.0, 20.0]
+            [b.x, center_y - 10.0, 20.0, 20.0]
         };
         let style = self.style;
         ui.rounded_box(
@@ -55,14 +61,29 @@ impl Checkbox {
             )?;
         }
 
+        let x = b.x + 34.0;
+        let y = center_y - self.label_height * 0.5;
+        let width = (b.width - 34.0).max(1.0);
         text.color = theme.text;
-        text.render_layout(
-            [b.x + 34.0, b.y + 6.0],
-            &self.layout,
-            (b.width - 34.0).max(1.0),
-            false,
-            gpu,
-            ui,
-        )
+        text.render_layout([x, y], &self.layout, width, false, gpu, ui)?;
+
+        if let Some(suffix) = &self.suffix {
+            let offset = if self.suffix_inline {
+                [self.layout.width + SUFFIX_GAP, 0.0]
+            } else {
+                [0.0, self.layout.height]
+            };
+            text.color = theme.muted;
+            text.render_layout(
+                [x + offset[0], y + offset[1]],
+                suffix,
+                (width - offset[0]).max(1.0),
+                false,
+                gpu,
+                ui,
+            )?;
+        }
+
+        Ok(())
     }
 }

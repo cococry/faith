@@ -2084,8 +2084,8 @@ static faith_status_code_t client_make_handshake(faith_client_t *client,
   }
 
   case FAITH_ENVELOPE_CLIENT_DISCONNECT: {
-    client_handle_disconnect(client, &envl);
-    _FH_RETURN_DEFER(FAITH_ERR_IO);
+    _FH_CHECK_DEFER(client_handle_disconnect(client, &envl));
+    _FH_RETURN_DEFER(FAITH_OK);
   }
 
   default:
@@ -2160,7 +2160,7 @@ static void *faith_client_thread_routine(void *arg) {
       int authorized = 0;
       _FH_CHECK(client_make_handshake(client, &authorized));
 
-      if (_fh_rc != FAITH_OK) {
+      if (_fh_rc != FAITH_OK || !atomic_load(&client->connected)) {
         goto disconnect;
       }
 
@@ -2565,6 +2565,13 @@ faith_status_code_t faith_client_stop(faith_client_t *client) {
   int fd = client->sockfd;
 
   pthread_mutex_unlock(&client->lock);
+
+  if (was_running) {
+    /* wake the client if the server told it to wait for a manual reconnect */
+    pthread_mutex_lock(&client->reconnect_lock);
+    pthread_cond_broadcast(&client->reconnect_cond);
+    pthread_mutex_unlock(&client->reconnect_lock);
+  }
 
   if (was_running && fd >= 0) {
     shutdown(fd, SHUT_RDWR);

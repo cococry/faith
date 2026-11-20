@@ -1,4 +1,4 @@
-use super::{Chat, Message, Metadata};
+use super::{Chat, Message, Metadata, Request};
 use faith_client::{EventStore, GroupKind, GroupPacket, Id, StoredEvent};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::{
@@ -13,6 +13,11 @@ pub struct Conversation {
     pub revision: u64,
     pub members: Vec<Id>,
     pub active: bool,
+}
+
+pub struct InvitationBatch {
+    pub required: bool,
+    pub responses: Vec<(Id, bool)>,
 }
 
 pub struct Store {
@@ -160,6 +165,10 @@ impl Store {
             CREATE TABLE IF NOT EXISTS cursors(device BLOB PRIMARY KEY,seq INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value BLOB NOT NULL);
             CREATE TABLE IF NOT EXISTS outbox(id BLOB PRIMARY KEY,packet BLOB NOT NULL,targets BLOB NOT NULL);
+            CREATE TABLE IF NOT EXISTS incoming_requests(conversation BLOB PRIMARY KEY, requester BLOB NOT NULL, required INTEGER NOT NULL, username TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS invitation_batches(conversation BLOB PRIMARY KEY, required INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS invitation_responses(conversation BLOB NOT NULL, recipient BLOB NOT NULL, accepted INTEGER NOT NULL, PRIMARY KEY(conversation,recipient));
+            CREATE TABLE IF NOT EXISTS disclosed_usernames(conversation BLOB NOT NULL, member BLOB NOT NULL, username TEXT NOT NULL, PRIMARY KEY(conversation,member));
             CREATE TABLE IF NOT EXISTS chat_metadata(conversation BLOB PRIMARY KEY,data TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS messages_by_conversation ON messages(conversation);")?;
         Ok(Self {
@@ -279,17 +288,22 @@ impl Store {
     pub fn history(&self, chat: &Chat) -> anyhow::Result<Vec<Message>> {
         let db = self.db()?;
         let mut stmt = db.prepare_cached(
-            "SELECT sender,body,rowid FROM messages WHERE conversation=? ORDER BY rowid DESC LIMIT 100",
+            "SELECT m.sender,m.body,m.rowid,u.username FROM messages m
+             LEFT JOIN disclosed_usernames u ON u.conversation=m.conversation AND u.member=m.sender
+             WHERE m.conversation=? ORDER BY m.rowid DESC LIMIT 100",
         )?;
         let mut messages = stmt
             .query_map([chat.id.0.as_slice()], |row| {
                 let sender = id(row.get(0)?)?;
                 let body: String = row.get(1)?;
+                let disclosed: Option<String> = row.get(3)?;
                 let author = chat
                     .metadata
                     .as_ref()
                     .and_then(|metadata| metadata.partners.iter().find(|(id, _)| *id == sender.0))
-                    .map_or_else(|| sender.to_string(), |(_, name)| name.clone());
+                    .map(|(_, name)| name.clone())
+                    .or(disclosed)
+                    .unwrap_or_else(|| sender.to_string());
                 Ok(Message {
                     row_id: row.get(2)?,
                     sender,
@@ -303,6 +317,56 @@ impl Store {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         messages.reverse();
         Ok(messages)
+    }
+
+    pub fn requests(&self) -> anyhow::Result<Vec<Request>> {
+        let db = self.db()?;
+        let mut stmt = db.prepare_cached(
+            "SELECT conversation,requester,required,username FROM incoming_requests ORDER BY rowid",
+        )?;
+        Ok(stmt
+            .query_map([], |row| {
+                Ok(Request {
+                    conversation: id(row.get(0)?)?,
+                    requester: id(row.get(1)?)?,
+                    required: row.get(2)?,
+                    username: row.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn remove_request(&self, conversation: Id) -> anyhow::Result<()> {
+        self.db()?.execute(
+            "DELETE FROM incoming_requests WHERE conversation=?",
+            [conversation.0],
+        )?;
+        Ok(())
+    }
+
+    pub fn invitations(&self, conversation: Id) -> anyhow::Result<Option<InvitationBatch>> {
+        let db = self.db()?;
+        let required = db
+            .query_row(
+                "SELECT required FROM invitation_batches WHERE conversation=?",
+                [conversation.0],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(required) = required else {
+            return Ok(None);
+        };
+
+        let mut stmt = db.prepare_cached(
+            "SELECT recipient,accepted FROM invitation_responses WHERE conversation=?",
+        )?;
+        let responses = stmt
+            .query_map([conversation.0], |row| Ok((id(row.get(0)?)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(Some(InvitationBatch {
+            required,
+            responses,
+        }))
     }
 
     pub fn pending(&self) -> anyhow::Result<Option<(GroupPacket, Vec<Id>)>> {
@@ -321,6 +385,7 @@ impl Store {
         packet: &GroupPacket,
         targets: &[Id],
         metadata: Option<&Metadata>,
+        invite: Option<bool>,
     ) -> anyhow::Result<()> {
         let mut db = self.db()?;
         let tx = db.transaction()?;
@@ -343,12 +408,24 @@ impl Store {
             )?;
         }
 
+        if let Some(required) = invite {
+            tx.execute(
+                "INSERT INTO invitation_batches(conversation,required) VALUES(?,?)",
+                params![packet.conversation.0, required],
+            )?;
+        }
+
         tx.commit()?;
         Ok(())
     }
 
     pub fn discard_pending(&self) -> anyhow::Result<()> {
-        self.db()?.execute("DELETE FROM outbox", [])?;
+        let mut db = self.db()?;
+        let tx = db.transaction()?;
+        tx.execute("DELETE FROM outbox", [])?;
+        tx.execute("DELETE FROM invitation_batches", [])?;
+        tx.execute("DELETE FROM invitation_responses", [])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -404,16 +481,71 @@ impl Store {
                 } else {
                     tx.execute("INSERT INTO conversations(id,revision,members,active) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,members=excluded.members,active=excluded.active",
                         params![packet.conversation.0.as_slice(),packet.revision,pack(&packet.members),packet.members.contains(&event.auth)])?;
+                    tx.execute(
+                        "DELETE FROM incoming_requests WHERE conversation=?",
+                        [packet.conversation.0],
+                    )?;
                 }
 
                 if sender == event.auth {
-                    tx.execute(
+                    let removed = tx.execute(
                         "DELETE FROM outbox WHERE id=?",
                         [packet.message.0.as_slice()],
                     )?;
+                    if removed != 0 && packet.kind == GroupKind::Create {
+                        tx.execute(
+                            "DELETE FROM invitation_batches WHERE conversation=?",
+                            [packet.conversation.0],
+                        )?;
+                        tx.execute(
+                            "DELETE FROM invitation_responses WHERE conversation=?",
+                            [packet.conversation.0],
+                        )?;
+                    }
                 }
             }
             // Rejected membership/forged sender is durably handled, never applied.
+        } else if matches!(
+            event.kind,
+            super::REQUEST_EVENT | super::RESPONSE_EVENT | super::USERNAMES_EVENT
+        ) {
+            // The native client validates these payloads before handing them to us.
+            let conversation = &event.data[..16];
+            match event.kind {
+                super::REQUEST_EVENT => {
+                    let required = event.data.len() > 32;
+                    let username = if required {
+                        std::str::from_utf8(&event.data[33..])?
+                    } else {
+                        ""
+                    };
+                    tx.execute(
+                        "INSERT OR IGNORE INTO incoming_requests VALUES(?,?,?,?)",
+                        params![conversation, &event.data[16..32], required, username],
+                    )?;
+                }
+
+                super::RESPONSE_EVENT => {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO invitation_responses
+                         SELECT ?,?,? WHERE EXISTS (SELECT 1 FROM invitation_batches WHERE conversation=?)",
+                        params![conversation, &event.data[16..32], event.data[32] == 1, conversation],
+                    )?;
+                }
+
+                _ => {
+                    let mut data = &event.data[16..];
+                    while !data.is_empty() {
+                        let end = 17 + usize::from(data[16]);
+                        let username = std::str::from_utf8(&data[17..end])?;
+                        tx.execute(
+                            "INSERT OR REPLACE INTO disclosed_usernames VALUES(?,?,?)",
+                            params![conversation, &data[..16], username],
+                        )?;
+                        data = &data[end..];
+                    }
+                }
+            }
         }
 
         tx.execute("INSERT INTO cursors(device,seq) VALUES(?,?) ON CONFLICT(device) DO UPDATE SET seq=excluded.seq",params![event.device.0.as_slice(),event.sequence])?;
@@ -436,5 +568,73 @@ impl EventStore for Store {
             tracing::error!("Durable event storage failed: {error}");
             faith_client::Error::Native(6)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::profiles;
+    use std::os::unix::fs::DirBuilderExt;
+
+    #[test]
+    fn invitation_policy_and_responses_survive_reopening_a_profile() -> anyhow::Result<()> {
+        let directory = std::env::temp_dir().join(format!("faith-test-{}", Id::random()?));
+        let run = || -> anyhow::Result<()> {
+            let profile = profiles::prepare_claim(&directory, "Local")?;
+            assert!(profiles::discover(&directory)?.is_empty());
+
+            let auth = Id([1; 16]);
+            let partner = Id([2; 16]);
+            let device = Id([3; 16]);
+            let outgoing = Id([4; 16]);
+            let incoming = Id([5; 16]);
+            let packet = GroupPacket {
+                kind: GroupKind::Create,
+                revision: 0,
+                conversation: outgoing,
+                message: Id([6; 16]),
+                members: vec![auth, partner],
+                text: Vec::new(),
+            };
+
+            let store = Store::open(&profile.path)?;
+            store.enqueue(&packet, &packet.members, None, Some(true))?;
+            let request = [incoming.0.as_slice(), &partner.0, &[1], b"Faith_1"].concat();
+            let response = [outgoing.0.as_slice(), &partner.0, &[1]].concat();
+            for (sequence, kind, data) in [
+                (1, super::super::REQUEST_EVENT, request.as_slice()),
+                (2, super::super::RESPONSE_EVENT, response.as_slice()),
+            ] {
+                store.apply(StoredEvent {
+                    auth,
+                    device,
+                    sequence,
+                    kind,
+                    data,
+                })?;
+            }
+
+            drop(store);
+            let store = Store::open(&profile.path)?;
+            let requests = store.requests()?;
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].conversation, incoming);
+            assert!(requests[0].required);
+            assert_eq!(requests[0].username, "Faith_1");
+
+            let invitations = store.invitations(outgoing)?.unwrap();
+            assert!(invitations.required);
+            assert_eq!(invitations.responses, vec![(partner, true)]);
+            assert_eq!(store.pending()?.unwrap().0.conversation, outgoing);
+            Ok(())
+        };
+
+        fs::DirBuilder::new().mode(0o700).create(&directory)?;
+        let result = run();
+        let cleanup = fs::remove_dir_all(&directory);
+        result?;
+        cleanup?;
+        Ok(())
     }
 }

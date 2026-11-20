@@ -20,7 +20,9 @@ pub struct State {
     pub submission: Option<(u64, Submission)>,
     pub partners: Vec<(Id, String)>,
     pub naming: bool,
+    pub require_username: bool,
     pub session: u64,
+    pub footer_hover: RefCell<crate::ui::animation::Presence>,
     form: u64,
     history_layout: RefCell<Option<HistoryLayout>>,
 }
@@ -32,7 +34,9 @@ impl Default for State {
             submission: None,
             partners: Vec::new(),
             naming: false,
+            require_username: false,
             session: 0,
+            footer_hover: RefCell::default(),
             form: 0,
             history_layout: RefCell::new(None),
         }
@@ -69,6 +73,7 @@ impl State {
         self.clear_partner_inputs(ui);
         self.partners.clear();
         self.naming = false;
+        self.require_username = false;
         self.form += 1;
     }
 
@@ -244,6 +249,26 @@ pub fn creation(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Re
             Some(256),
             editing,
         )?;
+        if editing && form.snapshot.username.is_some() {
+            ui.space(12.0);
+            if let Some(value) = ui.checkbox(
+                gpu,
+                "require-conversation-username",
+                "Require username disclosure",
+                form.require_username,
+            )? {
+                action = Action::RequireConversationUsername(value);
+            }
+
+            crate::disclosure_text(
+                ui,
+                gpu,
+                "require-username-explanation",
+                "Your username will be shared with everyone you invite.",
+                form.require_username,
+            )?;
+        }
+
         can_continue = !title.trim().is_empty() && ready(app);
         if !editing {
             ui.space(12.0);
@@ -422,6 +447,7 @@ pub fn creation(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Re
             Action::CreateConversation {
                 title: title.trim().to_owned(),
                 partners: form.partners.clone(),
+                require_username: form.require_username,
             }
         } else {
             Action::NameNewConversation(partner)
@@ -494,6 +520,194 @@ fn command_button(
     let result = ui.icon_label_button(gpu, id, glyph, title);
     ui.pop_style();
     result
+}
+
+pub fn requests(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Result<Action> {
+    let Some(profile) = &app.selected else {
+        return Ok(Action::None);
+    };
+    let snapshot = &app.chat.snapshot;
+    let width = (ui.div_width() - 48.0).clamp(1.0, 520.0);
+    ui.set_position((ui.div_width() - width) * 0.5, 24.0);
+    ui.div_begin_id(
+        "incoming-message-requests",
+        DivOptions {
+            width: Some(width),
+            height: Some((ui.div_height() - 74.0).max(1.0)),
+            scrollable: true,
+        },
+    )?;
+    label(ui, gpu, "Message requests", 25, true, false, false)?;
+    ui.space(20.0);
+
+    if let Some(notice) = snapshot.notices.last() {
+        ui.div_begin_id(
+            "request-notice",
+            DivOptions {
+                width: Some(ui.div_width()),
+                ..Default::default()
+            },
+        )?;
+        label(ui, gpu, notice, 12, false, true, false)?;
+        ui.div_end();
+        ui.space(12.0);
+    }
+
+    if snapshot.requests.is_empty() {
+        let top = (ui.div_height() * 0.42 - 36.0).max(ui.position().1 + 24.0);
+        ui.set_position(0.0, top);
+        ui.div_begin_id(
+            "requests-empty",
+            DivOptions {
+                width: Some(ui.div_width()),
+                ..Default::default()
+            },
+        )?;
+        ui.push_style(Style {
+            font_size: 36,
+            color: ui.theme().muted,
+            ..ui.style()
+        });
+        ui.text_centered(gpu, crate::REQUESTS, Some(Font::Icons))?;
+        ui.pop_style();
+        ui.space(16.0);
+        label(
+            ui,
+            gpu,
+            "No pending message requests",
+            14,
+            false,
+            true,
+            true,
+        )?;
+        ui.div_end();
+    }
+
+    let mut action = Action::None;
+    let has_username = snapshot.username.is_some();
+    let can_respond = snapshot.authorized && snapshot.responding.is_none();
+
+    for request in &*snapshot.requests {
+        let id = request.conversation;
+        request_card(ui, &format!("request-{id}"))?;
+        let requester;
+        let name = if request.username.is_empty() {
+            requester = request.requester.to_string();
+            &requester
+        } else {
+            &request.username
+        };
+        label(ui, gpu, name, 15, true, false, false)?;
+        let description = match (request.required, has_username, snapshot.auto_disclose) {
+            (true, _, _) if snapshot.reject_required => {
+                "This profile automatically declines requests that require a username."
+            }
+            (true, true, _) => "Accepting shares your username with this conversation.",
+            (true, false, _) => "You need a username to accept this request.",
+            (false, true, true) => "Accepting shares your username automatically.",
+            (false, _, _) => "Username disclosure is optional.",
+        };
+        ui.space(4.0);
+        label(ui, gpu, description, 13, false, true, false)?;
+        ui.space(14.0);
+
+        let respond = |accept, disclose| Action::RespondToRequest {
+            profile: profile.clone(),
+            conversation: id,
+            accept,
+            disclose,
+        };
+        let can_accept =
+            can_respond && (!request.required || has_username && !snapshot.reject_required);
+        let can_share = !request.required && has_username && !snapshot.auto_disclose;
+        let width = ui.div_width();
+
+        let pair = width >= 140.0;
+        let button_width = if pair {
+            ((width - 8.0) * 0.5).min(96.0)
+        } else {
+            width
+        };
+        ui.push_sizing(Some(button_width), Some(36.0));
+
+        let y = ui.position().1;
+        if command_button(
+            ui,
+            gpu,
+            &format!("accept-request-{id}"),
+            "",
+            "Accept",
+            can_accept,
+            true,
+        )? {
+            action = respond(true, false);
+        }
+
+        if pair {
+            ui.set_position(button_width + 8.0, y);
+        } else {
+            ui.space(8.0);
+        }
+
+        if command_button(
+            ui,
+            gpu,
+            &format!("decline-request-{id}"),
+            "",
+            "Decline",
+            can_respond,
+            false,
+        )? {
+            action = respond(false, false);
+        }
+
+        ui.pop_sizing();
+
+        if can_share {
+            ui.space(8.0);
+            ui.push_sizing(Some(width.min(220.0)), Some(36.0));
+            if command_button(
+                ui,
+                gpu,
+                &format!("share-request-username-{id}"),
+                "",
+                if width >= 196.0 {
+                    "Accept and share username"
+                } else {
+                    "Accept and share"
+                },
+                can_respond,
+                false,
+            )? {
+                action = respond(true, true);
+            }
+
+            ui.pop_sizing();
+        }
+
+        end_panel(ui);
+        ui.space(12.0);
+    }
+
+    ui.div_end();
+    Ok(action)
+}
+
+fn request_card(ui: &mut Framework, id: &str) -> anyhow::Result<()> {
+    ui.push_style(Style {
+        background: Some(ui.theme().surface),
+        border_color: Some(ui.theme().border),
+        radius: ui.corner_radii().row,
+        padding: 16.0,
+        ..ui.style()
+    });
+    ui.div_begin_id(
+        id,
+        DivOptions {
+            width: Some(ui.div_width()),
+            ..Default::default()
+        },
+    )
 }
 
 fn conversation_overview(
