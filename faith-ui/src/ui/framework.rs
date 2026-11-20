@@ -194,6 +194,7 @@ pub struct ActionRow<'a> {
     pub detail: &'a str,
     pub icon: &'a str,
     pub selected: bool,
+    pub badge: Option<&'a str>,
 }
 
 pub enum ClipboardAction {
@@ -243,6 +244,7 @@ pub struct Framework {
     scheduler: Scheduler,
     frame_time: Instant,
     has_rendered: bool,
+    window_focused: bool,
     deadline: Option<Instant>,
     rounded_corners: bool,
     dropdowns: HashMap<String, dropdown::State>,
@@ -327,6 +329,7 @@ impl Framework {
             scheduler: Scheduler::new(platform.waker())?,
             frame_time: Instant::now(),
             has_rendered: false,
+            window_focused: true,
             deadline: None,
             rounded_corners: false,
             dropdowns: HashMap::new(),
@@ -527,9 +530,19 @@ impl Framework {
     }
 
     pub fn div_hovered(&self) -> bool {
+        self.region_hovered([0.0, 0.0, self.div_width(), self.div_height()])
+    }
+
+    pub fn region_hovered(&self, [x, y, width, height]: [f32; 4]) -> bool {
         !self.modal_input
             && self.pointer.is_some_and(|pointer| {
-                let bounds = self.layouts.last().unwrap().bounds;
+                let origin = self.layouts.last().unwrap().bounds;
+                let bounds = Bounds {
+                    x: origin.x + x,
+                    y: origin.y + y,
+                    width,
+                    height,
+                };
                 contains(scroll::intersect(bounds, self.clip_bounds()), pointer)
             })
     }
@@ -971,6 +984,10 @@ impl Framework {
         self.rounded_corners = enabled;
     }
 
+    pub fn rounded_corners_enabled(&self) -> bool {
+        self.rounded_corners
+    }
+
     pub fn corner_radii(&self) -> CornerRadii {
         if self.rounded_corners {
             self.theme.radii
@@ -999,6 +1016,12 @@ impl Framework {
             .iter()
             .any(|event| matches!(event, WindowEvent::Resized { .. }));
         self.deadline = None;
+
+        for event in events {
+            if let WindowEvent::FocusChanged(focused) = event {
+                self.window_focused = *focused;
+            }
+        }
 
         if self.theme_transition.is_some() {
             self.animate_until(self.frame_time);
@@ -1288,7 +1311,7 @@ impl Framework {
                 .filter(|(id, _)| *id == hovered.id)
                 .unwrap_or((hovered.id, self.frame_time));
             self.tooltip_hover = Some((hovered.id, since));
-            let deadline = since + Duration::from_secs(1);
+            let deadline = since + Duration::from_millis(600);
             show = self.frame_time >= deadline;
             if show {
                 self.tooltip = Some(hovered);
@@ -2108,10 +2131,34 @@ impl Framework {
         suffix: Option<&str>,
         checked: bool,
     ) -> anyhow::Result<Option<bool>> {
+        self.checkbox_sized(gpu, id, label, suffix, checked, 20.0)
+    }
+
+    pub fn compact_checkbox<G: GraphicsDevice>(
+        &mut self,
+        gpu: &mut G,
+        id: &str,
+        label: &str,
+        checked: bool,
+    ) -> anyhow::Result<Option<bool>> {
+        self.checkbox_sized(gpu, id, label, None, checked, 16.0)
+    }
+
+    fn checkbox_sized<G: GraphicsDevice>(
+        &mut self,
+        gpu: &mut G,
+        id: &str,
+        label: &str,
+        suffix: Option<&str>,
+        checked: bool,
+        size: f32,
+    ) -> anyhow::Result<Option<bool>> {
+        let enabled = self.style().enabled;
         let font = self.font(Font::Regular)?;
         let icons = self.font(Font::Icons)?;
         let width = self.sizing.last().unwrap().0.unwrap_or(self.div_width());
-        let max_width = (width - 34.0).max(1.0);
+        let text_offset = size + 14.0;
+        let max_width = (width - text_offset).max(1.0);
         let options = TextLayoutOptions { max_width };
         let layout = self
             .text_renderer
@@ -2130,8 +2177,11 @@ impl Framework {
                 .as_ref()
                 .filter(|_| !suffix_inline)
                 .map_or(0.0, |suffix| suffix.height);
-        let bounds = self.place_named(width, label_height.max(20.0) + 12.0, Some(id));
-        self.register_control(id, bounds, FocusKind::Checkbox, false);
+        let bounds = self.place_named(width, label_height.max(size) + size * 0.6, Some(id));
+        if enabled {
+            self.register_control(id, bounds, FocusKind::Checkbox, false);
+        }
+
         self.checkbox_ids.insert(id.to_owned());
         let occurrence = self.button_occurrences.entry(id.to_owned()).or_default();
         let key = (id.to_owned(), *occurrence);
@@ -2142,7 +2192,7 @@ impl Framework {
             self.batch_pointer,
             &self.events,
         );
-        for event in &self.events {
+        for event in self.events.iter().filter(|_| enabled) {
             if matches!(
                 event,
                 WindowEvent::MouseButtonPressed {
@@ -2169,7 +2219,7 @@ impl Framework {
         {
             self.focused = None;
         }
-        let focused = self.focused.as_deref() == Some(id);
+        let focused = enabled && self.focused.as_deref() == Some(id);
         let toggled = focused
             && self.events.iter().any(|event| {
                 matches!(event, WindowEvent::TextInput(text) if text == " ")
@@ -2200,8 +2250,8 @@ impl Framework {
                 border_color: (!checked).then_some(self.theme.border),
                 ..Style::default()
             },
-            response.hovered,
-            response.pressed,
+            enabled && response.hovered,
+            enabled && response.pressed,
         );
         let style = self.animate_style(key, style);
         let widget = checkbox::Checkbox {
@@ -2210,6 +2260,8 @@ impl Framework {
             suffix,
             suffix_inline,
             label_height,
+            size,
+            text_offset,
             icons,
             checked,
             style,
@@ -2223,7 +2275,7 @@ impl Framework {
             &mut self.ui_renderer,
             self.theme,
         )?;
-        Ok((response.clicked || toggled).then_some(!checked))
+        Ok((enabled && (response.clicked || toggled)).then_some(!checked))
     }
 
     pub fn dropdown<G: GraphicsDevice>(
@@ -2735,6 +2787,15 @@ impl Framework {
         let icons = self.font_at(Font::Icons, 20)?;
         let title = self.font_at(Font::Regular, 14)?;
         let detail = self.font_at(Font::Regular, 12)?;
+        let badge_font = if row.badge.is_some() {
+            Some(self.font_at(Font::Regular, 11)?)
+        } else {
+            None
+        };
+        let badge = match (row.badge, badge_font) {
+            (Some(value), Some(font)) => Some(self.text_renderer.measure(value, font)?),
+            _ => None,
+        };
         self.ui_renderer
             .push_clip([bounds.x, bounds.y, bounds.width, bounds.height]);
         let result = (|| -> anyhow::Result<()> {
@@ -2748,10 +2809,11 @@ impl Framework {
                 gpu,
                 &mut self.ui_renderer,
             )?;
+            let badge_width = badge.as_ref().map_or(0.0, |layout| layout.width + 16.0);
             self.ui_renderer.push_clip([
                 bounds.x + 44.0,
                 bounds.y,
-                (bounds.width - 56.0).max(0.0),
+                (bounds.width - 56.0 - badge_width - 8.0).max(0.0),
                 bounds.height,
             ]);
             let result = (|| -> anyhow::Result<()> {
@@ -2774,6 +2836,31 @@ impl Framework {
                 )
             })();
             self.ui_renderer.pop_clip();
+            if let (Some(value), Some(layout)) = (row.badge, badge) {
+                let height = (layout.height + 6.0).min(bounds.height - 12.0);
+                let badge_x = bounds.x + bounds.width - badge_width - 10.0;
+                let badge_y = bounds.y + (bounds.height - height) * 0.5;
+                let badge_font = self.font_at(Font::Regular, 11)?;
+                self.ui_renderer.rounded_box(
+                    [badge_x, badge_y, badge_width, height],
+                    if self.rounded_corners {
+                        height * 0.5
+                    } else {
+                        0.0
+                    },
+                    Some(self.theme.primary),
+                    None,
+                )?;
+                self.text_renderer.color = self.theme.primary_text;
+                self.text_renderer.render(
+                    badge_x + 8.0,
+                    bounds.y + (bounds.height - layout.height) * 0.5,
+                    value,
+                    badge_font,
+                    gpu,
+                    &mut self.ui_renderer,
+                )?;
+            }
             result
         })();
         self.ui_renderer.pop_clip();
@@ -2939,7 +3026,11 @@ impl Framework {
                 let top = b.y + (b.height - height) * 0.5;
                 self.ui_renderer.rounded_box(
                     [badge_x, top, badge_width, height],
-                    self.corner_radii().badge,
+                    if self.rounded_corners {
+                        height * 0.5
+                    } else {
+                        0.0
+                    },
                     Some(self.theme.primary),
                     None,
                 )?;
@@ -3004,6 +3095,10 @@ impl Framework {
 
     pub fn input_submitted(&self, id: &str) -> bool {
         self.submitted_input.as_deref() == Some(id)
+    }
+
+    pub fn input_value(&self, id: &str) -> Option<&str> {
+        self.inputs.get(id).map(InputField::text)
     }
 
     pub fn set_input(&mut self, id: &str, text: &str) {
@@ -3105,6 +3200,7 @@ impl Framework {
             return Ok(field.text().to_owned());
         }
 
+        let next_blink = field.update_caret(self.frame_time, self.window_focused);
         self.ui_renderer.corner_box(
             [b.x, b.y, b.width, b.height],
             if self.rounded_corners {
@@ -3129,7 +3225,7 @@ impl Framework {
         if field.text().is_empty() && !hint.is_empty() {
             self.text_renderer.color = self.theme.muted;
             let hint_result = self.text_renderer.render(
-                b.x + s.padding + 4.0,
+                b.x + s.padding,
                 b.y + s.padding,
                 hint,
                 font,
@@ -3143,7 +3239,12 @@ impl Framework {
         }
 
         result?;
-        Ok(field.text().to_owned())
+        let value = field.text().to_owned();
+        if let Some(next_blink) = next_blink {
+            self.animate_until(next_blink);
+        }
+
+        Ok(value)
     }
 }
 
@@ -3217,6 +3318,7 @@ fn dispatch_input(
             } => {
                 if pointer.is_some_and(|p| contains(bounds, p)) {
                     *focused = Some(id.into());
+                    field.restart_caret();
                 } else if focused.as_deref() == Some(id) {
                     *focused = None;
                 }

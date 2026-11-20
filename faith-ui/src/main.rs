@@ -48,6 +48,7 @@ enum Page {
     CreateUsername,
     Conversations,
     Requests,
+    PendingInvites,
     CreateConversation,
     Settings,
 }
@@ -56,7 +57,7 @@ impl Page {
     fn is_chat(self) -> bool {
         matches!(
             self,
-            Self::Conversations | Self::Requests | Self::CreateConversation
+            Self::Conversations | Self::Requests | Self::PendingInvites | Self::CreateConversation
         )
     }
 }
@@ -118,7 +119,10 @@ enum Action {
     ListPage(usize),
     NewConversation(Profile),
     MessageRequests(Profile),
+    PendingInvites(Profile),
     RequireConversationUsername(bool),
+    DiscloseConversationUsername(bool),
+    RequestDisclosure(faith_client::Id, bool),
     RespondToRequest {
         profile: Profile,
         conversation: faith_client::Id,
@@ -133,6 +137,17 @@ enum Action {
         profile: Profile,
         id: faith_client::Id,
     },
+    PromptSenderName {
+        profile: Profile,
+        id: faith_client::Id,
+        sender: faith_client::Id,
+    },
+    NameSender {
+        profile: Profile,
+        id: faith_client::Id,
+        sender: faith_client::Id,
+        name: String,
+    },
     RenameConversation {
         profile: Profile,
         id: faith_client::Id,
@@ -143,7 +158,8 @@ enum Action {
     CreateConversation {
         title: String,
         partners: Vec<(faith_client::Id, String)>,
-        require_username: bool,
+        policy: client::InvitationPolicy,
+        use_disclosed_title: bool,
     },
     SendMessage {
         id: faith_client::Id,
@@ -387,7 +403,7 @@ impl App {
             return;
         };
 
-        if let Some((id, accepted, created)) = snapshot.submission
+        if let Some((id, accepted, _created)) = snapshot.submission
             && self
                 .chat
                 .submission
@@ -399,7 +415,7 @@ impl App {
                 match submission {
                     chat_ui::Submission::Create => {
                         if self.page == Page::CreateConversation {
-                            self.conversation = created;
+                            self.conversation = None;
                             self.page = Page::Conversations;
                             self.chat.clear_form(ui);
                             ui.navigation_changed();
@@ -426,7 +442,17 @@ impl App {
             }
         }
 
+        self.chat.request_disclosure.retain(|id, _| {
+            snapshot
+                .requests
+                .iter()
+                .any(|request| request.conversation == *id)
+        });
         self.chat.snapshot = snapshot;
+        if self.page == Page::PendingInvites && self.chat.snapshot.pending_invites.is_empty() {
+            self.page = Page::Conversations;
+            ui.navigation_changed();
+        }
     }
 
     fn act(
@@ -476,6 +502,7 @@ impl App {
                 | Action::OpenProfile(_)
                 | Action::OpenConversation { .. }
                 | Action::MessageRequests(_)
+                | Action::PendingInvites(_)
                 | Action::NewConversation(_)
                 | Action::OpenSettings { .. }
                 | Action::Choose
@@ -490,7 +517,8 @@ impl App {
             | Action::OpenMenu
             | Action::OpenQuickshell
             | Action::Quit
-            | Action::PromptConversationName { .. } => {
+            | Action::PromptConversationName { .. }
+            | Action::PromptSenderName { .. } => {
                 return Ok(());
             }
             Action::Back => {
@@ -538,8 +566,31 @@ impl App {
                 self.error.clear();
             }
 
+            Action::PendingInvites(profile) => {
+                self.ensure_profile(profile, cli, platform)?;
+                self.page = Page::PendingInvites;
+                self.error.clear();
+            }
+
             Action::RequireConversationUsername(value) => {
+                let id = self.chat.title_id();
+                let default = self.chat.default_title();
+                let title = ui.input_value(&id).unwrap_or_default();
+                if value && title == default {
+                    ui.set_input(&id, "");
+                } else if !value && title.is_empty() {
+                    ui.set_input(&id, &default);
+                }
+
                 self.chat.require_username = value;
+            }
+
+            Action::DiscloseConversationUsername(value) => {
+                self.chat.disclose_username = Some(value);
+            }
+
+            Action::RequestDisclosure(id, value) => {
+                self.chat.request_disclosure.insert(id, value);
             }
 
             Action::RespondToRequest {
@@ -595,7 +646,12 @@ impl App {
                 }
 
                 self.chat.naming = true;
-                ui.set_input(&self.chat.title_id(), &self.chat.default_title());
+                let title = if self.chat.require_username {
+                    String::new()
+                } else {
+                    self.chat.default_title()
+                };
+                ui.set_input(&self.chat.title_id(), &title);
             }
 
             Action::EditChatPartners => {
@@ -608,6 +664,16 @@ impl App {
                 self.submit_chat(client::Command::Rename { id, title })?;
             }
 
+            Action::NameSender {
+                profile,
+                id,
+                sender,
+                name,
+            } => {
+                self.ensure_profile(profile, cli, platform)?;
+                self.submit_chat(client::Command::NameSender { id, sender, name })?;
+            }
+
             Action::CancelConversation => {
                 self.chat.clear_form(ui);
                 self.page = Page::Conversations;
@@ -617,12 +683,14 @@ impl App {
             Action::CreateConversation {
                 title,
                 partners,
-                require_username,
+                policy,
+                use_disclosed_title,
             } => {
                 let id = self.submit_chat(client::Command::Create {
                     title,
                     partners,
-                    require_username,
+                    policy,
+                    use_disclosed_title,
                 })?;
                 self.chat.submission = Some((id, chat_ui::Submission::Create));
                 self.error.clear();
@@ -1317,13 +1385,13 @@ fn item_list(
             [16.0, list_top, width - 32.0, 56.0],
             true,
         )?;
-        let pending;
         let detail = if snapshot.requests.is_empty() {
             "No pending requests"
         } else {
-            pending = format!("{} pending", snapshot.requests.len());
-            &pending
+            "Incoming requests"
         };
+        let badge =
+            (!snapshot.requests.is_empty()).then(|| snapshot.requests.len().min(99).to_string());
         if ui
             .action_row(
                 gpu,
@@ -1333,11 +1401,32 @@ fn item_list(
                     title: "Message requests",
                     detail,
                     selected: app.page == Page::Requests,
+                    badge: badge.as_deref(),
                 },
             )?
             .clicked
         {
             action = Action::MessageRequests(profile.clone());
+        }
+
+        if !snapshot.pending_invites.is_empty() {
+            let count = snapshot.pending_invites.len().min(99).to_string();
+            if ui
+                .action_row(
+                    gpu,
+                    "pending-invites",
+                    ui::framework::ActionRow {
+                        icon: REQUESTS,
+                        title: "Pending invites",
+                        detail: "Outgoing conversation requests",
+                        selected: app.page == Page::PendingInvites,
+                        badge: Some(&count),
+                    },
+                )?
+                .clicked
+            {
+                action = Action::PendingInvites(profile.clone());
+            }
         }
 
         end_panel(ui);
@@ -1434,6 +1523,7 @@ fn item_list(
                                 icon: GROUP,
                                 selected: app.conversation == Some(id)
                                     && app.page == Page::Conversations,
+                                badge: None,
                             },
                         )?
                         .clicked
@@ -1948,7 +2038,7 @@ fn profile_creation_page(
         ui,
         gpu,
         "username-help-text",
-        "Ticking this will let you claim a username for your profile. Usernames are globally unique and can be used to identify you. If left unticked, this profile will be anonymous, letting others only ever see your Auth ID.",
+        "Ticking this will let you claim a username for your profile. Usernames are globally unique and can be used to identify you. If left unticked, this profile will be anonymous, letting others only ever see your randomly generated Auth ID.",
         form.help,
     )?;
 
@@ -2060,7 +2150,11 @@ fn profile_username_form(
             },
         )?;
         ui.space(8.0);
-        if let Some(value) = ui.checkbox(
+        ui.push_style(Style {
+            font_size: 13,
+            ..ui.style()
+        });
+        if let Some(value) = ui.compact_checkbox(
             gpu,
             "auto-disclose-username",
             "Disclose username automatically",
@@ -2069,7 +2163,18 @@ fn profile_username_form(
             action = Action::AutoDiscloseUsername(value);
         }
 
-        if let Some(value) = ui.checkbox(
+        ui.set_position(30.0, ui.position().1);
+        label(
+            ui,
+            gpu,
+            "Share your username when accepting optional requests and preselect sharing on new invitations.",
+            12,
+            false,
+            true,
+            false,
+        )?;
+        ui.space(12.0);
+        if let Some(value) = ui.compact_checkbox(
             gpu,
             "reject-required-username",
             "Automatically reject requests that require username disclosure",
@@ -2078,6 +2183,17 @@ fn profile_username_form(
             action = Action::RejectRequiredUsername(value);
         }
 
+        ui.set_position(30.0, ui.position().1);
+        label(
+            ui,
+            gpu,
+            "Decline invitations that require you to share your username.",
+            12,
+            false,
+            true,
+            false,
+        )?;
+        ui.pop_style();
         ui.div_end();
     }
 
@@ -2478,7 +2594,9 @@ fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyh
     // Reserve enough room for the full heading and its controls.
     let title = match app.page {
         Page::Settings => "Settings",
-        Page::Conversations | Page::Requests | Page::CreateConversation => "Conversations",
+        Page::Conversations | Page::Requests | Page::PendingInvites | Page::CreateConversation => {
+            "Conversations"
+        }
         Page::Accounts | Page::Create | Page::CreateUsername => "Profiles",
     };
     ui.push_style(Style {
@@ -2614,6 +2732,7 @@ fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyh
         }
 
         Page::Requests => chat_ui::requests(ui, gpu, app)?,
+        Page::PendingInvites => chat_ui::pending_invites(ui, gpu, app)?,
         Page::CreateConversation => chat_ui::creation(ui, gpu, app)?,
         Page::Settings => settings_page(ui, gpu, app)?,
     };
@@ -3001,6 +3120,17 @@ fn main() -> anyhow::Result<()> {
                 platform.request_redraw()?;
                 continue;
             }
+            Action::PromptSenderName {
+                profile,
+                id,
+                sender,
+            } => {
+                ui.set_modal_input(false);
+                quickshell.open_sender_name(&mut ui, profile, id, sender);
+                platform.request_redraw()?;
+                continue;
+            }
+
             Action::Quit => return Ok(()),
             _ => {}
         }

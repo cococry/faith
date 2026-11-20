@@ -1,7 +1,8 @@
-use super::{Chat, Message, Metadata, Request};
+use super::{Chat, InvitationPolicy, Message, Metadata, Request};
 use faith_client::{EventStore, GroupKind, GroupPacket, Id, StoredEvent};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::{
+    collections::HashMap,
     fs::{self, File, OpenOptions},
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::Path,
@@ -16,7 +17,7 @@ pub struct Conversation {
 }
 
 pub struct InvitationBatch {
-    pub required: bool,
+    pub policy: InvitationPolicy,
     pub responses: Vec<(Id, bool)>,
 }
 
@@ -70,11 +71,38 @@ fn select(db: &Connection, group: Id) -> rusqlite::Result<()> {
     Ok(())
 }
 
-fn chat_title(id: Id, metadata: Option<&Metadata>) -> String {
-    metadata.map_or_else(
-        || format!("Chat · {}", &id.to_string()[..8]),
-        |m| m.title.clone(),
-    )
+fn chat_title(
+    db: &Connection,
+    id: Id,
+    metadata: Option<&Metadata>,
+    chat_members: &[Id],
+    own_auth: Option<Id>,
+) -> anyhow::Result<String> {
+    if let Some(metadata) = metadata.filter(|metadata| !metadata.title.is_empty()) {
+        return Ok(metadata.title.clone());
+    }
+
+    let mut stmt =
+        db.prepare_cached("SELECT member,username FROM disclosed_usernames WHERE conversation=?")?;
+    let names: HashMap<Id, String> = stmt
+        .query_map([id.0], |row| Ok((self::id(row.get(0)?)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut disclosed = chat_members
+        .iter()
+        .filter(|&&member| Some(member) != own_auth)
+        .filter_map(|member| names.get(member).map(String::as_str));
+    let first: Vec<_> = disclosed.by_ref().take(3).collect();
+    if first.is_empty() {
+        return Ok(format!("Chat · {}", &id.to_string()[..8]));
+    }
+
+    let mut title = first.join(", ");
+    let remaining = disclosed.count();
+    if remaining != 0 {
+        title.push_str(&format!(" & {remaining} more"));
+    }
+
+    Ok(title)
 }
 
 pub fn conversation_titles(profile: &Path) -> anyhow::Result<Vec<(Id, String)>> {
@@ -100,18 +128,43 @@ pub fn conversation_titles(profile: &Path) -> anyhow::Result<Vec<(Id, String)>> 
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
     db.busy_timeout(std::time::Duration::ZERO)?;
+    let own_auth = db
+        .query_row("SELECT value FROM settings WHERE key='auth'", [], |row| {
+            id(row.get(0)?)
+        })
+        .optional()?;
+    let has_usernames = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='disclosed_usernames' AND type='table')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
     let mut stmt = db.prepare(
-        "SELECT c.id, m.data FROM conversations c
+        "SELECT c.id, m.data, c.members FROM conversations c
          LEFT JOIN chat_metadata m ON m.conversation=c.id
          WHERE c.active ORDER BY c.rowid DESC",
     )?;
     let rows = stmt.query_map([], |row| {
-        Ok((id(row.get(0)?)?, row.get::<_, Option<String>>(1)?))
+        Ok((
+            id(row.get(0)?)?,
+            row.get::<_, Option<String>>(1)?,
+            members(row.get(2)?)?,
+        ))
     })?;
     rows.map(|row| {
-        let (id, metadata) = row?;
-        let metadata = metadata.as_deref().map(serde_json::from_str).transpose()?;
-        Ok((id, chat_title(id, metadata.as_ref())))
+        let (id, metadata, members) = row?;
+        let metadata: Option<Metadata> =
+            metadata.as_deref().map(serde_json::from_str).transpose()?;
+        let title = if has_usernames {
+            chat_title(&db, id, metadata.as_ref(), &members, own_auth)?
+        } else {
+            metadata
+                .filter(|metadata| !metadata.title.is_empty())
+                .map_or_else(
+                    || format!("Chat · {}", &id.to_string()[..8]),
+                    |metadata| metadata.title,
+                )
+        };
+        Ok((id, title))
     })
     .collect()
 }
@@ -166,11 +219,25 @@ impl Store {
             CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value BLOB NOT NULL);
             CREATE TABLE IF NOT EXISTS outbox(id BLOB PRIMARY KEY,packet BLOB NOT NULL,targets BLOB NOT NULL);
             CREATE TABLE IF NOT EXISTS incoming_requests(conversation BLOB PRIMARY KEY, requester BLOB NOT NULL, required INTEGER NOT NULL, username TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS invitation_batches(conversation BLOB PRIMARY KEY, required INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS accepted_invites(conversation BLOB PRIMARY KEY, requester BLOB NOT NULL);
+            CREATE TABLE IF NOT EXISTS local_creations(conversation BLOB PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS invitation_batches(conversation BLOB PRIMARY KEY, required INTEGER NOT NULL, disclose INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS invitation_responses(conversation BLOB NOT NULL, recipient BLOB NOT NULL, accepted INTEGER NOT NULL, PRIMARY KEY(conversation,recipient));
             CREATE TABLE IF NOT EXISTS disclosed_usernames(conversation BLOB NOT NULL, member BLOB NOT NULL, username TEXT NOT NULL, PRIMARY KEY(conversation,member));
             CREATE TABLE IF NOT EXISTS chat_metadata(conversation BLOB PRIMARY KEY,data TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS messages_by_conversation ON messages(conversation);")?;
+        let has_disclosure = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('invitation_batches') WHERE name='disclose')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !has_disclosure {
+            db.execute(
+                "ALTER TABLE invitation_batches ADD COLUMN disclose INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+
         Ok(Self {
             db: Mutex::new(db),
             _profile_lock: lock,
@@ -202,10 +269,18 @@ impl Store {
         Ok(())
     }
 
-    pub fn chats(&self) -> anyhow::Result<Vec<Chat>> {
+    pub fn remember_auth(&self, auth: Id) -> anyhow::Result<()> {
+        self.db()?.execute(
+            "INSERT INTO settings(key,value) VALUES('auth',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value!=excluded.value",
+            [auth.0],
+        )?;
+        Ok(())
+    }
+
+    pub fn chats(&self, auth: Id) -> anyhow::Result<Vec<Chat>> {
         let db = self.db()?;
         let mut stmt = db.prepare_cached(
-            "SELECT c.id, m.data, (SELECT body FROM messages WHERE conversation=c.id ORDER BY rowid DESC LIMIT 1)
+            "SELECT c.id, m.data, c.members, (SELECT body FROM messages WHERE conversation=c.id ORDER BY rowid DESC LIMIT 1)
              FROM conversations c LEFT JOIN chat_metadata m ON m.conversation=c.id
              WHERE c.active ORDER BY c.rowid DESC",
         )?;
@@ -213,19 +288,22 @@ impl Store {
             Ok((
                 id(row.get(0)?)?,
                 row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
+                members(row.get(2)?)?,
+                row.get::<_, Option<String>>(3)?,
             ))
         })?;
         let mut chats = Vec::new();
 
         for row in rows {
-            let (id, metadata, last) = row?;
+            let (id, metadata, members, last) = row?;
             let metadata: Option<Metadata> =
                 metadata.as_deref().map(serde_json::from_str).transpose()?;
             chats.push(Chat {
                 id,
-                needs_name: metadata.is_none(),
-                title: chat_title(id, metadata.as_ref()),
+                needs_name: metadata
+                    .as_ref()
+                    .is_none_or(|metadata| metadata.title.is_empty()),
+                title: chat_title(&db, id, metadata.as_ref(), &members, Some(auth))?,
                 last: last.map_or_else(
                     || "No messages yet".into(),
                     |body| {
@@ -266,6 +344,7 @@ impl Store {
             Some(data) => serde_json::from_str(&data)?,
             None => Metadata {
                 title: String::new(),
+                title_from: None,
                 partners: Vec::new(),
             },
         };
@@ -278,9 +357,50 @@ impl Store {
         }
 
         metadata.title = title;
+        metadata.title_from = None;
         db.execute(
             "INSERT INTO chat_metadata(conversation,data) VALUES(?,?) ON CONFLICT(conversation) DO UPDATE SET data=excluded.data",
             params![id.0.as_slice(), serde_json::to_string(&metadata)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn name_sender(&self, id: Id, sender: Id, name: &str) -> anyhow::Result<()> {
+        let db = self.db()?;
+        anyhow::ensure!(
+            conversation(&db, id)?
+                .is_some_and(|chat| chat.active && chat.members.contains(&sender)),
+            "Sender is unavailable"
+        );
+        let has_username: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM disclosed_usernames WHERE conversation=? AND member=?)",
+            params![id.0, sender.0],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(!has_username, "This sender has already shared a username");
+        let existing: Option<String> = db
+            .query_row(
+                "SELECT data FROM chat_metadata WHERE conversation=?",
+                [id.0],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let mut metadata = match existing {
+            Some(data) => serde_json::from_str::<Metadata>(&data)?,
+            None => Metadata {
+                title: String::new(),
+                title_from: None,
+                partners: Vec::new(),
+            },
+        };
+        anyhow::ensure!(
+            !metadata.partners.iter().any(|(id, _)| *id == sender.0),
+            "This sender already has a local name"
+        );
+        metadata.partners.push((sender.0, name.to_owned()));
+        db.execute(
+            "INSERT INTO chat_metadata(conversation,data) VALUES(?,?) ON CONFLICT(conversation) DO UPDATE SET data=excluded.data",
+            params![id.0, serde_json::to_string(&metadata)?],
         )?;
         Ok(())
     }
@@ -302,12 +422,12 @@ impl Store {
                     .as_ref()
                     .and_then(|metadata| metadata.partners.iter().find(|(id, _)| *id == sender.0))
                     .map(|(_, name)| name.clone())
-                    .or(disclosed)
-                    .unwrap_or_else(|| sender.to_string());
+                    .or(disclosed);
                 Ok(Message {
                     row_id: row.get(2)?,
                     sender,
-                    author,
+                    has_name: author.is_some(),
+                    author: author.unwrap_or_else(|| sender.to_string()),
                     body: body
                         .chars()
                         .filter(|c| !c.is_control() || *c == '\n')
@@ -322,7 +442,9 @@ impl Store {
     pub fn requests(&self) -> anyhow::Result<Vec<Request>> {
         let db = self.db()?;
         let mut stmt = db.prepare_cached(
-            "SELECT conversation,requester,required,username FROM incoming_requests ORDER BY rowid",
+            "SELECT r.conversation,r.requester,r.required,COALESCE(u.username,r.username)
+             FROM incoming_requests r LEFT JOIN disclosed_usernames u
+             ON u.conversation=r.conversation AND u.member=r.requester ORDER BY r.rowid",
         )?;
         Ok(stmt
             .query_map([], |row| {
@@ -344,16 +466,40 @@ impl Store {
         Ok(())
     }
 
+    pub fn accept_request(&self, conversation: Id, requester: Id, auth: Id) -> anyhow::Result<()> {
+        let db = self.db()?;
+        let tx = db.unchecked_transaction()?;
+        tx.execute(
+            "INSERT OR REPLACE INTO conversations(id,revision,members,active) VALUES(?,0,?,1)",
+            params![conversation.0.as_slice(), pack(&[requester, auth])],
+        )?;
+        tx.execute(
+            "INSERT OR REPLACE INTO accepted_invites(conversation,requester) VALUES(?,?)",
+            params![conversation.0.as_slice(), requester.0.as_slice()],
+        )?;
+        tx.execute(
+            "DELETE FROM incoming_requests WHERE conversation=?",
+            [conversation.0],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn invitations(&self, conversation: Id) -> anyhow::Result<Option<InvitationBatch>> {
         let db = self.db()?;
-        let required = db
+        let policy = db
             .query_row(
-                "SELECT required FROM invitation_batches WHERE conversation=?",
+                "SELECT required,disclose FROM invitation_batches WHERE conversation=?",
                 [conversation.0],
-                |row| row.get(0),
+                |row| {
+                    Ok(InvitationPolicy {
+                        required: row.get(0)?,
+                        disclose: row.get(1)?,
+                    })
+                },
             )
             .optional()?;
-        let Some(required) = required else {
+        let Some(policy) = policy else {
             return Ok(None);
         };
 
@@ -363,10 +509,67 @@ impl Store {
         let responses = stmt
             .query_map([conversation.0], |row| Ok((id(row.get(0)?)?, row.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;
-        Ok(Some(InvitationBatch {
-            required,
-            responses,
-        }))
+        Ok(Some(InvitationBatch { policy, responses }))
+    }
+
+    pub fn pending_invites(&self, auth: Id) -> anyhow::Result<Vec<super::PendingInvite>> {
+        let db = self.db()?;
+        let mut stmt = db.prepare(
+            "SELECT b.conversation,o.packet,o.targets,m.data
+             FROM invitation_batches b CROSS JOIN outbox o
+             LEFT JOIN chat_metadata m ON m.conversation=b.conversation",
+        )?;
+        let batches = stmt
+            .query_map([], |row| {
+                Ok((
+                    id(row.get(0)?)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    members(row.get(2)?)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut invites = Vec::new();
+        for (conversation, packet, targets, metadata) in batches {
+            let packet = GroupPacket::decode(&packet)?;
+            if packet.conversation != conversation {
+                continue;
+            }
+            let metadata: Option<Metadata> =
+                metadata.as_deref().map(serde_json::from_str).transpose()?;
+            let title = chat_title(
+                &db,
+                conversation,
+                metadata.as_ref(),
+                &packet.members,
+                Some(auth),
+            )?;
+            for recipient in targets.into_iter().filter(|target| *target != auth) {
+                let accepted = db
+                    .query_row(
+                        "SELECT accepted FROM invitation_responses WHERE conversation=? AND recipient=?",
+                        params![conversation.0, recipient.0],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .optional()?;
+                let recipient_name = metadata
+                    .as_ref()
+                    .and_then(|metadata| {
+                        metadata.partners.iter().find(|(id, _)| *id == recipient.0)
+                    })
+                    .map(|(_, name)| name.clone())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| format!("{}…", &recipient.to_string()[..8]));
+                invites.push(super::PendingInvite {
+                    conversation,
+                    title: title.clone(),
+                    recipient,
+                    recipient_name,
+                    accepted,
+                });
+            }
+        }
+        Ok(invites)
     }
 
     pub fn pending(&self) -> anyhow::Result<Option<(GroupPacket, Vec<Id>)>> {
@@ -385,7 +588,7 @@ impl Store {
         packet: &GroupPacket,
         targets: &[Id],
         metadata: Option<&Metadata>,
-        invite: Option<bool>,
+        invite: Option<InvitationPolicy>,
     ) -> anyhow::Result<()> {
         let mut db = self.db()?;
         let tx = db.transaction()?;
@@ -408,10 +611,25 @@ impl Store {
             )?;
         }
 
-        if let Some(required) = invite {
+        if packet.kind == GroupKind::Create {
             tx.execute(
-                "INSERT INTO invitation_batches(conversation,required) VALUES(?,?)",
-                params![packet.conversation.0, required],
+                "INSERT INTO conversations(id,revision,members,active) VALUES(?,?,?,1)",
+                params![
+                    packet.conversation.0,
+                    packet.revision,
+                    pack(&packet.members)
+                ],
+            )?;
+            tx.execute(
+                "INSERT INTO local_creations(conversation) VALUES(?)",
+                [packet.conversation.0],
+            )?;
+        }
+
+        if let Some(policy) = invite {
+            tx.execute(
+                "INSERT INTO invitation_batches(conversation,required,disclose) VALUES(?,?,?)",
+                params![packet.conversation.0, policy.required, policy.disclose],
             )?;
         }
 
@@ -425,6 +643,15 @@ impl Store {
         tx.execute("DELETE FROM outbox", [])?;
         tx.execute("DELETE FROM invitation_batches", [])?;
         tx.execute("DELETE FROM invitation_responses", [])?;
+        tx.execute(
+            "DELETE FROM chat_metadata WHERE conversation IN (SELECT conversation FROM local_creations)",
+            [],
+        )?;
+        tx.execute(
+            "DELETE FROM conversations WHERE id IN (SELECT conversation FROM local_creations)",
+            [],
+        )?;
+        tx.execute("DELETE FROM local_creations", [])?;
         tx.commit()?;
         Ok(())
     }
@@ -453,6 +680,18 @@ impl Store {
             let sender = Id(event.data[..16].try_into()?);
             let packet = GroupPacket::decode(&event.data[16..])?;
             let old = conversation(&tx, packet.conversation)?;
+            let accepted_invite: Option<Id> = tx
+                .query_row(
+                    "SELECT requester FROM accepted_invites WHERE conversation=?",
+                    [packet.conversation.0.as_slice()],
+                    |row| id(row.get(0)?),
+                )
+                .optional()?;
+            let local_creation: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM local_creations WHERE conversation=?)",
+                [packet.conversation.0.as_slice()],
+                |row| row.get(0),
+            )?;
 
             let accepted = match packet.kind {
                 GroupKind::Message => old.as_ref().is_some_and(|old| {
@@ -466,6 +705,15 @@ impl Store {
                     packet.members[0] == sender
                         && match old.as_ref() {
                             None => packet.members.contains(&event.auth),
+                            Some(_) if accepted_invite.is_some() => {
+                                accepted_invite == Some(sender)
+                                    && packet.members.contains(&event.auth)
+                            }
+                            Some(old) if local_creation => {
+                                sender == event.auth
+                                    && old.revision == packet.revision
+                                    && old.members == packet.members
+                            }
                             Some(old) => old.members[0] == sender && packet.revision > old.revision,
                         }
                 }
@@ -483,6 +731,14 @@ impl Store {
                         params![packet.conversation.0.as_slice(),packet.revision,pack(&packet.members),packet.members.contains(&event.auth)])?;
                     tx.execute(
                         "DELETE FROM incoming_requests WHERE conversation=?",
+                        [packet.conversation.0],
+                    )?;
+                    tx.execute(
+                        "DELETE FROM accepted_invites WHERE conversation=?",
+                        [packet.conversation.0],
+                    )?;
+                    tx.execute(
+                        "DELETE FROM local_creations WHERE conversation=?",
                         [packet.conversation.0],
                     )?;
                 }
@@ -534,6 +790,17 @@ impl Store {
                 }
 
                 _ => {
+                    let metadata: Option<String> = tx
+                        .query_row(
+                            "SELECT data FROM chat_metadata WHERE conversation=?",
+                            [conversation],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    let mut metadata = metadata
+                        .as_deref()
+                        .map(serde_json::from_str::<Metadata>)
+                        .transpose()?;
                     let mut data = &event.data[16..];
                     while !data.is_empty() {
                         let end = 17 + usize::from(data[16]);
@@ -542,6 +809,26 @@ impl Store {
                             "INSERT OR REPLACE INTO disclosed_usernames VALUES(?,?,?)",
                             params![conversation, &data[..16], username],
                         )?;
+                        if let Some(metadata) = &mut metadata
+                            && metadata
+                                .title_from
+                                .as_ref()
+                                .is_some_and(|member| *member == data[..16])
+                            && let Ok(member) = <[u8; 16]>::try_from(&data[..16])
+                            && metadata.title == Id(member).to_string()
+                            && !metadata
+                                .partners
+                                .iter()
+                                .any(|(local_member, _)| local_member.as_slice() == &data[..16])
+                        {
+                            metadata.title = username.to_owned();
+                            metadata.title_from = None;
+                            tx.execute(
+                                "UPDATE chat_metadata SET data=? WHERE conversation=?",
+                                params![serde_json::to_string(metadata)?, conversation],
+                            )?;
+                        }
+
                         data = &data[end..];
                     }
                 }
@@ -578,7 +865,53 @@ mod tests {
     use std::os::unix::fs::DirBuilderExt;
 
     #[test]
-    fn invitation_policy_and_responses_survive_reopening_a_profile() -> anyhow::Result<()> {
+    fn unnamed_chat_titles_follow_disclosed_membership() -> anyhow::Result<()> {
+        let db = Connection::open_in_memory()?;
+        db.execute(
+            "CREATE TABLE disclosed_usernames(conversation BLOB, member BLOB, username TEXT)",
+            [],
+        )?;
+        let chat = Id([9; 16]);
+        let own = Id([1; 16]);
+        let members = [
+            own,
+            Id([2; 16]),
+            Id([3; 16]),
+            Id([4; 16]),
+            Id([5; 16]),
+            Id([6; 16]),
+        ];
+        for (member, name) in [
+            (Id([7; 16]), "departed"),
+            (members[4], "erik2"),
+            (members[3], "alice"),
+            (members[2], "luca"),
+            (members[1], "jones"),
+            (own, "me"),
+        ] {
+            db.execute(
+                "INSERT INTO disclosed_usernames VALUES(?,?,?)",
+                params![chat.0, member.0, name],
+            )?;
+        }
+
+        assert_eq!(
+            chat_title(&db, chat, None, &[own, members[4]], Some(own))?,
+            "erik2"
+        );
+        assert_eq!(
+            chat_title(&db, chat, None, &members, Some(own))?,
+            "jones, luca, alice & 1 more"
+        );
+        assert_eq!(
+            chat_title(&db, chat, None, &[own, members[5]], Some(own))?,
+            "Chat · 09090909"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn invitation_policy_and_disclosed_names_survive_reopening_a_profile() -> anyhow::Result<()> {
         let directory = std::env::temp_dir().join(format!("faith-test-{}", Id::random()?));
         let run = || -> anyhow::Result<()> {
             let profile = profiles::prepare_claim(&directory, "Local")?;
@@ -599,12 +932,28 @@ mod tests {
             };
 
             let store = Store::open(&profile.path)?;
-            store.enqueue(&packet, &packet.members, None, Some(true))?;
-            let request = [incoming.0.as_slice(), &partner.0, &[1], b"Faith_1"].concat();
+            store.enqueue(
+                &packet,
+                &packet.members,
+                Some(&Metadata {
+                    title: partner.to_string(),
+                    title_from: Some(partner.0),
+                    partners: Vec::new(),
+                }),
+                Some(InvitationPolicy {
+                    required: false,
+                    disclose: true,
+                }),
+            )?;
+            let request = [incoming.0.as_slice(), &partner.0].concat();
             let response = [outgoing.0.as_slice(), &partner.0, &[1]].concat();
+            let invited = [incoming.0.as_slice(), &partner.0, &[7], b"Faith_1"].concat();
+            let accepted = [outgoing.0.as_slice(), &partner.0, &[7], b"Faith_1"].concat();
             for (sequence, kind, data) in [
                 (1, super::super::REQUEST_EVENT, request.as_slice()),
-                (2, super::super::RESPONSE_EVENT, response.as_slice()),
+                (2, super::super::USERNAMES_EVENT, invited.as_slice()),
+                (3, super::super::RESPONSE_EVENT, response.as_slice()),
+                (4, super::super::USERNAMES_EVENT, accepted.as_slice()),
             ] {
                 store.apply(StoredEvent {
                     auth,
@@ -620,13 +969,22 @@ mod tests {
             let requests = store.requests()?;
             assert_eq!(requests.len(), 1);
             assert_eq!(requests[0].conversation, incoming);
-            assert!(requests[0].required);
+            assert!(!requests[0].required);
             assert_eq!(requests[0].username, "Faith_1");
 
             let invitations = store.invitations(outgoing)?.unwrap();
-            assert!(invitations.required);
+            assert!(!invitations.policy.required);
+            assert!(invitations.policy.disclose);
             assert_eq!(invitations.responses, vec![(partner, true)]);
             assert_eq!(store.pending()?.unwrap().0.conversation, outgoing);
+            let metadata: String = store.db()?.query_row(
+                "SELECT data FROM chat_metadata WHERE conversation=?",
+                [outgoing.0],
+                |row| row.get(0),
+            )?;
+            let metadata: Metadata = serde_json::from_str(&metadata)?;
+            assert_eq!(metadata.title, "Faith_1");
+            assert!(metadata.title_from.is_none());
             Ok(())
         };
 

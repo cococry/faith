@@ -392,16 +392,32 @@ impl Client {
         recipient: Id,
         force_username_disclosure: bool,
     ) -> Result<()> {
+        self.request_conversation_with_disclosure(
+            conversation,
+            recipient,
+            force_username_disclosure,
+            false,
+        )
+    }
+
+    pub fn request_conversation_with_disclosure(
+        &self,
+        conversation: Id,
+        recipient: Id,
+        force_username_disclosure: bool,
+        disclose_username: bool,
+    ) -> Result<()> {
         let conversation = sys::faith_conversation_id_t {
             bytes: conversation.0,
         };
         let recipient = sys::faith_auth_id_t { bytes: recipient.0 };
         status(unsafe {
-            sys::faith_client_request_conversation_with_policy(
+            sys::faith_client_request_conversation_with_disclosure(
                 self.raw.as_ptr(),
                 &conversation,
                 &recipient,
                 force_username_disclosure,
+                disclose_username,
             )
         })
     }

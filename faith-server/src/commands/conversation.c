@@ -53,7 +53,8 @@ static bool _command(faith_db_t *db, const char *sql) {
 
 static faith_status_code_t _record_request(faith_db_t *db,
                                           conversation_job_t *job, bool *notify) {
-  _FH_CHECK_RETURN(conv_claim(db, job->conversation.bytes, &job->owner, &job->force));
+  _FH_CHECK_RETURN(conv_claim(db, job->conversation.bytes, &job->owner,
+                             &job->force, job->force || job->disclose));
 
   const char *values[] = {(const char *)job->conversation.bytes,
                           (const char *)job->recipient.bytes};
@@ -71,7 +72,7 @@ static faith_status_code_t _record_request(faith_db_t *db,
     *notify = PQntuples(res) == 1;
     rc = FAITH_OK;
 
-    if (*notify && job->force) {
+    if (*notify && (job->force || job->disclose)) {
       const char *username = PQgetvalue(res, 0, 0);
       size_t size = PQgetlength(res, 0, 0);
 
@@ -297,6 +298,18 @@ static faith_status_code_t _run(faith_db_t *db, void *data) {
                               : FAITH_EVENT_CONVERSATION_RESPONSE,
                       job->payload, size);
 
+    if (rc == FAITH_OK && request && job->disclose) {
+      /* send the owner's name separately so optional requests keep their wire format */
+      size_t name_size = strlen(job->username);
+      uint8_t disclosure[FAITH_CONVERSATION_ID_SIZE +
+                         FAITH_CONVERSATION_USERNAME_ENTRY_FIXED + FAITH_USERNAME_MAX];
+      memcpy(disclosure, job->payload, FAITH_CONVERSATION_REQUEST_SIZE);
+      disclosure[FAITH_CONVERSATION_REQUEST_SIZE] = name_size;
+      memcpy(disclosure + FAITH_CONVERSATION_REQUEST_SIZE + 1, job->username, name_size);
+      rc = _queue_event(db, job, target, FAITH_EVENT_CONVERSATION_USERNAMES,
+                        disclosure, FAITH_CONVERSATION_REQUEST_SIZE + 1 + name_size);
+    }
+
     if (rc == FAITH_OK && !request && job->accepted)
       rc = _disclose(db, job);
   }
@@ -367,8 +380,11 @@ static faith_status_code_t _submit(server_state_t *s, client_conn_t *cl,
   job->device = cl->ident.device_id;
   job->accepted = !request && cmd->payload[FAITH_CONVERSATION_REQUEST_SIZE];
 
-  if (request && cmd->payload_size == FAITH_CONVERSATION_POLICY_REQUEST_SIZE)
-    job->force = cmd->payload[FAITH_CONVERSATION_REQUEST_SIZE];
+  if (request && cmd->payload_size == FAITH_CONVERSATION_POLICY_REQUEST_SIZE) {
+    uint8_t flags = cmd->payload[FAITH_CONVERSATION_REQUEST_SIZE];
+    job->force = flags == FAITH_CONVERSATION_REQUEST_FORCE;
+    job->disclose = flags == FAITH_CONVERSATION_REQUEST_DISCLOSE;
+  }
 
   if (!request && cmd->payload_size == FAITH_CONVERSATION_SIGNED_POLICY_RESPONSE_SIZE) {
     job->force = cmd->payload[FAITH_CONVERSATION_RESPONSE_SIZE];
@@ -393,19 +409,20 @@ static faith_status_code_t _submit(server_state_t *s, client_conn_t *cl,
 
 faith_status_code_t
 conv_claim(faith_db_t *db, const uint8_t id[FAITH_CONVERSATION_ID_SIZE],
-           const faith_auth_id_t *owner, const bool *force) {
+           const faith_auth_id_t *owner, const bool *force, bool disclose) {
   const char *values[] = {(const char *)id, (const char *)owner->bytes,
-                          force ? (*force ? "true" : "false") : NULL};
-  const int lengths[] = {FAITH_CONVERSATION_ID_SIZE, FAITH_AUTH_ID_SIZE, 0};
-  const int formats[] = {1, 1, 0};
+                          force ? (*force ? "true" : "false") : NULL,
+                          disclose ? "true" : "false"};
+  const int lengths[] = {FAITH_CONVERSATION_ID_SIZE, FAITH_AUTH_ID_SIZE, 0, 0};
+  const int formats[] = {1, 1, 0, 0};
   PGresult *res = PQexecParams(
       db->conn,
       "INSERT INTO conversations (conversation_id, owner_id, "
       "force_username_disclosure, disclosed_username) "
-      "SELECT $1, auth_id, COALESCE($3::boolean, false), CASE WHEN $3 THEN username END "
-      "FROM users WHERE auth_id = $2 AND ($3 IS NOT TRUE OR username IS NOT NULL) "
+      "SELECT $1, auth_id, COALESCE($3::boolean, false), CASE WHEN $4::boolean THEN username END "
+      "FROM users WHERE auth_id = $2 AND ($4::boolean IS NOT TRUE OR username IS NOT NULL) "
       "ON CONFLICT DO NOTHING",
-      3, NULL, values, lengths, formats, 0);
+      4, NULL, values, lengths, formats, 0);
   bool ok = res && PQresultStatus(res) == PGRES_COMMAND_OK;
   PQclear(res);
 
@@ -415,9 +432,10 @@ conv_claim(faith_db_t *db, const uint8_t id[FAITH_CONVERSATION_ID_SIZE],
   res = PQexecParams(db->conn,
                      "SELECT 1 FROM conversations "
                      "WHERE conversation_id = $1 AND owner_id = $2 "
-                     "AND ($3::boolean IS NULL OR force_username_disclosure = $3) "
+                     "AND ($3::boolean IS NULL OR (force_username_disclosure = $3 "
+                     "AND (disclosed_username IS NOT NULL) = $4::boolean)) "
                      "FOR UPDATE",
-                     3, NULL, values, lengths, formats, 0);
+                     4, NULL, values, lengths, formats, 0);
   faith_status_code_t rc = FAITH_ERR_IO;
 
   if (res && PQresultStatus(res) == PGRES_TUPLES_OK)
@@ -433,7 +451,7 @@ conv_handle_conversation_request(server_state_t *s, client_conn_t *cl,
                                  const faith_envl_cts_command_t *cmd) {
   if (cmd->payload_size != FAITH_CONVERSATION_REQUEST_SIZE &&
       (cmd->payload_size != FAITH_CONVERSATION_POLICY_REQUEST_SIZE ||
-       cmd->payload[FAITH_CONVERSATION_REQUEST_SIZE] > 1))
+       cmd->payload[FAITH_CONVERSATION_REQUEST_SIZE] > FAITH_CONVERSATION_REQUEST_DISCLOSE))
     return FAITH_ERR_INVALID;
 
   faith_auth_id_t recipient;

@@ -39,9 +39,20 @@ pub struct Request {
     pub username: String,
 }
 
+#[derive(Clone)]
+pub struct PendingInvite {
+    pub conversation: Id,
+    pub title: String,
+    pub recipient: Id,
+    pub recipient_name: String,
+    pub accepted: Option<bool>,
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Metadata {
     title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    title_from: Option<[u8; 16]>,
     partners: Vec<([u8; 16], String)>,
 }
 
@@ -59,7 +70,14 @@ pub struct Message {
     pub row_id: i64,
     pub sender: Id,
     pub author: String,
+    pub has_name: bool,
     pub body: String,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct InvitationPolicy {
+    pub required: bool,
+    pub disclose: bool,
 }
 
 pub enum Command {
@@ -68,10 +86,16 @@ pub enum Command {
         id: Id,
         title: String,
     },
+    NameSender {
+        id: Id,
+        sender: Id,
+        name: String,
+    },
     Create {
         title: String,
         partners: Vec<(Id, String)>,
-        require_username: bool,
+        policy: InvitationPolicy,
+        use_disclosed_title: bool,
     },
     Send {
         id: Id,
@@ -101,6 +125,7 @@ pub struct Snapshot {
     pub messages: Arc<[Message]>,
     pub notices: Arc<[String]>,
     pub requests: Arc<[Request]>,
+    pub pending_invites: Arc<[PendingInvite]>,
     pub responding: Option<Id>,
     pub generation: u64,
     pub submission: Option<(u64, bool, Option<Id>)>,
@@ -191,6 +216,7 @@ impl Session {
                             .and_then(|settings| settings.username.as_deref()),
                     )?;
                     let (auth, _) = client.identity()?;
+                    store.remember_auth(auth)?;
                     let mut state = Worker {
                         client,
                         store,
@@ -199,6 +225,8 @@ impl Session {
                         username,
                         sent_invites: HashSet::new(),
                         responding: None,
+                        responding_requester: None,
+                        responding_accept: false,
                         automatic_attempts: HashSet::new(),
                         claim_path: claim.map(|_| thread_profile.clone()),
                         auth_error: None,
@@ -214,7 +242,7 @@ impl Session {
 
                     state.selected = state.store.selected()?.or(state
                         .store
-                        .chats()?
+                        .chats(auth)?
                         .first()
                         .map(|c| c.id));
                     state.publish(&thread_snapshot, &waker)?;
@@ -305,6 +333,8 @@ struct Worker {
     claim_path: Option<PathBuf>,
     sent_invites: HashSet<Id>,
     responding: Option<Id>,
+    responding_requester: Option<Id>,
+    responding_accept: bool,
     automatic_attempts: HashSet<Id>,
     auth_error: Option<String>,
     claim_completed: bool,
@@ -327,7 +357,7 @@ impl Worker {
     }
 
     fn publish(&mut self, shared: &Mutex<Snapshot>, waker: &PlatformWaker) -> anyhow::Result<()> {
-        let conversations = self.store.chats()?;
+        let conversations = self.store.chats(self.auth)?;
         let messages = conversations
             .iter()
             .find(|chat| Some(chat.id) == self.selected)
@@ -349,6 +379,7 @@ impl Worker {
             messages: messages.into(),
             notices: self.notices.iter().cloned().collect(),
             requests: self.store.requests()?.into(),
+            pending_invites: self.store.pending_invites(self.auth)?.into(),
             responding: self.responding,
             generation: self.generation,
             submission: self.submission,
@@ -385,10 +416,11 @@ impl Worker {
                 remaining += 1;
 
                 if !self.sent_invites.contains(target) {
-                    self.client.request_conversation_with_policy(
+                    self.client.request_conversation_with_disclosure(
                         packet.conversation,
                         *target,
-                        batch.required,
+                        batch.policy.required,
+                        batch.policy.disclose,
                     )?;
                     self.sent_invites.insert(*target);
                 }
@@ -416,7 +448,7 @@ impl Worker {
         packet: GroupPacket,
         targets: Vec<Id>,
         metadata: Option<&Metadata>,
-        invite: Option<bool>,
+        invite: Option<InvitationPolicy>,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(self.authorized, "not authorized yet");
         anyhow::ensure!(self.inflight.is_none(), "A delivery is still in progress");
@@ -444,11 +476,22 @@ impl Worker {
             Command::Create {
                 title,
                 partners,
-                require_username,
+                policy,
+                use_disclosed_title,
             } => {
+                let not_accepted = self
+                    .store
+                    .pending_invites(self.auth)?
+                    .iter()
+                    .filter(|invite| invite.accepted != Some(true))
+                    .count();
                 anyhow::ensure!(
-                    !require_username || self.username.username.is_some(),
-                    "Claim a username before requiring username disclosure"
+                    not_accepted == 0,
+                    "Cannot create group, {not_accepted} participant(s) did not accept your previous request yet"
+                );
+                anyhow::ensure!(
+                    !(policy.required || policy.disclose) || self.username.username.is_some(),
+                    "Claim a username before choosing username disclosure"
                 );
                 anyhow::ensure!(!title.trim().is_empty(), "Enter a conversation name");
                 anyhow::ensure!(
@@ -465,6 +508,12 @@ impl Worker {
                     members.push(*id);
                 }
 
+                let title_from = match partners.as_slice() {
+                    [(id, name)] if use_disclosed_title && !policy.required && name.is_empty() => {
+                        Some(id.0)
+                    }
+                    _ => None,
+                };
                 let conversation = Id::random()?;
                 let packet = GroupPacket {
                     kind: GroupKind::Create,
@@ -479,13 +528,14 @@ impl Worker {
                     members,
                     Some(&Metadata {
                         title,
+                        title_from,
                         partners: partners
                             .into_iter()
                             .filter(|(_, name)| !name.is_empty())
                             .map(|(id, name)| (id.0, name))
                             .collect(),
                     }),
-                    Some(require_username),
+                    Some(policy),
                 )?;
                 self.selected = Some(conversation);
                 return Ok(Some(conversation));
@@ -494,6 +544,17 @@ impl Worker {
             Command::Rename { id, title } => {
                 anyhow::ensure!(!title.trim().is_empty(), "Enter a conversation name");
                 self.store.rename(id, self.auth, title)?;
+            }
+
+            Command::NameSender { id, sender, name } => {
+                anyhow::ensure!(sender != self.auth, "Choose another sender");
+                anyhow::ensure!(
+                    !name.trim().is_empty()
+                        && name.chars().count() <= 20
+                        && !name.chars().any(char::is_control),
+                    "Use 1–20 characters for the local name"
+                );
+                self.store.name_sender(id, sender, name.trim())?;
             }
 
             Command::Send { id, body } => {
@@ -566,10 +627,7 @@ impl Worker {
             !accept || !request.required || !self.username.reject_required,
             "This profile automatically rejects requests that require username disclosure"
         );
-        let disclose = accept
-            && !request.required
-            && self.username.username.is_some()
-            && (disclose || self.username.auto_disclose);
+        let disclose = accept && !request.required && self.username.username.is_some() && disclose;
         self.client.respond_conversation_with_policy(
             request.conversation,
             request.requester,
@@ -578,6 +636,8 @@ impl Worker {
             disclose,
         )?;
         self.responding = Some(request.conversation);
+        self.responding_requester = Some(request.requester);
+        self.responding_accept = accept;
         Ok(())
     }
 
@@ -715,6 +775,8 @@ impl Worker {
                         self.sent_invites.clear();
                         self.automatic_attempts.clear();
                         self.responding = None;
+                        self.responding_requester = None;
+                        self.responding_accept = false;
 
                         if self.auth_error.is_none() {
                             self.status = "Disconnected; awaiting reconnect".into();
@@ -747,8 +809,26 @@ impl Worker {
                     EventKind::CommandResult if event.value0 == RESPONSE_COMMAND => {
                         if let Some(conversation) = self.responding.take() {
                             if event.value1 == COMMAND_ACCEPTED {
-                                self.store.remove_request(conversation)?;
+                                if self.responding_accept
+                                    && let Some(requester) = self.responding_requester.take()
+                                {
+                                    self.store.accept_request(
+                                        conversation,
+                                        requester,
+                                        self.auth,
+                                    )?;
+                                    if self.selected.is_none() {
+                                        self.selected = Some(conversation);
+                                        self.store.select(conversation)?;
+                                    }
+                                } else {
+                                    self.responding_requester = None;
+                                    self.store.remove_request(conversation)?;
+                                }
+                                self.responding_accept = false;
                             } else {
+                                self.responding_requester = None;
+                                self.responding_accept = false;
                                 self.notice(event.message);
                             }
                         }
@@ -756,7 +836,7 @@ impl Worker {
 
                     EventKind::GroupReceived => {
                         if self.selected.is_none() {
-                            self.selected = self.store.chats()?.first().map(|c| c.id);
+                            self.selected = self.store.chats(self.auth)?.first().map(|c| c.id);
 
                             if let Some(id) = self.selected {
                                 self.store.select(id)?;
