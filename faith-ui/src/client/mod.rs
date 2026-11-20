@@ -1,6 +1,6 @@
 mod store;
 
-use crate::platform::window::PlatformWaker;
+use crate::{platform::window::PlatformWaker, profiles::UsernameSettings};
 use faith_client::{Client, Config, EventKind, GroupKind, GroupPacket, Id};
 use nix::{
     poll::{PollFd, PollFlags, PollTimeout, poll},
@@ -8,7 +8,7 @@ use nix::{
 };
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     os::fd::AsFd,
     path::PathBuf,
     sync::{
@@ -21,6 +21,23 @@ use std::{
 
 use store::Store;
 pub use store::conversation_titles;
+
+// These values are defined by the Faith wire protocol.
+const REQUEST_EVENT: u32 = 2;
+const RESPONSE_EVENT: u32 = 3;
+const USERNAMES_EVENT: u32 = 4;
+const REQUEST_COMMAND: u64 = 2;
+const RESPONSE_COMMAND: u64 = 3;
+const COMMAND_ACCEPTED: u64 = 2;
+const RECONNECT_FORBIDDEN: u64 = 1;
+
+#[derive(Clone)]
+pub struct Request {
+    pub conversation: Id,
+    pub requester: Id,
+    pub required: bool,
+    pub username: String,
+}
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Metadata {
@@ -54,10 +71,16 @@ pub enum Command {
     Create {
         title: String,
         partners: Vec<(Id, String)>,
+        require_username: bool,
     },
     Send {
         id: Id,
         body: String,
+    },
+    Respond {
+        conversation: Id,
+        accept: bool,
+        disclose: bool,
     },
     Retry,
     Discard,
@@ -67,11 +90,18 @@ pub enum Command {
 pub struct Snapshot {
     pub auth: Option<Id>,
     pub authorized: bool,
+    pub username: Option<Arc<str>>,
+    pub auto_disclose: bool,
+    pub reject_required: bool,
+    pub auth_error: Option<String>,
+    pub claim_completed: bool,
     pub status: String,
     pub selected: Option<Id>,
     pub conversations: Arc<[Chat]>,
     pub messages: Arc<[Message]>,
     pub notices: Arc<[String]>,
+    pub requests: Arc<[Request]>,
+    pub responding: Option<Id>,
     pub generation: u64,
     pub submission: Option<(u64, bool, Option<Id>)>,
     pub pending: bool,
@@ -91,7 +121,11 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn start(mut config: Config, waker: PlatformWaker) -> anyhow::Result<Self> {
+    pub fn start(
+        mut config: Config,
+        claim: Option<UsernameSettings>,
+        waker: PlatformWaker,
+    ) -> anyhow::Result<Self> {
         let profile = std::path::absolute(
             config
                 .identity_path
@@ -130,13 +164,46 @@ impl Session {
 
                     let store = Arc::new(Store::open(&thread_profile)?);
                     config.store = Some(store.clone());
-                    let client = Client::new(config)?;
+                    let username = match &claim {
+                        Some(settings) => {
+                            use std::{io::Write, os::unix::fs::OpenOptionsExt};
+
+                            anyhow::ensure!(
+                                !thread_profile.join("username.json").exists(),
+                                "This profile already has a username."
+                            );
+                            let mut pending = std::fs::OpenOptions::new()
+                                .write(true)
+                                .truncate(true)
+                                .custom_flags(nix::libc::O_NOFOLLOW)
+                                .open(thread_profile.join(".username-pending"))?;
+                            pending.write_all(&serde_json::to_vec(settings)?)?;
+                            pending.sync_all()?;
+                            settings.clone()
+                        }
+
+                        None => UsernameSettings::load(&thread_profile)?,
+                    };
+                    let client = Client::new_with_username(
+                        config,
+                        claim
+                            .as_ref()
+                            .and_then(|settings| settings.username.as_deref()),
+                    )?;
                     let (auth, _) = client.identity()?;
                     let mut state = Worker {
                         client,
                         store,
                         auth,
                         authorized: false,
+                        username,
+                        sent_invites: HashSet::new(),
+                        responding: None,
+                        automatic_attempts: HashSet::new(),
+                        claim_path: claim.map(|_| thread_profile.clone()),
+                        auth_error: None,
+                        claim_completed: false,
+                        claim_deadline: None,
                         selected: None,
                         inflight: None,
                         status: "Connecting…".into(),
@@ -157,6 +224,11 @@ impl Session {
                     }
 
                     state.client.start()?;
+                    if state.claim_path.is_some() {
+                        state.claim_deadline =
+                            Some(std::time::Instant::now() + std::time::Duration::from_secs(30));
+                    }
+
                     state.run(rx, &thread_wake, &thread_stop, &thread_snapshot, &waker)
                 })();
 
@@ -164,6 +236,7 @@ impl Session {
                     if let Ok(mut snapshot) = thread_snapshot.lock() {
                         snapshot.authorized = false;
                         snapshot.status = format!("Client stopped: {error}");
+                        snapshot.auth_error = Some(error.to_string());
                         snapshot.generation += 1;
                     }
 
@@ -228,6 +301,14 @@ struct Worker {
     store: Arc<Store>,
     auth: Id,
     authorized: bool,
+    username: UsernameSettings,
+    claim_path: Option<PathBuf>,
+    sent_invites: HashSet<Id>,
+    responding: Option<Id>,
+    automatic_attempts: HashSet<Id>,
+    auth_error: Option<String>,
+    claim_completed: bool,
+    claim_deadline: Option<std::time::Instant>,
     selected: Option<Id>,
     inflight: Option<Inflight>,
     status: String,
@@ -257,11 +338,18 @@ impl Worker {
         let snapshot = Snapshot {
             auth: Some(self.auth),
             authorized: self.authorized,
+            username: self.username.username.as_deref().map(Arc::from),
+            auto_disclose: self.username.auto_disclose,
+            reject_required: self.username.reject_required,
+            auth_error: self.auth_error.clone(),
+            claim_completed: self.claim_completed,
             status: self.status.clone(),
             selected: self.selected,
             conversations: conversations.into(),
             messages: messages.into(),
             notices: self.notices.iter().cloned().collect(),
+            requests: self.store.requests()?.into(),
+            responding: self.responding,
             generation: self.generation,
             submission: self.submission,
             pending: self.store.pending()?.is_some(),
@@ -281,6 +369,37 @@ impl Worker {
             .store
             .pending()?
             .ok_or_else(|| anyhow::anyhow!("no pending delivery"))?;
+        if let Some(batch) = self.store.invitations(packet.conversation)? {
+            if batch.responses.iter().any(|(_, accepted)| !accepted) {
+                self.status = "A message request was declined. Discard the pending conversation to start over.".into();
+                return Ok(());
+            }
+
+            let mut remaining = 0;
+
+            for target in targets.iter().filter(|&&target| target != self.auth) {
+                if batch.responses.iter().any(|(id, _)| id == target) {
+                    continue;
+                }
+
+                remaining += 1;
+
+                if !self.sent_invites.contains(target) {
+                    self.client.request_conversation_with_policy(
+                        packet.conversation,
+                        *target,
+                        batch.required,
+                    )?;
+                    self.sent_invites.insert(*target);
+                }
+            }
+
+            if remaining != 0 {
+                self.status = format!("Waiting for {remaining} message request response(s)");
+                return Ok(());
+            }
+        }
+
         self.client.deliver_group(&packet, &targets)?;
         self.inflight = Some(Inflight {
             deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
@@ -297,10 +416,11 @@ impl Worker {
         packet: GroupPacket,
         targets: Vec<Id>,
         metadata: Option<&Metadata>,
+        invite: Option<bool>,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(self.authorized, "not authorized yet");
         anyhow::ensure!(self.inflight.is_none(), "A delivery is still in progress");
-        self.store.enqueue(&packet, &targets, metadata)?;
+        self.store.enqueue(&packet, &targets, metadata, invite)?;
 
         if let Err(error) = self.send_pending() {
             self.status = "Delivery saved locally".into();
@@ -321,7 +441,15 @@ impl Worker {
                 self.selected = Some(id);
             }
 
-            Command::Create { title, partners } => {
+            Command::Create {
+                title,
+                partners,
+                require_username,
+            } => {
+                anyhow::ensure!(
+                    !require_username || self.username.username.is_some(),
+                    "Claim a username before requiring username disclosure"
+                );
                 anyhow::ensure!(!title.trim().is_empty(), "Enter a conversation name");
                 anyhow::ensure!(
                     (1..faith_client::MAX_MEMBERS).contains(&partners.len()),
@@ -357,6 +485,7 @@ impl Worker {
                             .map(|(id, name)| (id.0, name))
                             .collect(),
                     }),
+                    Some(require_username),
                 )?;
                 self.selected = Some(conversation);
                 return Ok(Some(conversation));
@@ -385,13 +514,32 @@ impl Worker {
                     members: chat.members.clone(),
                     text: body.into_bytes(),
                 };
-                self.deliver(packet, chat.members, None)?;
+                self.deliver(packet, chat.members, None, None)?;
             }
 
-            Command::Retry => self.send_pending()?,
+            Command::Respond {
+                conversation,
+                accept,
+                disclose,
+            } => {
+                let request = self
+                    .store
+                    .requests()?
+                    .into_iter()
+                    .find(|request| request.conversation == conversation)
+                    .ok_or_else(|| anyhow::anyhow!("Message request is unavailable"))?;
+                self.respond(&request, accept, disclose)?;
+            }
+
+            Command::Retry => {
+                self.sent_invites.clear();
+                self.send_pending()?;
+            }
+
             Command::Discard => {
                 anyhow::ensure!(self.inflight.is_none(), "Wait for delivery to finish");
                 self.store.discard_pending()?;
+                self.sent_invites.clear();
                 self.status = if self.authorized {
                     "Connected"
                 } else {
@@ -402,6 +550,52 @@ impl Worker {
         }
 
         Ok(None)
+    }
+
+    fn respond(&mut self, request: &Request, accept: bool, disclose: bool) -> anyhow::Result<()> {
+        anyhow::ensure!(self.authorized, "Connect to respond to message requests");
+        anyhow::ensure!(
+            self.responding.is_none(),
+            "Waiting for a message request response to finish"
+        );
+        anyhow::ensure!(
+            !accept || !request.required || self.username.username.is_some(),
+            "A username is required to accept this request"
+        );
+        anyhow::ensure!(
+            !accept || !request.required || !self.username.reject_required,
+            "This profile automatically rejects requests that require username disclosure"
+        );
+        let disclose = accept
+            && !request.required
+            && self.username.username.is_some()
+            && (disclose || self.username.auto_disclose);
+        self.client.respond_conversation_with_policy(
+            request.conversation,
+            request.requester,
+            accept,
+            request.required,
+            disclose,
+        )?;
+        self.responding = Some(request.conversation);
+        Ok(())
+    }
+
+    fn reject_required_requests(&mut self) -> anyhow::Result<()> {
+        if !self.authorized || !self.username.reject_required || self.responding.is_some() {
+            return Ok(());
+        }
+
+        for request in self.store.requests()? {
+            if request.required && self.automatic_attempts.insert(request.conversation) {
+                match self.respond(&request, false, false) {
+                    Ok(()) => break,
+                    Err(error) => self.notice(format!("Could not reject message request: {error}")),
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn run(
@@ -417,16 +611,18 @@ impl Worker {
                 PollFd::new(self.client.event_fd(), PollFlags::POLLIN),
                 PollFd::new(wake.as_fd(), PollFlags::POLLIN),
             ];
-            let timeout = self.inflight.as_ref().map_or(PollTimeout::NONE, |pending| {
-                PollTimeout::try_from(
-                    pending
-                        .deadline
-                        .saturating_duration_since(std::time::Instant::now())
-                        .as_millis()
-                        .saturating_add(1)
-                        .min(i32::MAX as u128) as u32,
-                )
-                .unwrap_or(PollTimeout::MAX)
+            let deadline = self
+                .inflight
+                .as_ref()
+                .map(|pending| pending.deadline)
+                .or(self.claim_deadline);
+            let timeout = deadline.map_or(PollTimeout::NONE, |deadline| {
+                let millis = deadline
+                    .saturating_duration_since(std::time::Instant::now())
+                    .as_millis()
+                    .saturating_add(1)
+                    .min(i32::MAX as u128) as u32;
+                PollTimeout::try_from(millis).unwrap_or(PollTimeout::MAX)
             });
 
             match poll(&mut fds, timeout) {
@@ -474,6 +670,16 @@ impl Worker {
 
                 match event.kind {
                     EventKind::Authorized => {
+                        if let Some(path) = self.claim_path.take() {
+                            std::fs::rename(
+                                path.join(".username-pending"),
+                                path.join("username.json"),
+                            )?;
+                            self.claim_completed = true;
+                            self.claim_deadline = None;
+                        }
+
+                        self.auth_error = None;
                         self.authorized = true;
                         self.status = "Connected".into();
 
@@ -490,10 +696,62 @@ impl Worker {
                         self.status = "Connecting…".into();
                     }
 
+                    EventKind::ServerDisconnect if event.value0 == RECONNECT_FORBIDDEN => {
+                        self.authorized = false;
+                        self.inflight = None;
+                        self.claim_deadline = None;
+                        let error = if event.message.is_empty() {
+                            "Authentication failed.".to_owned()
+                        } else {
+                            event.message
+                        };
+                        self.auth_error = Some(error.clone());
+                        self.status = error;
+                    }
+
                     EventKind::Disconnected | EventKind::ServerDisconnect => {
                         self.authorized = false;
                         self.inflight = None;
-                        self.status = "Disconnected; awaiting reconnect".into();
+                        self.sent_invites.clear();
+                        self.automatic_attempts.clear();
+                        self.responding = None;
+
+                        if self.auth_error.is_none() {
+                            self.status = "Disconnected; awaiting reconnect".into();
+                        }
+                    }
+
+                    EventKind::ConversationResponse => {
+                        if self.authorized
+                            && self.inflight.is_none()
+                            && self
+                                .store
+                                .pending()?
+                                .is_some_and(|(packet, _)| packet.conversation == event.ids[0])
+                            && let Err(error) = self.send_pending()
+                        {
+                            self.notice(format!("Could not finish conversation creation: {error}"));
+                        }
+                    }
+
+                    EventKind::CommandResult
+                        if event.value0 == REQUEST_COMMAND
+                            && event.value1 != COMMAND_ACCEPTED
+                            && !self.sent_invites.is_empty()
+                            && self.inflight.is_none() =>
+                    {
+                        self.status = "A message request could not be sent.".into();
+                        self.notice(event.message);
+                    }
+
+                    EventKind::CommandResult if event.value0 == RESPONSE_COMMAND => {
+                        if let Some(conversation) = self.responding.take() {
+                            if event.value1 == COMMAND_ACCEPTED {
+                                self.store.remove_request(conversation)?;
+                            } else {
+                                self.notice(event.message);
+                            }
+                        }
                     }
 
                     EventKind::GroupReceived => {
@@ -509,6 +767,7 @@ impl Worker {
                             && let Some(inflight) = &mut self.inflight
                         {
                             inflight.echo = true;
+                            self.sent_invites.clear();
                         }
                     }
 
@@ -542,6 +801,13 @@ impl Worker {
                 }
             }
 
+            if self
+                .claim_deadline
+                .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+            {
+                anyhow::bail!("Authentication timed out. Try again.");
+            }
+
             match wake.read() {
                 Ok(_) => {}
                 Err(nix::errno::Errno::EAGAIN) => {}
@@ -565,6 +831,7 @@ impl Worker {
             }
 
             if changed {
+                self.reject_required_requests()?;
                 self.publish(shared, waker)?;
             }
         }

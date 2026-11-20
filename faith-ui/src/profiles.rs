@@ -55,6 +55,7 @@ pub fn discover(root: &Path) -> anyhow::Result<Vec<Profile>> {
         };
 
         if entry.file_type()?.is_dir()
+            && !entry.path().join(".username-pending").exists()
             && !alias.is_empty()
             && alias
                 .bytes()
@@ -92,4 +93,86 @@ pub fn create(root: &Path, alias: &str) -> anyhow::Result<Profile> {
         alias: alias.to_owned(),
         path,
     })
+}
+
+pub const USERNAME_MAX: usize = 20;
+pub const USERNAME_ERROR: &str = "Use 1–20 ASCII letters, digits 1–9, or underscores.";
+
+pub fn username_char(c: char) -> bool {
+    c.is_ascii_alphabetic() || matches!(c, '1'..='9' | '_')
+}
+
+pub fn valid_username(name: &str) -> bool {
+    !name.is_empty() && name.len() <= USERNAME_MAX && name.chars().all(username_char)
+}
+
+#[derive(Clone, Default, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
+pub struct UsernameSettings {
+    pub username: Option<String>,
+    pub auto_disclose: bool,
+    pub reject_required: bool,
+}
+
+impl UsernameSettings {
+    pub fn load(path: &Path) -> anyhow::Result<Self> {
+        match fs::read(path.join("username.json")) {
+            Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+pub fn check_claim_alias(root: &Path, alias: &str) -> anyhow::Result<Option<Profile>> {
+    anyhow::ensure!(
+        valid_alias(alias),
+        "Use 1–20 letters, numbers, or underscores."
+    );
+    let path = root.join(alias);
+
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) => {
+            anyhow::ensure!(
+                metadata.is_dir()
+                    && path.join(".username-pending").is_file()
+                    && !path.join("username.json").exists(),
+                "A profile named {alias} already exists."
+            );
+            Ok(Some(Profile {
+                alias: alias.to_owned(),
+                path,
+            }))
+        }
+
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub fn prepare_claim(root: &Path, alias: &str) -> anyhow::Result<Profile> {
+    if let Some(profile) = check_claim_alias(root, alias)? {
+        return Ok(profile);
+    }
+
+    let profile = create(root, alias)?;
+    fs::File::create(profile.path.join(".username-pending"))?;
+    Ok(profile)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn username_character_rules_match_the_protocol() {
+        assert!(valid_username("Faith_123456789"));
+        assert!(valid_username(&"A".repeat(USERNAME_MAX)));
+
+        for invalid in ["", "Faith0", "Faith-1", " Faith", "é", "A\0"] {
+            assert!(!valid_username(invalid), "{invalid:?}");
+        }
+
+        assert!(!valid_username(&"A".repeat(USERNAME_MAX + 1)));
+    }
 }

@@ -21,8 +21,10 @@ impl Context {
     pub fn from_app(app: &App) -> Self {
         Self {
             kind: match app.page {
-                Page::Accounts | Page::Create => Kind::Profile,
-                Page::Conversations | Page::CreateConversation => Kind::Conversation,
+                Page::Accounts | Page::Create | Page::CreateUsername => Kind::Profile,
+                Page::Conversations | Page::Requests | Page::CreateConversation => {
+                    Kind::Conversation
+                }
                 Page::Settings => Kind::Settings,
             },
             profile: app.selected.as_ref().map(|profile| profile.path.clone()),
@@ -92,6 +94,11 @@ impl Entry {
 
     fn list(mut self, children: impl IntoIterator<Item = Entry>) -> Self {
         self.children = Some(children.into_iter().collect());
+        self
+    }
+
+    fn owner(mut self, profile: &Profile) -> Self {
+        self.owner = Some(profile.path.clone());
         self
     }
 
@@ -400,7 +407,153 @@ pub fn build(app: &App, zoom: u32) -> Vec<Entry> {
         }
     }
 
+    let form = &app.profile_form;
+    if app.page == Page::Create {
+        entries.push(
+            Entry::new(
+                "claim-username",
+                if form.claim {
+                    "Skip claiming a username"
+                } else {
+                    "Claim a username"
+                },
+                Kind::Profile,
+                Action::ClaimUsername(!form.claim),
+            )
+            .search("claim username", &["create profile handle account"]),
+        );
+        entries.push(
+            Entry::new(
+                "username-help",
+                "How usernames work",
+                Kind::Profile,
+                Action::ToggleUsernameHelp,
+            )
+            .search("username help", &["profile username privacy disclosure"]),
+        );
+    }
+
+    if app.page == Page::CreateUsername && form.pending.is_none() {
+        entries.extend([
+            Entry::new(
+                "username-advanced",
+                "Username advanced options",
+                Kind::Profile,
+                Action::ToggleUsernameAdvanced,
+            ),
+            Entry::new(
+                "auto-disclose-username",
+                if form.username.auto_disclose {
+                    "Disable automatic username disclosure"
+                } else {
+                    "Disclose username automatically"
+                },
+                Kind::Profile,
+                Action::AutoDiscloseUsername(!form.username.auto_disclose),
+            )
+            .search(
+                "automatic username disclosure",
+                &["share username on acceptance"],
+            ),
+            Entry::new(
+                "reject-required-username",
+                if form.username.reject_required {
+                    "Disable automatic request rejection"
+                } else {
+                    "Automatically reject requests requiring a username"
+                },
+                Kind::Profile,
+                Action::RejectRequiredUsername(!form.username.reject_required),
+            )
+            .search(
+                "automatically reject requests",
+                &["decline required username disclosure"],
+            ),
+        ]);
+    }
+
     if let Some(profile) = &app.selected {
+        entries.push(
+            Entry::new(
+                "message-requests",
+                "Message requests",
+                Kind::Conversation,
+                Action::MessageRequests(profile.clone()),
+            )
+            .search("message requests", &["invitations incoming accept decline"])
+            .owner(profile),
+        );
+        let snapshot = &app.chat.snapshot;
+
+        if app.page == Page::CreateConversation
+            && app.chat.naming
+            && app.chat.editing_creation()
+            && snapshot.username.is_some()
+        {
+            entries.push(
+                Entry::new(
+                    "require-conversation-username",
+                    if app.chat.require_username {
+                        "Make username disclosure optional"
+                    } else {
+                        "Require username disclosure"
+                    },
+                    Kind::Conversation,
+                    Action::RequireConversationUsername(!app.chat.require_username),
+                )
+                .search(
+                    "conversation username disclosure",
+                    &["require username force policy"],
+                )
+                .owner(profile),
+            );
+        }
+
+        if snapshot.authorized && snapshot.responding.is_none() {
+            for request in &*snapshot.requests {
+                let name = if request.username.is_empty() {
+                    request.requester.to_string()
+                } else {
+                    request.username.clone()
+                };
+                for (id, verb, accept, disclose) in [
+                    ("accept", "Accept", true, false),
+                    ("share", "Accept and share username for", true, true),
+                    ("decline", "Decline", false, false),
+                ] {
+                    if accept
+                        && request.required
+                        && (snapshot.username.is_none() || snapshot.reject_required)
+                        || disclose
+                            && (request.required
+                                || snapshot.username.is_none()
+                                || snapshot.auto_disclose)
+                    {
+                        continue;
+                    }
+
+                    entries.push(
+                        Entry::new(
+                            &format!("request-{id}-{}", request.conversation),
+                            &format!("{verb} request from {name}"),
+                            Kind::Conversation,
+                            Action::RespondToRequest {
+                                profile: profile.clone(),
+                                conversation: request.conversation,
+                                accept,
+                                disclose,
+                            },
+                        )
+                        .search(
+                            &format!("{verb} message request {name}"),
+                            &["respond invitation"],
+                        )
+                        .owner(profile),
+                    );
+                }
+            }
+        }
+
         entries.push(Entry::profile(profile));
         let snapshot = &app.chat.snapshot;
         if snapshot.auth.is_some() {
