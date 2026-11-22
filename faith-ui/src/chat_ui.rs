@@ -79,6 +79,10 @@ impl State {
         }
     }
 
+    pub fn creation_step(&self) -> (u64, bool) {
+        (self.form, self.naming)
+    }
+
     pub fn title_id(&self) -> String {
         format!("chat-title-{}-{}", self.session, self.form)
     }
@@ -505,25 +509,11 @@ pub fn creation(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Re
     }
 
     ui.div_end();
-    ui.set_position(x, footer);
-    if command_button(
-        ui,
-        gpu,
-        "chat-cancel",
-        "",
-        if naming {
-            "Back"
-        } else {
-            "Cancel"
-        },
-        editing,
-        false,
-    )? {
-        action = if naming {
-            Action::EditChatPartners
-        } else {
-            Action::CancelConversation
-        };
+    if !naming {
+        ui.set_position(x, footer);
+        if command_button(ui, gpu, "chat-cancel", "", "Cancel", editing, false)? {
+            action = Action::CancelConversation;
+        }
     }
 
     let button_width = (if naming {

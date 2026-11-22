@@ -57,11 +57,39 @@ enum Page {
 }
 
 impl Page {
+    fn tab(self) -> Tab {
+        match self {
+            Self::Accounts | Self::Create | Self::CreateUsername => Tab::Profiles,
+            Self::Conversations
+            | Self::Requests
+            | Self::PendingInvites
+            | Self::CreateConversation => Tab::Conversations,
+            Self::Contacts(_) => Tab::Contacts,
+            Self::Settings => Tab::Settings,
+        }
+    }
+
     fn is_chat(self) -> bool {
-        matches!(
-            self,
-            Self::Conversations | Self::Requests | Self::PendingInvites | Self::CreateConversation
-        )
+        self.tab() == Tab::Conversations
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Profiles,
+    Conversations,
+    Contacts,
+    Settings,
+}
+
+impl Tab {
+    fn root(self) -> Page {
+        match self {
+            Self::Profiles => Page::Accounts,
+            Self::Conversations => Page::Conversations,
+            Self::Contacts => Page::Contacts(None),
+            Self::Settings => Page::Settings,
+        }
     }
 }
 
@@ -78,7 +106,14 @@ struct Location {
     settings_item: SettingsItem,
     conversation: Option<faith_client::Id>,
     chat_session: u64,
+    creation: Option<(u64, bool)>,
     list_offset: usize,
+}
+
+#[derive(Clone, Copy)]
+struct TabLocation {
+    location: Location,
+    contact_mode: contacts_ui::Mode,
 }
 
 #[derive(Clone)]
@@ -167,7 +202,6 @@ enum Action {
     AddChatPartner(faith_client::Id, String),
     FocusChatPartner,
     NameNewConversation(Option<(faith_client::Id, String)>),
-    EditChatPartners,
     BeginConversationRename {
         profile: Profile,
         id: faith_client::Id,
@@ -256,6 +290,7 @@ struct App {
     session: Option<client::Session>,
     chat: chat_ui::State,
     page: Page,
+    tab_locations: [Option<TabLocation>; 4],
     back_history: Vec<Location>,
     forward_history: Vec<Location>,
     error: String,
@@ -290,19 +325,57 @@ impl App {
             settings_item: self.settings_item,
             conversation: self.conversation,
             chat_session: self.chat.session,
+            creation: (self.page == Page::CreateConversation).then(|| self.chat.creation_step()),
             list_offset: self.list_offset,
+        }
+    }
+
+    fn switch_tab(&mut self, tab: Tab) {
+        if self.page.tab() == tab {
+            return;
+        }
+
+        let saved = self.tab_locations[tab as usize].filter(|saved| {
+            tab != Tab::Conversations || saved.location.chat_session == self.chat.session
+        });
+        let location = saved.map_or_else(
+            || Location {
+                page: tab.root(),
+                conversation: None,
+                creation: None,
+                list_offset: 0,
+                ..self.location()
+            },
+            |saved| saved.location,
+        );
+        self.restore_location(location);
+        if let Some(saved) = saved
+            && tab == Tab::Contacts
+            && self.page == saved.location.page
+        {
+            self.contact_mode = saved.contact_mode;
         }
     }
 
     fn restore_location(&mut self, location: Location) {
         self.error.clear();
-        self.page = if location.page == Page::CreateConversation
-            && location.chat_session != self.chat.session
-        {
-            Page::Conversations
-        } else {
-            location.page
-        };
+        self.page = location.page;
+        if self.page == Page::PendingInvites && self.chat.snapshot.pending_invites.is_empty() {
+            self.page = Page::Conversations;
+        }
+
+        if self.page == Page::CreateConversation {
+            match location.creation {
+                Some((form, naming))
+                    if location.chat_session == self.chat.session
+                        && form == self.chat.creation_step().0 =>
+                {
+                    self.chat.naming = naming && !self.chat.partners.is_empty();
+                }
+                _ => self.page = Page::Conversations,
+            }
+        }
+
         if let Page::Contacts(id) = self.page {
             self.page = Page::Contacts(id.filter(|&id| self.contacts.get(id).is_some()));
             self.refresh_contact_conversations();
@@ -310,7 +383,10 @@ impl App {
         }
 
         self.contact_mode = contacts_ui::Mode::View;
-        self.settings_item = location.settings_item;
+        if self.page == Page::Settings {
+            self.settings_item = location.settings_item;
+        }
+
         self.conversation = location.conversation.filter(|id| {
             location.chat_session == self.chat.session
                 && self
@@ -321,7 +397,8 @@ impl App {
                     .any(|chat| chat.id == *id)
         });
 
-        if let Some(id) = self.conversation
+        if self.page == Page::Conversations
+            && let Some(id) = self.conversation
             && let Some(session) = &self.session
             && let Err(error) = session.submit(client::Command::Select(id))
         {
@@ -329,6 +406,20 @@ impl App {
         }
 
         self.list_offset = location.list_offset;
+    }
+
+    fn clear_conversation_form(&mut self, ui: &mut Framework) {
+        self.chat.clear_form(ui);
+        if self.tab_locations[Tab::Conversations as usize]
+            .is_some_and(|saved| saved.location.page == Page::CreateConversation)
+        {
+            self.tab_locations[Tab::Conversations as usize] = None;
+        }
+
+        self.back_history
+            .retain(|location| location.page != Page::CreateConversation);
+        self.forward_history
+            .retain(|location| location.page != Page::CreateConversation);
     }
 
     fn save_settings(&mut self) {
@@ -681,6 +772,12 @@ impl App {
             && let Some(snapshot) = session.snapshot_since(0)
         {
             if snapshot.claim_completed {
+                if self.tab_locations[Tab::Profiles as usize]
+                    .is_some_and(|saved| saved.location.page == Page::CreateUsername)
+                {
+                    self.tab_locations[Tab::Profiles as usize] = None;
+                }
+
                 let (profile, session) = self.profile_form.pending.take().unwrap();
                 self.profiles
                     .retain(|existing| existing.path != profile.path);
@@ -729,10 +826,10 @@ impl App {
             if accepted {
                 match submission {
                     chat_ui::Submission::Create => {
+                        self.clear_conversation_form(ui);
                         if self.page == Page::CreateConversation {
                             self.conversation = None;
                             self.page = Page::Conversations;
-                            self.chat.clear_form(ui);
                             ui.navigation_changed();
                         }
                     }
@@ -846,6 +943,8 @@ impl App {
 
         // Apply the action after the current frame has finished.
         let previous = self.location();
+        let previous_contact_mode = self.contact_mode;
+        let creating_profile = matches!(action, Action::Create(_));
         let begin_rename = matches!(action, Action::BeginConversationRename { .. });
         let focus_requested = matches!(
             action,
@@ -855,6 +954,7 @@ impl App {
                 | Action::BeginConversationRename { .. }
                 | Action::ProfileUsername(_)
                 | Action::NewConversation(_)
+                | Action::NameNewConversation(_)
                 | Action::OpenSettings {
                     control: Some(_),
                     ..
@@ -875,6 +975,7 @@ impl App {
                 | Action::MessageRequests(_)
                 | Action::PendingInvites(_)
                 | Action::NewConversation(_)
+                | Action::NameNewConversation(_)
                 | Action::OpenSettings { .. }
                 | Action::Choose
                 | Action::New
@@ -895,20 +996,16 @@ impl App {
             | Action::PromptSaveConversationContact { .. } => {
                 return Ok(());
             }
-            Action::Contacts | Action::OpenContact(_) => {
-                let id = match action {
-                    Action::OpenContact(id) => {
-                        anyhow::ensure!(self.contacts.get(id).is_some(), "Contact is unavailable");
-                        Some(id)
-                    }
-                    _ => None,
-                };
+            Action::Contacts => self.switch_tab(Tab::Contacts),
+
+            Action::OpenContact(id) => {
+                anyhow::ensure!(self.contacts.get(id).is_some(), "Contact is unavailable");
                 if !matches!(self.page, Page::Contacts(_)) {
                     self.refresh_contact_conversations();
                     self.list_offset = 0;
                 }
 
-                self.page = Page::Contacts(id);
+                self.page = Page::Contacts(Some(id));
                 self.refresh_contact_links();
                 self.contact_mode = contacts_ui::Mode::View;
                 self.error.clear();
@@ -1104,7 +1201,7 @@ impl App {
             Action::NewConversation(profile) => {
                 self.ensure_profile(profile, cli, platform)?;
                 if self.page != Page::CreateConversation {
-                    self.chat.clear_form(ui);
+                    self.clear_conversation_form(ui);
                     self.page = Page::CreateConversation;
                 }
 
@@ -1120,7 +1217,6 @@ impl App {
             | Action::FocusChatPartner
             | Action::RemoveChatPartner(_)
             | Action::NameNewConversation(_)
-            | Action::EditChatPartners
             | Action::CancelConversation
                 if self.page != Page::CreateConversation || !self.chat.editing_creation() => {}
 
@@ -1139,11 +1235,6 @@ impl App {
 
                 self.chat.naming = true;
                 ui.set_input(&self.chat.title_id(), &self.default_conversation_title());
-            }
-
-            Action::EditChatPartners => {
-                self.chat.naming = false;
-                ui.focus_input(&self.chat.partner_id());
             }
 
             Action::BeginConversationRename { profile, id } => {
@@ -1218,7 +1309,7 @@ impl App {
             }
 
             Action::CancelConversation => {
-                self.chat.clear_form(ui);
+                self.clear_conversation_form(ui);
                 self.page = Page::Conversations;
                 self.error.clear();
             }
@@ -1349,6 +1440,7 @@ impl App {
 
             // Refresh the profiles when opening the account list.
             Action::Choose => {
+                self.switch_tab(Tab::Profiles);
                 self.error.clear();
 
                 match profiles::discover(&self.root) {
@@ -1364,10 +1456,6 @@ impl App {
 
                     Err(error) => self.error = error.to_string(),
                 }
-
-                self.page = Page::Accounts;
-
-                self.list_offset = 0;
             }
 
             // Start with an empty handle when opening the creation form.
@@ -1391,17 +1479,13 @@ impl App {
                 }
             }
 
-            Action::Chats => {
-                self.page = Page::Conversations;
-                self.list_offset = 0;
-            }
+            Action::Chats => self.switch_tab(Tab::Conversations),
 
             Action::Settings => {
+                self.switch_tab(Tab::Settings);
                 if let Err(error) = self.themes.refresh() {
                     self.error = format!("Could not discover themes: {error:#}");
                 }
-
-                self.page = Page::Settings;
             }
 
             Action::ToggleMenu => self.collapsed = !self.collapsed,
@@ -1501,6 +1585,21 @@ impl App {
             },
         }
 
+        let previous_tab = previous.page.tab();
+        if previous_tab != self.page.tab() {
+            self.tab_locations[previous_tab as usize] = if creating_profile {
+                None
+            } else {
+                Some(TabLocation {
+                    location: previous,
+                    contact_mode: match previous_contact_mode {
+                        contacts_ui::Mode::Add | contacts_ui::Mode::Edit => previous_contact_mode,
+                        _ => contacts_ui::Mode::View,
+                    },
+                })
+            };
+        }
+
         if self.location() != previous {
             self.contact_delete_in_list = None;
         }
@@ -1515,6 +1614,20 @@ impl App {
                 ui.focus_control("new-profile-handle", true);
             } else if self.page == Page::CreateUsername {
                 ui.focus_control("new-profile-username", true);
+            } else if self.page == Page::CreateConversation {
+                if self.chat.naming {
+                    ui.focus_input(&self.chat.title_id());
+                } else {
+                    ui.focus_input(&self.chat.partner_id());
+                }
+            } else if self.page.tab() == Tab::Contacts
+                && self.contact_mode == contacts_ui::Mode::Add
+            {
+                ui.focus_input("contact-auth");
+            } else if self.page.tab() == Tab::Contacts
+                && self.contact_mode == contacts_ui::Mode::Edit
+            {
+                ui.focus_input("contact-name");
             } else {
                 ui.navigation_changed();
             }
@@ -3667,6 +3780,7 @@ fn main() -> anyhow::Result<()> {
         session: None,
         chat: chat_ui::State::default(),
         page: Page::Accounts,
+        tab_locations: [None; 4],
         back_history: Vec::new(),
         forward_history: Vec::new(),
         error: String::new(),
