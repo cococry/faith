@@ -2620,6 +2620,17 @@ impl Framework {
             self.animate_until(next);
         }
 
+        let background = self.theme.background;
+        self.ui_renderer.rounded_box(
+            [x - 8.0, y - 4.0, metrics.width + 16.0, metrics.height + 8.0],
+            self.corner_radii().control,
+            Some(Color {
+                a: background.a * opacity,
+                ..background
+            }),
+            None,
+        )?;
+
         let color = if self.zoom_reset_pressed {
             self.theme.selected_icon
         } else if hovered {
