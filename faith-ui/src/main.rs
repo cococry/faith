@@ -172,15 +172,16 @@ enum Action {
         profile: Profile,
         id: faith_client::Id,
     },
-    PromptSenderName {
+    OpenConversationContacts,
+    PromptSaveConversationContact {
         profile: Profile,
         id: faith_client::Id,
-        sender: faith_client::Id,
+        member: faith_client::Id,
     },
-    NameSender {
+    SaveConversationContact {
         profile: Profile,
         id: faith_client::Id,
-        sender: faith_client::Id,
+        member: faith_client::Id,
         name: String,
     },
     CancelConversationRename,
@@ -580,11 +581,39 @@ impl App {
         self.contacts.display(id, fallback)
     }
 
+    fn can_save_partner(&self, member: faith_client::Id) -> bool {
+        self.chat.snapshot.auth.is_some_and(|auth| auth != member)
+            && self.contacts.get(member).is_none()
+    }
+
+    fn check_conversation_contact(
+        &self,
+        profile: &Profile,
+        id: faith_client::Id,
+        member: faith_client::Id,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.selected
+                .as_ref()
+                .is_some_and(|active| active.path == profile.path)
+                && self.can_save_partner(member)
+                && self
+                    .chat
+                    .snapshot
+                    .conversations
+                    .iter()
+                    .any(|chat| { chat.id == id && chat.members.contains(&member) }),
+            "Conversation partner is unavailable or already in Contacts"
+        );
+        Ok(())
+    }
+
     fn partner_label(&self, id: &faith_client::Id, draft_name: &str) -> String {
         if !draft_name.is_empty() {
-            return self.contact_usernames.get(id).map_or_else(
-                || draft_name.to_owned(),
-                |username| format!("{draft_name} ({username})"),
+            return contacts::display_name(
+                draft_name,
+                self.contact_usernames.get(id).map(String::as_str),
+                "",
             );
         }
 
@@ -862,7 +891,8 @@ impl App {
             | Action::OpenQuickshell
             | Action::OpenContactPicker
             | Action::Quit
-            | Action::PromptSenderName { .. } => {
+            | Action::OpenConversationContacts
+            | Action::PromptSaveConversationContact { .. } => {
                 return Ok(());
             }
             Action::Contacts | Action::OpenContact(_) => {
@@ -1175,28 +1205,16 @@ impl App {
                 ui.clear_input(chat_ui::RENAME_INPUT);
             }
 
-            Action::NameSender {
+            Action::SaveConversationContact {
                 profile,
                 id,
-                sender,
+                member,
                 name,
             } => {
-                anyhow::ensure!(
-                    self.selected
-                        .as_ref()
-                        .is_some_and(|active| active.path == profile.path)
-                        && self.chat.snapshot.selected == Some(id)
-                        && self.chat.snapshot.auth != Some(sender)
-                        && self
-                            .chat
-                            .snapshot
-                            .messages
-                            .iter()
-                            .any(|message| message.sender == sender),
-                    "Sender is unavailable"
-                );
-                self.contacts.save(&[(sender, name)])?;
+                self.check_conversation_contact(&profile, id, member)?;
+                self.contacts.save(&[(member, name)])?;
                 self.sync_contact_names();
+                self.error.clear();
             }
 
             Action::CancelConversation => {
@@ -3929,13 +3947,29 @@ fn main() -> anyhow::Result<()> {
                 platform.request_redraw()?;
                 continue;
             }
-            Action::PromptSenderName {
+            Action::OpenConversationContacts => {
+                ui.set_modal_input(false);
+                quickshell.open_conversation_contacts(&app, &mut ui);
+                platform.request_redraw()?;
+                continue;
+            }
+
+            Action::PromptSaveConversationContact {
                 profile,
                 id,
-                sender,
+                member,
             } => {
                 ui.set_modal_input(false);
-                quickshell.open_sender_name(&mut ui, profile, id, sender);
+                match app.check_conversation_contact(&profile, id, member) {
+                    Ok(()) => quickshell.prompt_save_contact(
+                        &mut ui,
+                        profile,
+                        id,
+                        member,
+                        app.contact_usernames.get(&member).map(String::as_str),
+                    ),
+                    Err(error) => app.error = error.to_string(),
+                }
                 platform.request_redraw()?;
                 continue;
             }

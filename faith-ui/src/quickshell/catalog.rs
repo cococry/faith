@@ -214,6 +214,66 @@ pub fn contact_picker(app: &App) -> Option<Entry> {
     )
 }
 
+pub fn conversation_contacts(app: &App) -> Option<Entry> {
+    if app.page != Page::Conversations {
+        return None;
+    }
+
+    let profile = app.selected.as_ref()?;
+    let chat = app
+        .chat
+        .snapshot
+        .conversations
+        .iter()
+        .find(|chat| Some(chat.id) == app.conversation)?;
+    let children: Vec<_> = chat
+        .members
+        .iter()
+        .copied()
+        .filter(|&member| app.can_save_partner(member))
+        .map(|member| {
+            let auth = member.to_string();
+            let username = app.contact_usernames.get(&member);
+            let name = username.map_or(auth.as_str(), String::as_str);
+            Entry::new(
+                &format!(
+                    "save-partner:{}:{}:{member}",
+                    profile.path.display(),
+                    chat.id
+                ),
+                name,
+                Kind::Contact,
+                Action::PromptSaveConversationContact {
+                    profile: profile.clone(),
+                    id: chat.id,
+                    member,
+                },
+            )
+            .search(name, &[&auth])
+            .detail(username.map_or("", |_| auth.as_str()))
+            .owner(profile)
+        })
+        .collect();
+    if children.is_empty() {
+        return None;
+    }
+
+    Some(
+        Entry::new(
+            "save-conversation-contact",
+            "Save contact",
+            Kind::Contact,
+            Action::None,
+        )
+        .search(
+            "save contact",
+            &["add contact conversation partner participant"],
+        )
+        .list(children)
+        .owner(profile),
+    )
+}
+
 pub fn build(app: &App, zoom: u32) -> Vec<Entry> {
     let mut entries = vec![
         Entry::new(
@@ -899,48 +959,7 @@ pub fn build(app: &App, zoom: u32) -> Vec<Entry> {
             ));
         }
 
-        if let Some(id) = snapshot.selected.filter(|id| Some(*id) == app.conversation) {
-            let mut seen = std::collections::HashSet::new();
-            let children: Vec<_> = snapshot
-                .messages
-                .iter()
-                .filter(|message| {
-                    crate::chat_ui::can_name_sender(app, message) && seen.insert(message.sender)
-                })
-                .map(|message| {
-                    let sender = message.sender;
-                    Entry::new(
-                        &format!("name-sender:{}:{id}:{sender}", profile.path.display()),
-                        app.contact_name(sender, &message.author),
-                        Kind::Conversation,
-                        Action::PromptSenderName {
-                            profile: profile.clone(),
-                            id,
-                            sender,
-                        },
-                    )
-                    .detail(&profile.alias)
-                    .owner(profile)
-                })
-                .collect();
-
-            if !children.is_empty() {
-                entries.push(
-                    Entry::new(
-                        "name-sender",
-                        "Name a sender locally",
-                        Kind::Conversation,
-                        Action::None,
-                    )
-                    .search(
-                        "name sender",
-                        &["local name participant contact message author"],
-                    )
-                    .list(children)
-                    .owner(profile),
-                );
-            }
-        }
+        entries.extend(conversation_contacts(app));
 
         if app.page.is_chat()
             && let Some(id) = app.chat.renaming

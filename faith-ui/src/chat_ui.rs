@@ -1102,7 +1102,18 @@ pub fn conversation(
         width: Some(inner_width),
         ..Default::default()
     })?;
+    let show_save_contact = chat
+        .members
+        .iter()
+        .any(|&member| app.can_save_partner(member));
+    let button_width = 108.0_f32.min(inner_width * 0.5);
     let (x, y) = ui.position();
+    let title_width = if show_save_contact {
+        (inner_width - button_width - 8.0).max(1.0)
+    } else {
+        inner_width
+    };
+    ui.push_sizing(Some(title_width), None);
     label(
         ui,
         gpu,
@@ -1112,7 +1123,8 @@ pub fn conversation(
         false,
         false,
     )?;
-    if let Some(at) = ui.context_press([x, y, inner_width, ui.position().1 - y]) {
+    ui.pop_sizing();
+    if let Some(at) = ui.context_press([x, y, title_width, ui.position().1 - y]) {
         action = Action::OpenRowMenu(
             crate::RowMenu::Conversation {
                 profile: profile.clone(),
@@ -1120,6 +1132,24 @@ pub fn conversation(
             },
             at,
         );
+    }
+
+    if show_save_contact {
+        ui.set_position(inner_width - button_width, y);
+        ui.push_sizing(Some(button_width), Some(32.0));
+        let save = command_button(
+            ui,
+            gpu,
+            "conversation-save-contact",
+            "",
+            "Save contact",
+            true,
+            false,
+        );
+        ui.pop_sizing();
+        if save? {
+            action = Action::OpenConversationContacts;
+        }
     }
 
     if !snapshot.status.is_empty()
@@ -1144,12 +1174,12 @@ pub fn conversation(
     let history_bottom = clipboard_position.map_or(composer, |position| position[1]);
     let history = (history_bottom - header - 9.0).max(0.0);
     if history > 0.0
-        && let Some(sender) = messages(ui, gpu, app, chat.id, [20.0, header, inner_width, history])?
+        && let Some(member) = messages(ui, gpu, app, chat, [20.0, header, inner_width, history])?
     {
-        action = Action::PromptSenderName {
+        action = Action::PromptSaveConversationContact {
             profile: profile.clone(),
             id: chat.id,
-            sender,
+            member,
         };
     }
 
@@ -1209,7 +1239,12 @@ struct HistoryLayout {
 }
 
 impl HistoryLayout {
-    fn measure(ui: &mut Framework, app: &App, limit: f32) -> anyhow::Result<Self> {
+    fn measure(
+        ui: &mut Framework,
+        app: &App,
+        chat: &client::Chat,
+        limit: f32,
+    ) -> anyhow::Result<Self> {
         let snapshot = &app.chat.snapshot;
         let padding = limit.min(20.0) * 0.5;
         let content = (limit - padding * 2.0).max(1.0);
@@ -1232,11 +1267,12 @@ impl HistoryLayout {
             let (body, name) = (body?, name?);
             let width = (body.0.max(name.0).ceil() + 2.0 * padding + 1.0).min(limit);
             let height = body.1 + name.1 + 2.0 * padding;
-            let actions = if can_name_sender(app, message) {
-                MESSAGE_ACTION_SIZE + MESSAGE_ACTION_GAP
-            } else {
-                0.0
-            };
+            let actions =
+                if app.can_save_partner(message.sender) && chat.members.contains(&message.sender) {
+                    MESSAGE_ACTION_SIZE + MESSAGE_ACTION_GAP
+                } else {
+                    0.0
+                };
             bubbles.push(Bubble {
                 y: extent,
                 height,
@@ -1264,22 +1300,18 @@ fn author<'a>(app: &'a App, message: &'a client::Message) -> &'a str {
     }
 }
 
-pub fn can_name_sender(app: &App, message: &client::Message) -> bool {
-    app.chat.snapshot.auth != Some(message.sender) && app.contacts.get(message.sender).is_none()
-}
-
 fn messages(
     ui: &mut Framework,
     gpu: &mut Renderer,
     app: &App,
-    chat: Id,
+    chat: &client::Chat,
     [x, y, width, height]: [f32; 4],
 ) -> anyhow::Result<Option<Id>> {
     let snapshot = &app.chat.snapshot;
     let mut sender = None;
     ui.set_position(x, y);
     ui.div_begin_id(
-        &app.chat.composer_id(chat),
+        &app.chat.composer_id(chat.id),
         DivOptions {
             width: Some(width),
             height: Some(height),
@@ -1288,7 +1320,7 @@ fn messages(
     )?;
     ui.follow_scroll_end();
 
-    if snapshot.selected == Some(chat) {
+    if snapshot.selected == Some(chat.id) {
         let available = (ui.div_width() - 12.0).max(1.0);
         let limit = (available * 0.77).clamp(1.0, 520.0);
         if snapshot.messages.is_empty() {
@@ -1301,7 +1333,7 @@ fn messages(
                 || layout.scale != ui.layout_scale()
                 || !Arc::ptr_eq(&layout.messages, &snapshot.messages)
         }) {
-            *cache = Some(HistoryLayout::measure(ui, app, limit)?);
+            *cache = Some(HistoryLayout::measure(ui, app, chat, limit)?);
         }
 
         let layout = cache.as_ref().unwrap();
@@ -1384,7 +1416,7 @@ fn messages(
             {
                 ui.set_position(0.0, bubble.y + bubble.height + MESSAGE_ACTION_GAP);
                 ui.push_style(Style {
-                    tooltip: Some("Name sender locally"),
+                    tooltip: Some("Save contact"),
                     font_size: 14,
                     radius: MESSAGE_ACTION_SIZE * 0.5,
                     color: ui.theme().text,
@@ -1395,7 +1427,11 @@ fn messages(
                     Some(MESSAGE_ACTION_SIZE.min(available)),
                     Some(MESSAGE_ACTION_SIZE),
                 );
-                let clicked = ui.icon_button(gpu, &format!("name-sender-{row_id}"), ADD);
+                let clicked = ui.icon_button(
+                    gpu,
+                    &format!("save-message-contact-{row_id}"),
+                    crate::contacts::ICON,
+                );
                 ui.pop_sizing();
                 ui.pop_style();
 

@@ -12,6 +12,15 @@ pub const EDIT: &str = "";
 pub const DELETE: &str = "󰆴";
 pub const NAME_MAX: usize = 20;
 
+pub fn display_name(name: &str, username: Option<&str>, fallback: &str) -> String {
+    match username {
+        Some(username) if name.is_empty() => username.to_owned(),
+        Some(username) if !name.eq_ignore_ascii_case(username) => format!("{name} ({username})"),
+        _ if name.is_empty() => fallback.to_owned(),
+        _ => name.to_owned(),
+    }
+}
+
 pub struct Contact {
     pub id: Id,
     pub auth: String,
@@ -146,12 +155,11 @@ impl Book {
 
     pub fn apply_usernames(&mut self, usernames: &HashMap<Id, String>) {
         for contact in &mut self.entries {
-            contact.display = match (contact.name.is_empty(), usernames.get(&contact.id)) {
-                (true, Some(username)) => username.clone(),
-                (true, None) => contact.auth.clone(),
-                (false, Some(username)) => format!("{} ({username})", contact.name),
-                (false, None) => contact.name.clone(),
-            };
+            contact.display = display_name(
+                &contact.name,
+                usernames.get(&contact.id).map(String::as_str),
+                &contact.auth,
+            );
         }
     }
 
@@ -191,6 +199,13 @@ impl Book {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn a_nickname_matching_the_username_is_displayed_once() {
+        assert_eq!(display_name("Simon", Some("simon"), ""), "Simon");
+        assert_eq!(display_name("simon", Some("simon"), ""), "simon");
+        assert_eq!(display_name("Buddy", Some("simon"), ""), "Buddy (simon)");
+    }
 
     #[test]
     fn imports_aliases_across_profiles_once_and_persists_edits() -> anyhow::Result<()> {

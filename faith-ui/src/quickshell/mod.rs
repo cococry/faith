@@ -146,7 +146,7 @@ struct Level {
 #[derive(Default)]
 pub struct Shell {
     contact_picker: bool,
-    name_target: Option<(Profile, faith_client::Id, faith_client::Id)>,
+    save_contact_target: Option<(Profile, faith_client::Id, faith_client::Id)>,
     open: bool,
     presence: crate::ui::animation::Presence,
     entries: Vec<Entry>,
@@ -172,7 +172,7 @@ impl Shell {
 
     pub fn open(&mut self, app: &App, zoom: u32, ui: &mut Framework) {
         self.contact_picker = false;
-        self.name_target = None;
+        self.save_contact_target = None;
         self.levels.clear();
         self.placeholder = "Run an action directly".into();
         self.entries = catalog::build(app, zoom);
@@ -190,11 +190,21 @@ impl Shell {
             return;
         };
 
-        self.contact_picker = true;
-        self.name_target = None;
+        self.open_collection(app, ui, picker);
+    }
+
+    pub fn open_conversation_contacts(&mut self, app: &App, ui: &mut Framework) {
+        if let Some(collection) = catalog::conversation_contacts(app) {
+            self.open_collection(app, ui, collection);
+        }
+    }
+
+    fn open_collection(&mut self, app: &App, ui: &mut Framework, collection: Entry) {
+        self.contact_picker = collection.id == "add-contact-to-conversation";
+        self.save_contact_target = None;
         self.levels.clear();
-        self.placeholder = picker.label;
-        self.entries = picker.children.unwrap_or_default();
+        self.placeholder = collection.label;
+        self.entries = collection.children.unwrap_or_default();
         self.context = Some(Context::from_app(app));
         self.query.clear();
         self.selected = 0;
@@ -204,18 +214,23 @@ impl Shell {
         ui.clear_input(QUERY);
     }
 
-    pub fn open_sender_name(
+    pub fn prompt_save_contact(
         &mut self,
         ui: &mut Framework,
         profile: Profile,
         id: faith_client::Id,
-        sender: faith_client::Id,
+        member: faith_client::Id,
+        username: Option<&str>,
     ) {
         self.levels.clear();
         self.open = true;
         self.contact_picker = false;
-        self.name_target = Some((profile, id, sender));
+        self.save_contact_target = Some((profile, id, member));
         ui.clear_input(NAME);
+        if let Some(username) = username {
+            ui.set_input(NAME, username);
+        }
+
         ui.animate_until(std::time::Instant::now());
     }
 
@@ -389,13 +404,13 @@ impl Shell {
         Some(entry.command.clone())
     }
 
-    fn render_name(
+    fn render_save_contact(
         &mut self,
         ui: &mut Framework,
         gpu: &mut Renderer,
         [x, y, width, height]: [f32; 4],
     ) -> anyhow::Result<Option<Action>> {
-        let Some((profile, id, sender)) = &self.name_target else {
+        let Some((profile, id, member)) = &self.save_contact_target else {
             return Ok(None);
         };
         ui.set_position(x, y);
@@ -414,7 +429,7 @@ impl Shell {
                 ..Default::default()
             },
         )?;
-        crate::label(ui, gpu, "Add to contacts", 15, true, false, false)?;
+        crate::label(ui, gpu, "Save contact", 15, true, false, false)?;
         ui.space(12.0);
 
         let width = ui.div_width();
@@ -442,7 +457,7 @@ impl Shell {
                 max_chars: Some(crate::contacts::NAME_MAX),
                 filter: None,
             },
-            "Nickname",
+            "Name",
         )?;
         ui.pop_sizing();
         ui.pop_style();
@@ -468,7 +483,7 @@ impl Shell {
             ..ui.style()
         });
         ui.push_sizing(Some(done_width), Some(40.0));
-        let done = ui.icon_label_button(gpu, "quickshell-name-done", "", "Done")?;
+        let done = ui.icon_label_button(gpu, "quickshell-save-contact", "", "Save")?;
         ui.pop_sizing();
         ui.pop_style();
         ui.div_end();
@@ -476,10 +491,10 @@ impl Shell {
 
         if enabled && (done || ui.input_submitted(NAME)) {
             self.open = false;
-            return Ok(Some(Action::NameSender {
+            return Ok(Some(Action::SaveConversationContact {
                 profile: profile.clone(),
                 id: *id,
-                sender: *sender,
+                member: *member,
                 name: name.to_owned(),
             }));
         }
@@ -501,7 +516,7 @@ impl Shell {
 
         let mut presence = ui.presence(&mut self.presence, self.open);
         ui.overlay_opacity(presence);
-        let naming = self.name_target.is_some();
+        let naming = self.save_contact_target.is_some();
 
         if !naming
             && !self.levels.is_empty()
@@ -603,7 +618,7 @@ impl Shell {
         }
 
         if naming {
-            let action = self.render_name(ui, gpu, [x, top, width, height])?;
+            let action = self.render_save_contact(ui, gpu, [x, top, width, height])?;
             ui.end_overlay()?;
             return Ok(action);
         }
