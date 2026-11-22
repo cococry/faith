@@ -7,7 +7,7 @@ use super::{
     text::TextLayoutOptions,
     widgets::{
         button, checkbox, dropdown,
-        input::{Bounds, InputField, InputOptions},
+        input::{Bounds, InputField, InputOptions, InputPaint},
         slider,
     },
 };
@@ -3415,8 +3415,11 @@ impl Framework {
         self.ui_renderer.push_clip(content_clip(b, s));
         let result = field.render(
             b,
-            s,
-            s.border_color.unwrap_or(self.theme.border),
+            InputPaint {
+                padding: s.padding,
+                caret: s.color,
+                selection: s.border_color.unwrap_or(self.theme.border),
+            },
             font,
             &mut self.text_renderer,
             gpu,

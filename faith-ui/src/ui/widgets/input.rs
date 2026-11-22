@@ -30,6 +30,12 @@ pub struct InputOptions {
     pub filter: Option<fn(char) -> bool>,
 }
 
+pub struct InputPaint {
+    pub padding: f32,
+    pub caret: Color,
+    pub selection: Color,
+}
+
 /// A single-line, UTF-8 input widget. Editing is grapheme-aware; platform text
 /// commits are distinct from navigation keys. The caller schedules caret redraws.
 pub struct InputField {
@@ -276,24 +282,23 @@ impl InputField {
     pub fn render<G: GraphicsDevice>(
         &mut self,
         bounds: Bounds,
-        style: super::super::framework::Style,
-        selection_color: Color,
+        paint: InputPaint,
         font: FontHandle,
         text: &mut TextRenderer,
         gpu: &mut G,
         ui: &mut UIRenderer,
     ) -> anyhow::Result<()> {
-        let available = (bounds.width - style.padding * 2.0).max(0.0);
+        let available = (bounds.width - paint.padding * 2.0).max(0.0);
         let caret_width = 1.5_f32.min(available);
         let caret = text.caret_x(&self.text, font, self.cursor)?;
         self.scroll_x = scroll_to_caret(self.scroll_x, caret, (available - caret_width).max(0.0));
-        let x = bounds.x + style.padding;
-        let y = bounds.y + style.padding;
-        let height = (bounds.height - style.padding * 2.0).max(0.0);
+        let x = bounds.x + paint.padding;
+        let y = bounds.y + paint.padding;
+        let height = (bounds.height - paint.padding * 2.0).max(0.0);
         ui.push_clip([x, y, available, height]);
         let result = (|| -> anyhow::Result<()> {
             if self.focused && self.selected {
-                ui.quad([x - self.scroll_x, y, caret, height], selection_color)?;
+                ui.quad([x - self.scroll_x, y, caret, height], paint.selection)?;
             }
 
             if !self.text.is_empty() {
@@ -305,7 +310,7 @@ impl InputField {
             if self.caret_visible {
                 ui.quad(
                     [x + caret - self.scroll_x, y, caret_width, height],
-                    style.color,
+                    paint.caret,
                 )?;
             }
 
