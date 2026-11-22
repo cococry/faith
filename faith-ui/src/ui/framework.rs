@@ -547,6 +547,20 @@ impl Framework {
             })
     }
 
+    pub fn context_press(&self, bounds: [f32; 4]) -> Option<CursorPosition> {
+        self.pointer.filter(|_| {
+            self.region_hovered(bounds)
+                && self.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        WindowEvent::MouseButtonPressed {
+                            button: MouseButton::Right
+                        }
+                    )
+                })
+        })
+    }
+
     pub fn pointer_position(&self) -> Option<CursorPosition> {
         self.pointer
     }
@@ -654,8 +668,12 @@ impl Framework {
                         state.cursor = None;
                     }
                     WindowEvent::MouseLeft => pointer = None,
-                    WindowEvent::MouseButtonPressed { .. }
-                        if !pointer.is_some_and(|p| contains(bounds, p)) =>
+                    WindowEvent::MouseButtonPressed { button }
+                        if state.dismisses_on_press(
+                            *button,
+                            pointer.is_some_and(|p| contains(bounds, p)),
+                            self.frame_time,
+                        ) =>
                     {
                         state.close()
                     }

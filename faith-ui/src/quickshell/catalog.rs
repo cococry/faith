@@ -459,6 +459,49 @@ pub fn build(app: &App, zoom: u32) -> Vec<Entry> {
         .priority(200)
     }));
 
+    if !app.profiles.is_empty() {
+        entries.push(
+            Entry::new(
+                "delete-profile",
+                "Delete a profile",
+                Kind::Profile,
+                Action::None,
+            )
+            .search("delete profile", &["remove account erase local profile"])
+            .list(app.profiles.iter().map(|profile| {
+                Entry::new(
+                    &format!("delete-profile:{}", profile.path.display()),
+                    &profile.alias,
+                    Kind::Profile,
+                    Action::ConfirmDeleteProfile(profile.clone()),
+                )
+                .owner(profile)
+            })),
+        );
+    }
+
+    if !app.contacts.entries.is_empty() {
+        entries.push(
+            Entry::new(
+                "delete-contact",
+                "Delete a contact",
+                Kind::Contact,
+                Action::None,
+            )
+            .search("delete contact", &["remove local alias"])
+            .list(app.contacts.entries.iter().map(|contact| {
+                Entry::new(
+                    &format!("delete-contact:{}", contact.auth),
+                    &contact.display,
+                    Kind::Contact,
+                    Action::ConfirmDeleteContact(contact.id),
+                )
+                .search(&contact.display, &[&contact.auth])
+                .detail(&contact.auth)
+            })),
+        );
+    }
+
     if let Page::Contacts(selected) = app.page {
         use crate::contacts_ui::Mode;
         if let Some(id) = selected.filter(|&id| app.contacts.get(id).is_some()) {
@@ -471,15 +514,6 @@ pub fn build(app: &App, zoom: u32) -> Vec<Entry> {
                         Action::EditContact(id),
                     )
                     .search("edit contact", &["rename local alias"]),
-                );
-                entries.push(
-                    Entry::new(
-                        "delete-contact",
-                        "Delete contact",
-                        Kind::Contact,
-                        Action::ConfirmDeleteContact(id),
-                    )
-                    .search("delete contact", &["remove local alias"]),
                 );
             } else if app.contact_mode == Mode::Delete {
                 entries.push(

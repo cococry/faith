@@ -57,7 +57,8 @@ pub fn list(
         } else {
             &contact.auth
         };
-        if ui
+        let (x, y) = ui.position();
+        let clicked = ui
             .action_row(
                 gpu,
                 &contact.auth,
@@ -69,8 +70,10 @@ pub fn list(
                     badge: None,
                 },
             )?
-            .clicked
-        {
+            .clicked;
+        if let Some(at) = ui.context_press([x, y, ui.div_width(), 56.0]) {
+            action = Action::OpenRowMenu(crate::RowMenu::Contact(contact.id), at);
+        } else if clicked {
             action = Action::OpenContact(contact.id);
         }
     }

@@ -294,6 +294,19 @@ impl Session {
         Ok(id)
     }
 
+    pub fn wait_for_close(path: &std::path::Path) -> anyhow::Result<()> {
+        let path = std::path::absolute(path)?;
+        let worker = retiring_sessions()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&path);
+        if let Some(worker) = worker {
+            let _ = worker.join();
+        }
+
+        Ok(())
+    }
+
     pub fn snapshot_since(&self, generation: u64) -> Option<Snapshot> {
         let snapshot = self.snapshot.lock().unwrap_or_else(|e| e.into_inner());
         (snapshot.generation != generation).then(|| snapshot.clone())

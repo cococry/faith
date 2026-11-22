@@ -14,7 +14,7 @@ mod ui;
 
 use clap::{CommandFactory, FromArgMatches};
 use graphics::{GraphicsDevice, Renderer};
-use platform::{Platform, WindowConfig, WindowEvent};
+use platform::{Platform, WindowConfig, WindowEvent, mouse::CursorPosition};
 use profiles::Profile;
 use ui::{
     framework::{DivOptions, Font, Fonts, Framework, Style},
@@ -82,9 +82,24 @@ struct Location {
 }
 
 #[derive(Clone)]
+enum RowMenu {
+    Profile(Profile),
+    Contact(faith_client::Id),
+}
+
+enum PopupMenu {
+    Header,
+    Row(RowMenu),
+    ConfirmDeleteProfile(Profile),
+}
+
+#[derive(Clone)]
 enum Action {
     None,
     OpenMenu,
+    OpenRowMenu(RowMenu, CursorPosition),
+    ConfirmDeleteProfile(Profile),
+    DeleteProfile(Profile),
     OpenQuickshell,
     OpenContactPicker,
     Contacts,
@@ -342,6 +357,73 @@ impl App {
         }
     }
 
+    fn delete_profile(
+        &mut self,
+        profile: &Profile,
+        cli: &cli::Cli,
+        platform: &Platform,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.profiles.iter().any(|item| item.path == profile.path),
+            "Profile is unavailable"
+        );
+        let active = self.selected.as_ref().is_some_and(|item| {
+            item.path == profile.path
+                || item
+                    .path
+                    .canonicalize()
+                    .ok()
+                    .zip(profile.path.canonicalize().ok())
+                    .is_some_and(|(active, target)| active == target)
+        });
+        if active {
+            self.session = None;
+        }
+
+        let session_path = self
+            .selected
+            .as_ref()
+            .filter(|_| active)
+            .map_or(profile.path.as_path(), |item| item.path.as_path());
+        let result = client::Session::wait_for_close(session_path)
+            .and_then(|()| profiles::delete(&self.root, profile));
+        let cleanup_error = match result {
+            Ok(cleanup_error) => cleanup_error,
+            Err(error) => {
+                if active {
+                    self.chat.reset();
+                    self.session = self.selected.as_ref().and_then(|selected| {
+                        Self::start_profile(selected, None, cli, platform).ok()
+                    });
+                }
+
+                return Err(error);
+            }
+        };
+
+        self.profiles.retain(|item| item.path != profile.path);
+        self.contact_conversations
+            .retain(|(item, _)| item.path != profile.path);
+        if active {
+            self.selected = None;
+            self.chat.reset();
+            self.conversation = None;
+            self.back_history
+                .retain(|location| !location.page.is_chat());
+            self.forward_history
+                .retain(|location| !location.page.is_chat());
+            if self.page.is_chat() {
+                self.page = Page::Accounts;
+            }
+        }
+
+        self.load_contact_usernames(None);
+        self.error = cleanup_error.map_or_else(String::new, |error| {
+            format!("Profile was removed, but its files could not all be erased: {error}")
+        });
+        Ok(())
+    }
+
     fn start_profile(
         profile: &Profile,
         claim: Option<profiles::UsernameSettings>,
@@ -385,6 +467,32 @@ impl App {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Profile session is unavailable"))?
             .submit(command)
+    }
+
+    fn load_contact_usernames(&mut self, extra_profile: Option<&std::path::Path>) {
+        self.contact_usernames.clear();
+        let extra_profile =
+            extra_profile.or_else(|| self.selected.as_ref().map(|profile| profile.path.as_path()));
+        for path in self
+            .profiles
+            .iter()
+            .map(|profile| profile.path.as_path())
+            .chain(extra_profile)
+        {
+            match client::profile_usernames(path) {
+                Ok(usernames) => self.contact_usernames.extend(
+                    usernames
+                        .into_iter()
+                        .filter(|(_, username)| !username.is_empty()),
+                ),
+                Err(error) => tracing::warn!(
+                    "Could not read disclosed names from {}: {error}",
+                    path.display()
+                ),
+            }
+        }
+
+        self.sync_contact_names();
     }
 
     fn sync_contact_names(&mut self) {
@@ -720,6 +828,7 @@ impl App {
                 | Action::AddContact
                 | Action::Contacts
                 | Action::OpenContact(_)
+                | Action::ConfirmDeleteContact(_)
                 | Action::Create(_)
                 | Action::ProfileUsername(_)
                 | Action::OpenProfile(_)
@@ -738,6 +847,8 @@ impl App {
             Action::FocusSetting { .. } | Action::SaveContactDraft => unreachable!(),
             Action::None
             | Action::OpenMenu
+            | Action::OpenRowMenu(..)
+            | Action::ConfirmDeleteProfile(_)
             | Action::OpenQuickshell
             | Action::OpenContactPicker
             | Action::Quit
@@ -791,7 +902,12 @@ impl App {
 
             Action::ConfirmDeleteContact(id) => {
                 anyhow::ensure!(self.contacts.get(id).is_some(), "Contact is unavailable");
+                if !matches!(self.page, Page::Contacts(_)) {
+                    self.refresh_contact_conversations();
+                }
+
                 self.page = Page::Contacts(Some(id));
+                self.refresh_contact_links();
                 self.contact_mode = contacts_ui::Mode::Delete;
                 self.error.clear();
             }
@@ -850,6 +966,11 @@ impl App {
                     self.restore_location(destination);
                 }
             }
+            Action::DeleteProfile(profile) => {
+                self.delete_profile(&profile, cli, platform)?;
+                ui.navigation_changed();
+            }
+
             Action::Select(index) => self.login(self.profiles[index].clone(), cli, platform),
             Action::OpenProfile(profile) => {
                 anyhow::ensure!(profile.path.is_dir(), "Profile is no longer available");
@@ -1912,7 +2033,8 @@ fn item_list(
                     .as_ref()
                     .is_some_and(|p| p.path == profile.path);
 
-                if row_button(
+                let (x, y) = ui.position();
+                let clicked = row_button(
                     ui,
                     gpu,
                     &format!("profile-{}", profile.alias),
@@ -1920,7 +2042,10 @@ fn item_list(
                     &profile.alias,
                     selected,
                     false,
-                )? {
+                )?;
+                if let Some(at) = ui.context_press([x, y, ui.div_width(), 48.0]) {
+                    action = Action::OpenRowMenu(RowMenu::Profile(profile.clone()), at);
+                } else if clicked {
                     action = Action::Select(index);
                 }
             }
@@ -3320,21 +3445,9 @@ fn main() -> anyhow::Result<()> {
         if let Err(error) = app.contacts.import(path) {
             tracing::warn!("Could not import contacts from {}: {error}", path.display());
         }
-
-        match client::profile_usernames(path) {
-            Ok(usernames) => app.contact_usernames.extend(
-                usernames
-                    .into_iter()
-                    .filter(|(_, username)| !username.is_empty()),
-            ),
-            Err(error) => tracing::warn!(
-                "Could not read disclosed names from {}: {error}",
-                path.display()
-            ),
-        }
     }
 
-    app.sync_contact_names();
+    app.load_contact_usernames(cli.profile.as_deref());
 
     // Use an explicit profile, or automatically select the only account.
     if let Some(path) = &cli.profile {
@@ -3360,6 +3473,7 @@ fn main() -> anyhow::Result<()> {
     let mut logo = None;
     let mut quickshell = quickshell::Shell::default();
     let mut popup = ui::widgets::popup::State::default();
+    let mut popup_menu = PopupMenu::Header;
 
     // Wait for input or a client notification before drawing again.
     loop {
@@ -3444,33 +3558,77 @@ fn main() -> anyhow::Result<()> {
         }
         if popup.is_visible() {
             use ui::widgets::popup::Item;
-            let mut items = vec![
-                Item {
-                    icon: "",
-                    label: "Open Quickshell",
-                },
-                Item {
-                    icon: "\u{ea76}",
-                    label: "Quit faith",
-                },
-            ];
+            match &popup_menu {
+                PopupMenu::Header => {
+                    let mut items = vec![
+                        Item {
+                            icon: "",
+                            label: "Open Quickshell",
+                        },
+                        Item {
+                            icon: "\u{ea76}",
+                            label: "Quit faith",
+                        },
+                    ];
+                    if app.page.is_chat() && app.selected.is_some() {
+                        items.insert(
+                            0,
+                            Item {
+                                icon: NEW_CHAT,
+                                label: "New conversation",
+                            },
+                        );
+                    }
 
-            if app.page.is_chat() && app.selected.is_some() {
-                items.insert(
-                    0,
-                    Item {
-                        icon: NEW_CHAT,
-                        label: "New conversation",
-                    },
-                );
-            }
+                    if let Some(index) =
+                        ui.popup(&mut renderer, "header-menu", &mut popup, &items)?
+                    {
+                        action = match (items.len(), index) {
+                            (3, 0) => Action::NewConversation(app.selected.clone().unwrap()),
+                            (3, 1) | (2, 0) => Action::OpenQuickshell,
+                            _ => Action::Quit,
+                        };
+                    }
+                }
 
-            if let Some(index) = ui.popup(&mut renderer, "header-menu", &mut popup, &items)? {
-                action = match (items.len(), index) {
-                    (3, 0) => Action::NewConversation(app.selected.clone().unwrap()),
-                    (3, 1) | (2, 0) => Action::OpenQuickshell,
-                    _ => Action::Quit,
-                };
+                PopupMenu::Row(target) => {
+                    let (label, delete) = match target {
+                        RowMenu::Profile(profile) => (
+                            "Delete profile",
+                            Action::ConfirmDeleteProfile(profile.clone()),
+                        ),
+                        RowMenu::Contact(id) => {
+                            ("Delete contact", Action::ConfirmDeleteContact(*id))
+                        }
+                    };
+                    let items = [Item {
+                        icon: contacts::DELETE,
+                        label,
+                    }];
+                    if ui
+                        .popup(&mut renderer, "row-menu", &mut popup, &items)?
+                        .is_some()
+                    {
+                        action = delete;
+                    }
+                }
+
+                PopupMenu::ConfirmDeleteProfile(profile) => {
+                    let label = format!("Permanently delete {}", profile.alias);
+                    let items = [
+                        Item {
+                            icon: "",
+                            label: "Cancel",
+                        },
+                        Item {
+                            icon: contacts::DELETE,
+                            label: &label,
+                        },
+                    ];
+                    if ui.popup(&mut renderer, "delete-profile", &mut popup, &items)? == Some(1) {
+                        action = Action::DeleteProfile(profile.clone());
+                    }
+                }
             }
         }
 
@@ -3491,12 +3649,25 @@ fn main() -> anyhow::Result<()> {
 
         let mut clipboard = ui.take_clipboard_actions();
         match action {
-            Action::OpenMenu => {
+            Action::OpenMenu | Action::OpenRowMenu(..) | Action::ConfirmDeleteProfile(_) => {
                 ui.set_modal_input(false);
-                popup.open(
-                    ui.pointer_position()
-                        .unwrap_or(platform::mouse::CursorPosition { x: 24.0, y: 56.0 }),
-                );
+                let at = ui
+                    .pointer_position()
+                    .unwrap_or(CursorPosition { x: 24.0, y: 56.0 });
+                let (menu, at) = match action {
+                    Action::OpenRowMenu(target, at) => (PopupMenu::Row(target), at),
+                    Action::ConfirmDeleteProfile(profile) => {
+                        (PopupMenu::ConfirmDeleteProfile(profile), at)
+                    }
+                    _ => (PopupMenu::Header, at),
+                };
+                if matches!(menu, PopupMenu::Row(_)) {
+                    popup.open_context(at, std::time::Instant::now());
+                } else {
+                    popup.open(at);
+                }
+
+                popup_menu = menu;
                 platform.request_redraw()?;
                 continue;
             }
