@@ -1107,10 +1107,9 @@ impl App {
                 if self.page == Page::CreateConversation
                     && self.chat.editing_creation()
                     && !self.chat.naming
+                    && self.contacts.get(id).is_some()
                 {
-                    if self.contacts.get(id).is_some() {
-                        self.chat.toggle_contact(id);
-                    }
+                    self.chat.toggle_contact(id);
                 }
             }
 
