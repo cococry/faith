@@ -1102,27 +1102,48 @@ pub fn conversation(
         width: Some(inner_width),
         ..Default::default()
     })?;
-    let show_save_contact = chat
-        .members
-        .iter()
-        .any(|&member| app.can_save_partner(member));
+    let partner = chat.direct_partner();
+    let contact = partner.filter(|&member| app.contacts.get(member).is_some());
+    let contact_action = match partner {
+        Some(member) if app.can_save_partner(member) => Some((
+            "Save contact",
+            Action::PromptSaveConversationContact {
+                profile: profile.clone(),
+                id: chat.id,
+                member,
+            },
+        )),
+        None if chat
+            .members
+            .iter()
+            .any(|&member| app.can_save_partner(member)) =>
+        {
+            Some(("Save contact", Action::OpenConversationContacts))
+        }
+        _ => None,
+    };
     let button_width = 108.0_f32.min(inner_width * 0.5);
     let (x, y) = ui.position();
-    let title_width = if show_save_contact {
+    let title_width = if contact_action.is_some() {
         (inner_width - button_width - 8.0).max(1.0)
     } else {
         inner_width
     };
     ui.push_sizing(Some(title_width), None);
-    label(
-        ui,
-        gpu,
-        &app.conversation_title(chat),
-        20,
-        true,
-        false,
-        false,
-    )?;
+    let title = app.conversation_title(chat);
+    if let Some(member) = contact {
+        ui.push_style(Style {
+            font_size: 20,
+            ..ui.style()
+        });
+        let clicked = ui.text_link(gpu, "conversation-title-contact", &title, Font::Bold);
+        ui.pop_style();
+        if clicked? {
+            action = Action::OpenContact(member);
+        }
+    } else {
+        label(ui, gpu, &title, 20, true, false, false)?;
+    }
     ui.pop_sizing();
     if let Some(at) = ui.context_press([x, y, title_width, ui.position().1 - y]) {
         action = Action::OpenRowMenu(
@@ -1134,21 +1155,13 @@ pub fn conversation(
         );
     }
 
-    if show_save_contact {
+    if let Some((title, command)) = contact_action {
         ui.set_position(inner_width - button_width, y);
         ui.push_sizing(Some(button_width), Some(32.0));
-        let save = command_button(
-            ui,
-            gpu,
-            "conversation-save-contact",
-            "",
-            "Save contact",
-            true,
-            false,
-        );
+        let save = command_button(ui, gpu, "conversation-contact", "", title, true, false);
         ui.pop_sizing();
         if save? {
-            action = Action::OpenConversationContacts;
+            action = command;
         }
     }
 
@@ -1176,10 +1189,14 @@ pub fn conversation(
     if history > 0.0
         && let Some(member) = messages(ui, gpu, app, chat, [20.0, header, inner_width, history])?
     {
-        action = Action::PromptSaveConversationContact {
-            profile: profile.clone(),
-            id: chat.id,
-            member,
+        action = if app.contacts.get(member).is_some() {
+            Action::OpenContact(member)
+        } else {
+            Action::PromptSaveConversationContact {
+                profile: profile.clone(),
+                id: chat.id,
+                member,
+            }
         };
     }
 
@@ -1228,6 +1245,7 @@ struct Bubble {
     height: f32,
     width: f32,
     actions: f32,
+    view_contact: bool,
 }
 
 struct HistoryLayout {
@@ -1249,6 +1267,7 @@ impl HistoryLayout {
         let padding = limit.min(20.0) * 0.5;
         let content = (limit - padding * 2.0).max(1.0);
         let mut extent = 0.0;
+        let group = chat.direct_partner().is_none();
         let mut bubbles = Vec::with_capacity(snapshot.messages.len());
         for message in snapshot.messages.iter() {
             let author = author(app, message);
@@ -1258,26 +1277,33 @@ impl HistoryLayout {
             });
             let body = ui.wrapped_text_size(&message.body, None, content);
             ui.pop_style();
+            let other = group && snapshot.auth.is_some_and(|auth| auth != message.sender);
+            let view_contact = other && app.contacts.get(message.sender).is_some();
+            let inset = if view_contact {
+                2.0 * crate::ui::framework::TEXT_LINK_INSET
+            } else {
+                0.0
+            };
             ui.push_style(Style {
                 font_size: 12,
                 ..ui.style()
             });
-            let name = ui.wrapped_text_size(author, Some(Font::Bold), content);
+            let name = ui.wrapped_text_size(author, Some(Font::Bold), (content - inset).max(1.0));
             ui.pop_style();
             let (body, name) = (body?, name?);
-            let width = (body.0.max(name.0).ceil() + 2.0 * padding + 1.0).min(limit);
+            let width = (body.0.max(name.0 + inset).ceil() + 2.0 * padding + 1.0).min(limit);
             let height = body.1 + name.1 + 2.0 * padding;
-            let actions =
-                if app.can_save_partner(message.sender) && chat.members.contains(&message.sender) {
-                    MESSAGE_ACTION_SIZE + MESSAGE_ACTION_GAP
-                } else {
-                    0.0
-                };
+            let actions = if other && !view_contact && chat.members.contains(&message.sender) {
+                MESSAGE_ACTION_SIZE + MESSAGE_ACTION_GAP
+            } else {
+                0.0
+            };
             bubbles.push(Bubble {
                 y: extent,
                 height,
                 width,
                 actions,
+                view_contact,
             });
             extent += height + actions + 8.0;
         }
@@ -1398,7 +1424,23 @@ fn messages(
                 ui.text(gpu, &message.body, None)?;
                 ui.pop_style();
             } else {
-                label(ui, gpu, author(app, message), 12, true, true, false)?;
+                let name = author(app, message);
+                if bubble.view_contact {
+                    ui.push_style(Style {
+                        font_size: 12,
+                        color: ui.theme().muted,
+                        ..ui.style()
+                    });
+                    let clicked =
+                        ui.text_link(gpu, &format!("message-author-{row_id}"), name, Font::Bold);
+                    ui.pop_style();
+                    if clicked? {
+                        sender = Some(message.sender);
+                    }
+                } else {
+                    label(ui, gpu, name, 12, true, true, false)?;
+                }
+
                 label(ui, gpu, &message.body, 14, false, false, false)?;
             }
 
@@ -1429,7 +1471,7 @@ fn messages(
                 );
                 let clicked = ui.icon_button(
                     gpu,
-                    &format!("save-message-contact-{row_id}"),
+                    &format!("message-contact-{row_id}"),
                     crate::contacts::ICON,
                 );
                 ui.pop_sizing();

@@ -1,4 +1,4 @@
-use super::animation::{Curve, MORPH_DURATION, Motion, Presence, Scheduler, Transition};
+use super::animation::{Curve, Hover, MORPH_DURATION, Motion, Presence, Scheduler, Transition};
 use super::focus::{Control, Kind as FocusKind, Navigation};
 use super::scroll::{self, Areas, PrepareOptions, View};
 use super::theme::{CornerRadii, Theme};
@@ -26,6 +26,8 @@ use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
 };
+
+pub const TEXT_LINK_INSET: f32 = 4.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Style {
@@ -269,6 +271,7 @@ pub struct Framework {
     styles: Vec<Style>,
     sizing: Vec<(Option<f32>, Option<f32>)>,
     inputs: HashMap<String, InputField>,
+    text_link_hover: HashMap<String, Hover>,
     sliders: HashMap<String, slider::State>,
     focus_order: Vec<String>,
     navigation: Navigation,
@@ -354,6 +357,7 @@ impl Framework {
             styles: vec![Style::default()],
             sizing: vec![],
             inputs: HashMap::new(),
+            text_link_hover: HashMap::new(),
             sliders: HashMap::new(),
             focus_order: Vec::new(),
             navigation: Navigation::default(),
@@ -1418,6 +1422,9 @@ impl Framework {
                 .is_some_and(|count| occurrence < count)
         });
 
+        self.text_link_hover
+            .retain(|id, _| self.button_occurrences.contains_key(id));
+
         self.reveal_focus = false;
         self.sliders.retain(|id, _| self.focus_order.contains(id));
         if self.modal_input
@@ -1994,6 +2001,82 @@ impl Framework {
         self.ui_renderer.pop_clip();
         result?;
         Ok(())
+    }
+
+    pub fn text_link<G: GraphicsDevice>(
+        &mut self,
+        gpu: &mut G,
+        id: &str,
+        value: &str,
+        font: Font,
+    ) -> anyhow::Result<bool> {
+        let style = self.style();
+        let font = self.font(font)?;
+        let width = self
+            .sizing
+            .last()
+            .unwrap()
+            .0
+            .unwrap_or_else(|| self.div_width());
+        let layout = self.text_renderer.measure_with_options(
+            value,
+            font,
+            TextLayoutOptions {
+                max_width: (width - 2.0 * TEXT_LINK_INSET).max(1.0),
+            },
+        )?;
+        let bounds = self.place_named(
+            layout.width + 2.0 * TEXT_LINK_INSET,
+            layout.height,
+            Some(id),
+        );
+        if !self.visible(bounds) {
+            return Ok(false);
+        }
+
+        self.button_occurrences.insert(id.to_owned(), 1);
+        let x = bounds.x + TEXT_LINK_INSET;
+        let hit = Bounds {
+            x,
+            width: layout.width.min(width),
+            ..bounds
+        };
+        let response = self.button_response((id.to_owned(), 0), hit, style);
+        let mut emphasis = 0.0;
+        if response.hovered || self.text_link_hover.contains_key(id) {
+            let hover = self.text_link_hover.entry(id.to_owned()).or_default();
+            let (value, active) = hover.update(
+                response.hovered,
+                self.frame_time,
+                self.animations,
+                self.curve,
+            );
+            emphasis = value;
+            if active {
+                self.animate_until(self.frame_time);
+            } else if !response.hovered {
+                self.text_link_hover.remove(id);
+            }
+        }
+
+        self.text_renderer.color = style.color;
+        let start = self.ui_renderer.mark().0;
+        self.text_renderer.render_layout(
+            [x, bounds.y],
+            &layout,
+            layout.width,
+            false,
+            gpu,
+            &mut self.ui_renderer,
+        )?;
+        if emphasis > 0.0 {
+            let growth = 0.08_f32.min(2.0 * TEXT_LINK_INSET / layout.width.max(1.0));
+            let center = [x + layout.width * 0.5, bounds.y + layout.height * 0.5];
+            self.ui_renderer
+                .scale_text_since(start, center, 1.0 + growth * emphasis);
+        }
+
+        Ok(response.clicked)
     }
 
     pub fn slider_dragging(&self) -> bool {

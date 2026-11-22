@@ -71,6 +71,17 @@ pub struct Chat {
     pub name_members: bool,
 }
 
+impl Chat {
+    pub fn direct_partner(&self) -> Option<Id> {
+        let own = self.own_auth?;
+        match self.members.as_slice() {
+            [first, second] if *first == own => Some(*second),
+            [first, second] if *second == own => Some(*first),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Message {
     pub row_id: i64,

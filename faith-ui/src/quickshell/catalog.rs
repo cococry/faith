@@ -274,6 +274,71 @@ pub fn conversation_contacts(app: &App) -> Option<Entry> {
     )
 }
 
+fn view_conversation_contact(app: &App, profile: &Profile) -> Option<Entry> {
+    if app.page != Page::Conversations {
+        return None;
+    }
+
+    let snapshot = &app.chat.snapshot;
+    let chat = snapshot
+        .conversations
+        .iter()
+        .find(|chat| Some(chat.id) == app.conversation)?;
+    if let Some(member) = chat.direct_partner() {
+        let contact = app.contacts.get(member)?;
+        return Some(
+            Entry::new(
+                "view-conversation-contact",
+                "View conversation contact",
+                Kind::Contact,
+                Action::OpenContact(member),
+            )
+            .search("view conversation contact", &["open chat partner"])
+            .detail(&contact.display)
+            .owner(profile),
+        );
+    }
+
+    if snapshot.selected != Some(chat.id) {
+        return None;
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let children: Vec<_> = snapshot
+        .messages
+        .iter()
+        .filter_map(|message| {
+            let member = message.sender;
+            if snapshot.auth == Some(member) || !seen.insert(member) {
+                return None;
+            }
+
+            let contact = app.contacts.get(member)?;
+            Some(
+                Entry::new(
+                    &format!("view-message-contact:{member}"),
+                    &contact.display,
+                    Kind::Contact,
+                    Action::OpenContact(member),
+                )
+                .detail(&contact.auth)
+                .owner(profile),
+            )
+        })
+        .collect();
+    (!children.is_empty()).then(|| {
+        Entry::new(
+            "view-message-contact",
+            "View message contact",
+            Kind::Contact,
+            Action::None,
+        )
+        .search("view message contact", &["open group message author"])
+        .list(children)
+        .owner(profile)
+    })
+}
+
 pub fn build(app: &App, zoom: u32) -> Vec<Entry> {
     let mut entries = vec![
         Entry::new(
@@ -960,6 +1025,7 @@ pub fn build(app: &App, zoom: u32) -> Vec<Entry> {
         }
 
         entries.extend(conversation_contacts(app));
+        entries.extend(view_conversation_contact(app, profile));
 
         if app.page.is_chat()
             && let Some(id) = app.chat.renaming
