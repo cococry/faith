@@ -21,6 +21,7 @@ const ROW: f32 = 56.0;
 struct SearchResult {
     index: usize,
     match_score: i32,
+    implicit_delete: bool,
     destination: u8,
     score: i32,
     path: Vec<usize>,
@@ -40,6 +41,17 @@ fn destination_rank(entry: &Entry, context: &Context) -> u8 {
         _ if entry.id == "profile-conversations" => 2,
         _ => 1,
     }
+}
+
+fn is_delete_result(entry: &Entry) -> bool {
+    matches!(
+        entry.command,
+        Action::ConfirmDeleteProfile(_)
+            | Action::DeleteProfile(_)
+            | Action::ConfirmDeleteContact(_)
+            | Action::ConfirmDeleteContactInList(_)
+            | Action::DeleteContact(_)
+    ) || matches!(entry.id.as_str(), "delete-profile" | "delete-contact")
 }
 
 fn find<'a>(
@@ -227,6 +239,12 @@ impl Shell {
             });
         let normalized = rank::normalize(text);
         let words: Vec<_> = normalized.split_whitespace().collect();
+        let requests_deletion = words.iter().any(|word| {
+            word.len() >= 3
+                && ["delete", "remove", "erase"]
+                    .iter()
+                    .any(|verb| verb.starts_with(word))
+        });
         let tokens: Vec<Vec<char>> = words
             .iter()
             .filter(|word| {
@@ -281,6 +299,7 @@ impl Shell {
             results.push(SearchResult {
                 index,
                 match_score: matched.score + preference,
+                implicit_delete: !requests_deletion && is_delete_result(target),
                 destination: destination_rank(target, context),
                 score: score + target.context_bonus(context) + usage,
                 path: matched.path,
@@ -289,8 +308,9 @@ impl Shell {
         }
 
         results.sort_unstable_by(|a, b| {
-            b.match_score
-                .cmp(&a.match_score)
+            a.implicit_delete
+                .cmp(&b.implicit_delete)
+                .then_with(|| b.match_score.cmp(&a.match_score))
                 .then_with(|| b.destination.cmp(&a.destination))
                 .then_with(|| b.score.cmp(&a.score))
                 .then_with(|| a.title.cmp(&b.title))
@@ -818,6 +838,59 @@ impl Shell {
 #[cfg(test)]
 mod ranking_tests {
     use super::*;
+
+    #[test]
+    fn profile_deletion_ranks_below_navigation_for_a_name_only() {
+        let profile = Profile {
+            alias: "luca".into(),
+            path: "luca".into(),
+        };
+        let id = faith_client::Id([1; 16]);
+        let mut conversations = Entry::conversation(&profile, id, "Open conversation");
+        conversations.id = "profile-conversations".into();
+        conversations.command = Action::None;
+        conversations.children = Some(vec![Entry::conversation(&profile, id, "Simon")]);
+
+        let mut delete_profile = Entry::profile(&profile);
+        delete_profile.id = "delete-profile:luca".into();
+        delete_profile.label = profile.alias.clone();
+        delete_profile.command = Action::ConfirmDeleteProfile(profile.clone());
+        let mut delete_profiles = Entry::profile(&profile);
+        delete_profiles.id = "delete-profile".into();
+        delete_profiles.label = "Delete a profile".into();
+        delete_profiles.primary = rank::Text::new("delete profile");
+        delete_profiles.terms.clear();
+        delete_profiles.command = Action::None;
+        delete_profiles.children = Some(vec![delete_profile]);
+
+        let mut shell = Shell {
+            entries: vec![delete_profiles, Entry::profile(&profile), conversations],
+            context: Some(Context {
+                kind: Kind::Profile,
+                profile: Some(profile.path.clone()),
+            }),
+            ..Default::default()
+        };
+
+        shell.search("luca");
+        assert_eq!(
+            shell
+                .results
+                .iter()
+                .map(|result| result.index)
+                .collect::<Vec<_>>(),
+            [1, 2, 0]
+        );
+        assert_eq!(shell.results[2].path, [0]);
+
+        shell.search("delete luca");
+        assert_eq!(shell.results[0].index, 0);
+        assert_eq!(shell.results[0].path, [0]);
+
+        shell.search("delete profile");
+        assert_eq!(shell.results[0].index, 0);
+        assert!(shell.results[0].path.is_empty());
+    }
 
     #[test]
     fn conversation_title_beats_a_profile_with_the_same_name() {
