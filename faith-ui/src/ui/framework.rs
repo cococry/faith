@@ -7,7 +7,7 @@ use super::{
     text::TextLayoutOptions,
     widgets::{
         button, checkbox, dropdown,
-        input::{Bounds, InputField, InputOptions, InputPaint},
+        input::{Bounds, InputField, InputOptions, InputPaint, InputResponse},
         slider,
     },
 };
@@ -105,6 +105,7 @@ pub struct Fonts {
     pub regular: PathBuf,
     pub bold: PathBuf,
     pub italic: Option<PathBuf>,
+    pub emoji: PathBuf,
     pub fallbacks: Vec<PathBuf>,
     pub icons: PathBuf,
 }
@@ -265,6 +266,7 @@ pub struct Framework {
     text_renderer: TextRenderer,
     ui_renderer: UIRenderer,
     fonts: Fonts,
+    system_font: Option<crate::system_fonts::Family>,
     font_cache: HashMap<(Font, u32), FontHandle>,
     layouts: Vec<Layout>,
     divs: Vec<OpenDiv>,
@@ -351,6 +353,7 @@ impl Framework {
             text_renderer: TextRenderer::new()?,
             ui_renderer: UIRenderer::new(gpu, w, h)?,
             fonts,
+            system_font: None,
             font_cache: HashMap::new(),
             layouts: vec![],
             divs: vec![],
@@ -376,9 +379,8 @@ impl Framework {
             button_occurrences: HashMap::new(),
         };
 
-        framework
-            .text_renderer
-            .set_fallback_fonts(framework.fonts.fallbacks.clone());
+        framework.configure_fallbacks();
+
         Ok(framework)
     }
 
@@ -390,6 +392,7 @@ impl Framework {
 
     pub fn space_reserved(&self) -> bool {
         self.input_focused()
+            || self.active_dropdown.is_some()
             || self
                 .focused
                 .as_ref()
@@ -512,7 +515,7 @@ impl Framework {
             self.modal_focus = self.focused.take();
             self.active_dropdown = None;
             for dropdown in self.dropdowns.values_mut() {
-                dropdown.open = false;
+                dropdown.close();
             }
         } else if !enabled && self.modal_input {
             self.focused = self.modal_focus.take();
@@ -526,7 +529,7 @@ impl Framework {
     }
 
     pub fn cursor_icon(&self) -> crate::platform::window::CursorIcon {
-        if self.text_cursor && self.active_dropdown.is_none() {
+        if self.text_cursor {
             crate::platform::window::CursorIcon::Text
         } else {
             crate::platform::window::CursorIcon::Default
@@ -1174,7 +1177,7 @@ impl Framework {
                     if let Some(id) = self.active_dropdown.take()
                         && let Some(state) = self.dropdowns.get_mut(&id)
                     {
-                        state.open = false;
+                        state.close();
                     }
                     self.navigation.tab(&mut self.focused, *backwards);
                     self.reveal_focus = true;
@@ -1900,16 +1903,59 @@ impl Framework {
             return Ok(*f);
         }
 
-        let path = match font {
-            Font::Regular => &self.fonts.regular,
-            Font::Bold => &self.fonts.bold,
-            Font::Italic => self.fonts.italic.as_ref().unwrap_or(&self.fonts.regular),
-            Font::Icons => &self.fonts.icons,
+        let face = self.system_font.as_ref().and_then(|family| match font {
+            Font::Regular => Some(&family.regular),
+            Font::Bold => Some(&family.bold),
+            Font::Italic => Some(&family.italic),
+            Font::Icons => None,
+        });
+        let handle = if let Some(face) = face {
+            self.text_renderer
+                .load_primary_font(&face.path, size, face.index)?
+        } else {
+            let path = match font {
+                Font::Regular => &self.fonts.regular,
+                Font::Bold => &self.fonts.bold,
+                Font::Italic => self.fonts.italic.as_ref().unwrap_or(&self.fonts.regular),
+                Font::Icons => &self.fonts.icons,
+            };
+            self.text_renderer.load_primary_font(path, size, 0)?
         };
-
-        let handle = self.text_renderer.load_primary_font(path, size)?;
         self.font_cache.insert((font, size), handle);
         Ok(handle)
+    }
+
+    pub fn set_system_font(
+        &mut self,
+        font: Option<&crate::system_fonts::Family>,
+    ) -> anyhow::Result<()> {
+        if self.system_font.as_ref() == font {
+            return Ok(());
+        }
+
+        if let Some(font) = font {
+            for face in [&font.regular, &font.bold, &font.italic] {
+                self.text_renderer.validate_primary_font(face)?;
+            }
+        }
+
+        self.system_font = font.cloned();
+        self.font_cache.retain(|(font, _), _| *font == Font::Icons);
+        self.configure_fallbacks();
+        self.scrolls.invalidate_layout();
+        Ok(())
+    }
+
+    fn configure_fallbacks(&mut self) {
+        let mut fallbacks = Vec::with_capacity(self.fonts.fallbacks.len() + 2);
+        fallbacks.push(self.fonts.emoji.clone());
+        let emoji = self.system_font.as_ref().map(|_| self.fonts.emoji.clone());
+        if emoji.is_some() {
+            fallbacks.push(self.fonts.regular.clone());
+        }
+
+        fallbacks.extend(self.fonts.fallbacks.iter().cloned());
+        self.text_renderer.set_fallback_fonts(fallbacks, emoji);
     }
 
     pub fn text_size(&mut self, value: &str, font: Option<Font>) -> anyhow::Result<(f32, f32)> {
@@ -2388,6 +2434,10 @@ impl Framework {
         Ok((enabled && (response.clicked || toggled)).then_some(!checked))
     }
 
+    pub fn dropdown_open(&self, id: &str) -> bool {
+        self.active_dropdown.as_deref() == Some(id)
+    }
+
     pub fn dropdown<G: GraphicsDevice>(
         &mut self,
         gpu: &mut G,
@@ -2395,22 +2445,40 @@ impl Framework {
         options: &[&str],
         selected: usize,
     ) -> anyhow::Result<Option<usize>> {
-        anyhow::ensure!(
-            !options.is_empty() && selected < options.len(),
-            "invalid dropdown selection"
-        );
+        self.dropdown_with_options(gpu, id, dropdown::Options::Borrowed(options), selected)
+    }
+
+    pub fn dropdown_shared<G: GraphicsDevice>(
+        &mut self,
+        gpu: &mut G,
+        id: &str,
+        options: &std::sync::Arc<[String]>,
+        selected: usize,
+    ) -> anyhow::Result<Option<usize>> {
+        self.dropdown_with_options(gpu, id, dropdown::Options::Shared(options), selected)
+    }
+
+    fn dropdown_with_options<G: GraphicsDevice>(
+        &mut self,
+        gpu: &mut G,
+        id: &str,
+        options: dropdown::Options<'_>,
+        selected: usize,
+    ) -> anyhow::Result<Option<usize>> {
+        let value = options
+            .get(selected)
+            .ok_or_else(|| anyhow::anyhow!("invalid dropdown selection"))?;
         self.dropdown_seen.insert(id.to_owned());
         let font = self.font(Font::Regular)?;
         let icons = self.font(Font::Icons)?;
         let style = self.style();
-        let metrics = self.text_renderer.measure(options[selected], font)?;
+        let metrics = self.text_renderer.measure(value, font)?;
         let bounds = self.place(
             self.div_width() - 2.0 * style.margin,
             metrics.height + 2.0 * style.padding,
         );
         self.register_control(id, bounds, FocusKind::Dropdown, false);
         let window = self.layouts.first().unwrap().bounds;
-        let popup = dropdown::popup_bounds(bounds, options.len(), [window.width, window.height]);
 
         let events = if self.active_dropdown.as_deref() == Some(id) {
             &self.dropdown_events
@@ -2421,6 +2489,16 @@ impl Framework {
         let hit = self.hit_bounds(bounds);
         let visible = self.visible(bounds);
         let state = self.dropdowns.entry(id.to_owned()).or_default();
+        let popup = dropdown::popup_bounds(
+            bounds,
+            if state.open {
+                state.row_count()
+            } else {
+                options.len()
+            },
+            [window.width, window.height],
+        );
+        let was_open = state.open;
         let response = state.update(hit, popup, self.batch_pointer, events);
         for event in events {
             if matches!(
@@ -2436,12 +2514,27 @@ impl Framework {
                 }
             }
         }
-        let (keyboard_choice, unfocus) = state.keyboard(
-            self.focused.as_deref() == Some(id),
-            selected,
-            options.len(),
-            events,
-        );
+        let focused = self.focused.as_deref() == Some(id);
+        if focused || state.open {
+            state.sync_options(options);
+        }
+
+        if !was_open && state.open {
+            state.open_with_selection(selected);
+        }
+
+        let mut clipboard = InputResponse::default();
+        let (keyboard_choice, unfocus) =
+            state.keyboard(focused, selected, events, id, &mut clipboard);
+        if let Some(text) = clipboard.copied {
+            self.clipboard_actions.push(ClipboardAction::Copy(text));
+        }
+
+        if clipboard.paste {
+            self.clipboard_actions
+                .push(ClipboardAction::Paste(id.to_owned()));
+        }
+
         if unfocus {
             self.focused = None;
         }
@@ -2450,7 +2543,7 @@ impl Framework {
         }
 
         if !visible {
-            state.open = false;
+            state.close();
         }
         let open = state.open;
         let (presence, active) = state.presence.update(
@@ -2468,10 +2561,13 @@ impl Framework {
         if open || presence > 0.0 {
             self.pending_popups.push(dropdown::Popup {
                 id: id.to_owned(),
-                bounds: popup,
-                options: state.options(options),
+                bounds: dropdown::popup_bounds(
+                    bounds,
+                    state.row_count(),
+                    [window.width, window.height],
+                ),
+                contents: state.contents(),
                 selected,
-                highlighted: state.highlighted(selected),
                 reveal: if presence >= 1.0 {
                     std::mem::take(&mut state.reveal)
                 } else {
@@ -2550,7 +2646,7 @@ impl Framework {
             let result = self.text_renderer.render(
                 bounds.x + style.padding,
                 bounds.y + (bounds.height - metrics.height) * 0.5,
-                options[selected],
+                value,
                 font,
                 gpu,
                 &mut self.ui_renderer,
@@ -2716,15 +2812,93 @@ impl Framework {
                 popup.presence,
             )?;
 
-            if popup.reveal {
-                self.reveal_row(popup.highlighted, dropdown::ROW_HEIGHT);
+            let search_bounds = self.place(self.div_width(), dropdown::SEARCH_HEIGHT);
+            let search_hovered = scroll::contains(self.hit_bounds(search_bounds), self.pointer);
+            if popup.interactive {
+                self.text_cursor = search_hovered;
             }
-            let rows = self.visible_rows(dropdown::ROW_HEIGHT, popup.options.len());
+
+            let search = &mut self.dropdowns.get_mut(&popup.id).unwrap().search;
+            if search_hovered
+                && popup.interactive
+                && self.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        WindowEvent::MouseButtonPressed {
+                            button: MouseButton::Left
+                        }
+                    )
+                })
+            {
+                search.restart_caret();
+            }
+
+            let next_blink = search.update_caret(self.frame_time, self.window_focused);
+            let padding = 5.0;
+            self.text_renderer.color = self.theme.text;
+            search.render(
+                search_bounds,
+                InputPaint {
+                    padding,
+                    caret: self.theme.text,
+                    selection: self.theme.border,
+                },
+                popup.font,
+                &mut self.text_renderer,
+                gpu,
+                &mut self.ui_renderer,
+            )?;
+            if search.text().is_empty() {
+                let hint = "Search...";
+                let metrics = self.text_renderer.measure(hint, popup.font)?;
+                self.text_renderer.color = self.theme.muted;
+                self.text_renderer.render(
+                    search_bounds.x + padding + 4.0,
+                    search_bounds.y + (search_bounds.height - metrics.height) * 0.5,
+                    hint,
+                    popup.font,
+                    gpu,
+                    &mut self.ui_renderer,
+                )?;
+            }
+
+            if let Some(next_blink) = next_blink {
+                self.animate_until(next_blink);
+            }
+
+            self.div_begin_id(
+                "dropdown-options",
+                DivOptions {
+                    width: Some(self.div_width()),
+                    height: Some((self.div_height() - dropdown::SEARCH_HEIGHT).max(0.0)),
+                    scrollable: true,
+                },
+            )?;
+            if popup.reveal
+                && let Some(highlighted) = popup.contents.highlighted
+            {
+                self.reveal_row(highlighted, dropdown::ROW_HEIGHT);
+            }
+
+            let list = &popup.contents.rows;
+            if list.is_empty() {
+                self.push_style(Style {
+                    padding: 10.0,
+                    color: self.theme.muted,
+                    ..self.style()
+                });
+                let empty = self.text(gpu, "No matches", None);
+                self.pop_style();
+                empty?;
+            }
+
+            let rows = self.visible_rows(dropdown::ROW_HEIGHT, list.len());
             let end = rows.end;
             self.space(rows.start as f32 * dropdown::ROW_HEIGHT);
 
-            for index in rows {
-                let value = &popup.options[index];
+            for rank in rows {
+                let index = list[rank];
+                let value = &popup.contents.options[index];
                 let b = self.place(self.div_width(), dropdown::ROW_HEIGHT);
 
                 if !self.visible(b) {
@@ -2742,7 +2916,7 @@ impl Framework {
                 );
                 let style = Style {
                     color: self.theme.text,
-                    background: (response.hovered || index == popup.highlighted)
+                    background: (response.hovered || Some(rank) == popup.contents.highlighted)
                         .then_some(button::highlight(self.theme.button, self.theme.text)),
                     radius: self.corner_radii().row,
                     ..self.base_style()
@@ -2779,13 +2953,14 @@ impl Framework {
 
                 if response.clicked {
                     self.dropdown_selection = Some((popup.id.clone(), index));
-                    self.dropdowns.get_mut(&popup.id).unwrap().open = false;
+                    self.dropdowns.get_mut(&popup.id).unwrap().close();
                     self.active_dropdown = None;
                     self.animate_until(self.frame_time);
                 }
             }
 
-            self.space((popup.options.len() - end) as f32 * dropdown::ROW_HEIGHT);
+            self.space((list.len() - end) as f32 * dropdown::ROW_HEIGHT);
+            self.div_end();
             self.div_end();
             Ok(())
         })();

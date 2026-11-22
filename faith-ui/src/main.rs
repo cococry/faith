@@ -10,6 +10,7 @@ mod platform;
 mod profiles;
 mod quickshell;
 mod settings;
+mod system_fonts;
 mod ui;
 
 use clap::{CommandFactory, FromArgMatches};
@@ -95,7 +96,7 @@ impl Tab {
 
 #[derive(Clone, Copy, PartialEq)]
 enum SettingsItem {
-    Theme,
+    Appearance,
     Misc,
 }
 
@@ -239,6 +240,9 @@ enum Action {
     RetryDelivery(Profile),
     DiscardDelivery(Profile),
     Theme(String),
+    OpenFontPicker,
+    DiscoverFonts,
+    Font(Option<String>),
     SettingsItem(SettingsItem),
     Rounded(bool),
     Animations(bool),
@@ -299,6 +303,8 @@ struct App {
     conversation: Option<faith_client::Id>,
     theme: String,
     themes: Catalog,
+    font: Option<system_fonts::Family>,
+    system_fonts: system_fonts::Catalog,
     settings_item: SettingsItem,
     rounded: bool,
     animations: bool,
@@ -427,6 +433,7 @@ impl App {
         self.settings_error.clear();
         self.settings.save(settings::Settings {
             theme: self.theme.clone(),
+            font: self.font.clone(),
             rounded_corners: self.rounded,
             animations: self.animations,
             layout_morphing: self.layout_morphing,
@@ -659,7 +666,7 @@ impl App {
                             profile: profile.clone(),
                             id: chat.id,
                             title: app.conversation_title(chat).into_owned(),
-                            detail: format!("[On profile {}]", profile.alias),
+                            detail: format!("On profile {}", profile.alias),
                         })
                 })
                 .collect()
@@ -990,6 +997,7 @@ impl App {
             | Action::OpenRowMenu(..)
             | Action::ConfirmDeleteProfile(_)
             | Action::OpenQuickshell
+            | Action::OpenFontPicker
             | Action::OpenContactPicker
             | Action::Quit
             | Action::OpenConversationContacts
@@ -1369,7 +1377,7 @@ impl App {
             Action::OpenSettings { section, control } => {
                 self.page = Page::Settings;
                 self.settings_item = section;
-                if section == SettingsItem::Theme
+                if section == SettingsItem::Appearance
                     && let Err(error) = self.themes.refresh()
                 {
                     self.error = error.to_string();
@@ -1490,7 +1498,7 @@ impl App {
             Action::ToggleMenu => self.collapsed = !self.collapsed,
             Action::ListPage(offset) => self.list_offset = offset,
             Action::SettingsItem(item) => {
-                if item == SettingsItem::Theme
+                if item == SettingsItem::Appearance
                     && let Err(error) = self.themes.refresh()
                 {
                     self.error = format!("Could not discover themes: {error:#}");
@@ -1582,6 +1590,26 @@ impl App {
 
                 Err(error) => self.error = format!("{error:#}"),
             },
+            Action::DiscoverFonts => self.system_fonts.start(platform.waker())?,
+
+            Action::Font(name) => {
+                let font = name
+                    .map(|name| {
+                        self.system_fonts
+                            .families
+                            .iter()
+                            .find(|family| family.name == name)
+                            .cloned()
+                            .ok_or_else(|| anyhow::anyhow!("Font is unavailable"))
+                    })
+                    .transpose()?;
+                ui.set_system_font(font.as_ref())?;
+                self.system_fonts.select(font.as_ref());
+                self.font = font;
+                self.chat.invalidate_history_layout();
+                self.error.clear();
+                self.save_settings();
+            }
         }
 
         let previous_tab = previous.page.tab();
@@ -2164,13 +2192,13 @@ fn settings_list(
     if row_button(
         ui,
         gpu,
-        "settings-theme",
+        "settings-appearance",
         THEME,
-        "Theme",
-        app.settings_item == SettingsItem::Theme,
+        "Appearance",
+        app.settings_item == SettingsItem::Appearance,
         false,
     )? {
-        action = Action::SettingsItem(SettingsItem::Theme);
+        action = Action::SettingsItem(SettingsItem::Appearance);
     }
 
     ui.space(10.0);
@@ -2504,7 +2532,7 @@ fn item_list(
                         ui,
                         gpu,
                         "profile-connected",
-                        "Connected securely",
+                        "Connected to server",
                         [width, y],
                         1.0 - reveal,
                     )?;
@@ -3391,60 +3419,70 @@ fn settings_page(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::R
 
     let width = (ui.div_width() - 64.0).max(1.0);
     let height = (ui.div_height() - 72.0).max(1.0);
-    panel(ui, 32.0, 36.0, width, height, false)?;
-    label(ui, gpu, "Theme", 26, true, false, false)?;
-    ui.space(12.0);
-    label(
-        ui,
-        gpu,
-        "Choose the colors that feel like home.",
-        15,
-        false,
-        true,
-        false,
+    ui.set_position(32.0, 36.0);
+    ui.div_begin_id(
+        "appearance-settings",
+        DivOptions {
+            width: Some(width),
+            height: Some(height),
+            scrollable: true,
+        },
     )?;
-    ui.space(36.0);
-    label(ui, gpu, "Appearance", 13, true, true, false)?;
+    label(ui, gpu, "Appearance", 26, true, false, false)?;
+    ui.space(28.0);
+
+    label(ui, gpu, "Theme", 13, true, true, false)?;
     ui.space(10.0);
-    ui.push_style(Style {
-        font_size: 15,
-        padding: 12.0,
-        background: Some(ui.theme().input),
-        radius: ui.corner_radii().control,
-        border_color: Some(ui.theme().border),
-        ..ui.style()
-    });
-
-    ui.push_sizing(Some(width.min(340.0)), None);
-
-    let options: Vec<&str> = app.themes.names.iter().map(String::as_str).collect();
-    let selected = app
+    let theme = app
         .themes
         .ids
         .iter()
         .position(|id| *id == app.theme)
         .unwrap_or(0);
-    let choice = if options.is_empty() {
+    let theme_choice = if app.themes.names.is_empty() {
         None
     } else {
-        ui.dropdown(gpu, "settings-theme-dropdown", &options, selected)?
+        ui.push_style(profile_input_style(ui));
+        ui.push_sizing(Some(width.min(340.0)), None);
+        let choice = ui.dropdown_shared(gpu, "settings-theme-dropdown", &app.themes.names, theme);
+        ui.pop_sizing();
+        ui.pop_style();
+        choice?
     };
+
+    ui.space(22.0);
+    label(ui, gpu, "Font", 13, true, true, false)?;
+    ui.space(10.0);
+    ui.push_style(profile_input_style(ui));
+    ui.push_sizing(Some(width.min(340.0)), None);
+    let font_choice = ui.dropdown_shared(
+        gpu,
+        "settings-font-dropdown",
+        &app.system_fonts.labels,
+        app.system_fonts.selected,
+    );
     ui.pop_sizing();
     ui.pop_style();
-    ui.space(16.0);
-    label(
-        ui,
-        gpu,
-        "Add JSON files to the themes folder, then reopen Settings.",
-        13,
-        false,
-        true,
-        false,
-    )?;
-    end_panel(ui);
-    Ok(choice.map_or(Action::None, |index| {
+    let font_choice = font_choice?;
+    if app.system_fonts.loading() {
+        ui.space(8.0);
+        label(ui, gpu, "Finding system fonts…", 12, false, true, false)?;
+    }
+
+    ui.div_end();
+    Ok(if let Some(index) = font_choice {
+        Action::Font(
+            index
+                .checked_sub(1)
+                .map(|index| app.system_fonts.families[index].name.clone()),
+        )
+    } else if ui.dropdown_open("settings-font-dropdown") && app.system_fonts.needs_discovery() {
+        Action::DiscoverFonts
+    } else if let Some(index) = theme_choice {
         Action::Theme(app.themes.ids[index].clone())
-    }))
+    } else {
+        Action::None
+    })
 }
 
 // Arrange the navigation rail, item list and main content.
@@ -3719,14 +3757,11 @@ fn main() -> anyhow::Result<()> {
             bold: assets.join("NotoSans-Bold.ttf"),
             italic: Some(assets.join("NotoSans-Italic.ttf")),
             icons: assets.join("nerd-fonts/SymbolsNerdFont-Regular.ttf"),
-            fallbacks: [
-                "NotoColorEmoji.ttf",
-                "NotoSansArabic-Regular.ttf",
-                "NotoSansHebrew-Regular.ttf",
-            ]
-            .iter()
-            .map(|f| assets.join(f))
-            .collect(),
+            emoji: assets.join("NotoColorEmoji.ttf"),
+            fallbacks: ["NotoSansArabic-Regular.ttf", "NotoSansHebrew-Regular.ttf"]
+                .iter()
+                .map(|f| assets.join(f))
+                .collect(),
         },
     )?;
     let root = profiles::root()?;
@@ -3750,6 +3785,11 @@ fn main() -> anyhow::Result<()> {
             themes.load(theme::DEFAULT_ID).unwrap_or_default()
         }
     };
+    if let Err(error) = ui.set_system_font(preferences.font.as_ref()) {
+        settings_error = format!("Could not restore the font: {error:#}");
+        preferences.font = None;
+    }
+
     ui.set_theme(colors);
     ui.set_rounded_corners(preferences.rounded_corners);
     ui.set_animations(preferences.animations, preferences.animation_curve);
@@ -3788,7 +3828,9 @@ fn main() -> anyhow::Result<()> {
         conversation: None,
         theme: preferences.theme,
         themes,
-        settings_item: SettingsItem::Theme,
+        system_fonts: system_fonts::Catalog::new(preferences.font.as_ref()),
+        font: preferences.font,
+        settings_item: SettingsItem::Appearance,
         rounded: preferences.rounded_corners,
         animations: preferences.animations,
         layout_morphing: preferences.layout_morphing,
@@ -3849,6 +3891,10 @@ fn main() -> anyhow::Result<()> {
     loop {
         let mut events = platform.poll_events()?;
         app.refresh_chat(&mut ui);
+        if app.system_fonts.poll(app.font.as_ref()) {
+            quickshell.finish_font_picker(&app);
+        }
+
         events.retain(|event| {
             let requested = matches!(event, WindowEvent::QuickShellRequested)
                 || (!quickshell.is_open()
@@ -4060,6 +4106,17 @@ fn main() -> anyhow::Result<()> {
                 platform.request_redraw()?;
                 continue;
             }
+            Action::OpenFontPicker => {
+                if let Err(error) = app.system_fonts.start(platform.waker()) {
+                    app.error = format!("Could not discover system fonts: {error:#}");
+                } else {
+                    quickshell.open_font_picker(&app, &mut ui);
+                }
+
+                platform.request_redraw()?;
+                continue;
+            }
+
             Action::OpenConversationContacts => {
                 ui.set_modal_input(false);
                 quickshell.open_conversation_contacts(&app, &mut ui);

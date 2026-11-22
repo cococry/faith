@@ -45,6 +45,7 @@ unicode-bidi = "0.3.18"
 unicode-script = "0.5.8"
 ash = { version = "0.38.0", features = ["linked"] }
 vk-mem = "0.5.0"
+fontdb = "0.24.0"
 
 
 [build-dependencies]

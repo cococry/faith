@@ -5,7 +5,7 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
 };
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -277,7 +277,7 @@ fn valid_id(id: &str) -> bool {
 pub struct Catalog {
     directory: PathBuf,
     pub ids: Vec<String>,
-    pub names: Vec<String>,
+    pub names: Arc<[String]>,
 }
 
 impl Catalog {
@@ -304,7 +304,7 @@ impl Catalog {
         let mut catalog = Self {
             directory,
             ids: Vec::new(),
-            names: Vec::new(),
+            names: Arc::from([]),
         };
         catalog.refresh()?;
         Ok(catalog)
@@ -334,7 +334,7 @@ impl Catalog {
         }
 
         ids.sort_unstable();
-        let names = ids
+        let names: Arc<[String]> = ids
             .iter()
             .map(|id| {
                 let metadata = fs::read(self.directory.join(format!("{id}.json")))

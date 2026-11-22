@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use super::rank::Text;
+use crate::ui::search::Text;
 use crate::{Action, App, Page, Profile, SettingsItem, ui::animation::Curve};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -51,6 +51,7 @@ pub struct Entry {
 impl Entry {
     fn new(id: &str, label: &str, kind: Kind, command: Action) -> Self {
         let setting = match &command {
+            Action::Theme(_) => Some((SettingsItem::Appearance, "settings-theme-dropdown")),
             Action::Rounded(_) => Some((SettingsItem::Misc, "settings-rounded-corners")),
             Action::Animations(_) => Some((SettingsItem::Misc, "settings-animations")),
             Action::LayoutMorphing(_) => Some((SettingsItem::Misc, "settings-layout-morphing")),
@@ -339,6 +340,42 @@ fn view_conversation_contact(app: &App, profile: &Profile) -> Option<Entry> {
     })
 }
 
+pub fn font_choices(app: &App) -> Vec<Entry> {
+    std::iter::once(
+        Entry::new(
+            "font:bundled",
+            crate::system_fonts::BUNDLED,
+            Kind::Settings,
+            Action::Font(None),
+        )
+        .detail(if app.font.is_none() {
+            "Current font"
+        } else {
+            "Bundled font"
+        }),
+    )
+    .chain(app.system_fonts.families.iter().map(|font| {
+        Entry::new(
+            &format!("system-font:{}", font.name),
+            &font.name,
+            Kind::Settings,
+            Action::Font(Some(font.name.clone())),
+        )
+        .detail(
+            if app
+                .font
+                .as_ref()
+                .is_some_and(|current| current.name == font.name)
+            {
+                "Current font"
+            } else {
+                "System font"
+            },
+        )
+    }))
+    .collect()
+}
+
 pub fn build(app: &App, zoom: u32) -> Vec<Entry> {
     let mut entries = vec![
         Entry::new(
@@ -399,14 +436,17 @@ pub fn build(app: &App, zoom: u32) -> Vec<Entry> {
         .priority(190),
         Entry::new(
             "settings-theme",
-            "Theme settings",
+            "Appearance settings",
             Kind::Settings,
             Action::OpenSettings {
-                section: SettingsItem::Theme,
+                section: SettingsItem::Appearance,
                 control: None,
             },
         )
-        .search("theme", &["appearance colors colours settings preferences"])
+        .search(
+            "appearance",
+            &["theme colors colours settings preferences font"],
+        )
         .detail("Settings · Appearance")
         .priority(180),
         Entry::new(
@@ -1099,6 +1139,20 @@ pub fn build(app: &App, zoom: u32) -> Vec<Entry> {
     }
 
     entries.push(
+        Entry::new(
+            "select-font",
+            "Select font",
+            Kind::Settings,
+            Action::OpenFontPicker,
+        )
+        .search(
+            "font",
+            &["select font choose font font family typeface appearance"],
+        )
+        .detail("Browse system fonts"),
+    );
+
+    entries.push(
         Entry::new("select-theme", "Theme selector", Kind::Theme, Action::None)
             .search(
                 "theme",
@@ -1109,7 +1163,7 @@ pub fn build(app: &App, zoom: u32) -> Vec<Entry> {
                 app.themes
                     .ids
                     .iter()
-                    .zip(&app.themes.names)
+                    .zip(app.themes.names.iter())
                     .map(|(id, name)| {
                         Entry::new(
                             &format!("theme:{id}"),

@@ -229,6 +229,7 @@ pub struct TextRenderer {
     /// DirectWrite or fontconfig.
     fallback_fonts: Vec<FontHandle>,
     fallback_sources: Vec<std::path::PathBuf>,
+    preferred_emoji: Option<std::path::PathBuf>,
 
     /// Cached atlas locations (uv, atlas layer) of glyphs
     glyph_locations: HashMap<GlyphKey, AtlasGlyph>,
@@ -239,6 +240,10 @@ pub struct TextRenderer {
     layout_cache: LruCache<TextLayoutKey, Arc<TextLayout>>,
 
     fallback_choice_cache: LruCache<FallbackChoiceKey, Option<FontHandle>>,
+}
+
+fn emoji_hint(c: char) -> bool {
+    matches!(c, '\u{1f000}'..='\u{1faff}' | '\u{fe0f}' | '\u{20e3}')
 }
 
 impl TextRenderer {
@@ -265,6 +270,7 @@ impl TextRenderer {
             font_manager,
             fallback_fonts: Vec::new(),
             fallback_sources: Vec::new(),
+            preferred_emoji: None,
 
             glyph_locations: HashMap::new(),
 
@@ -356,6 +362,15 @@ impl TextRenderer {
         // runs. This function splits visual text
         // runs by script to itemize the text
         // into runs.
+        let emoji = if let Some(path) = &self.preferred_emoji
+            && text.chars().any(emoji_hint)
+        {
+            let size = self.font_manager.requested_size(original_font)?;
+            Some(self.font_manager.load_font(path, size, 0)?)
+        } else {
+            None
+        };
+
         let bidi = BidiInfo::new(text, None);
 
         let mut runs = Vec::new();
@@ -374,7 +389,11 @@ impl TextRenderer {
                 let lvl = bidi.levels[run.start];
 
                 // run.start is the byte offset into the original string
-                let mut split = self.split_by_script(run_text, run.start, lvl, original_font)?;
+                let mut split = if let Some(emoji) = emoji {
+                    self.split_emoji(run_text, run.start, lvl, original_font, emoji)?
+                } else {
+                    self.split_by_script(run_text, run.start, lvl, original_font)?
+                };
 
                 // split_by_script walks the bidi run in logical
                 // string order.
@@ -389,6 +408,52 @@ impl TextRenderer {
 
                 runs.extend(split);
             }
+        }
+
+        Ok(runs)
+    }
+
+    fn split_emoji(
+        &mut self,
+        text: &str,
+        offset: usize,
+        level: Level,
+        original: FontHandle,
+        emoji: FontHandle,
+    ) -> anyhow::Result<Vec<ItemizedRun>> {
+        let mut runs = Vec::new();
+        let mut start = 0;
+        for (index, grapheme) in text.grapheme_indices(true) {
+            if !grapheme.chars().any(emoji_hint) || grapheme.contains('\u{fe0e}') {
+                continue;
+            }
+
+            let glyphs = self.shape_cached(grapheme, level, Script::Common, emoji)?;
+            if glyphs.is_empty() || glyphs.iter().any(|glyph| glyph.glyph_idx == 0) {
+                continue;
+            }
+
+            if start < index {
+                runs.extend(self.split_by_script(
+                    &text[start..index],
+                    offset + start,
+                    level,
+                    original,
+                )?);
+            }
+
+            runs.push(ItemizedRun {
+                font_handle: emoji,
+                text: grapheme.to_owned(),
+                byte_start: offset + index,
+                bidi_lvl: level,
+                script: Script::Common,
+            });
+            start = index + grapheme.len();
+        }
+
+        if start < text.len() {
+            runs.extend(self.split_by_script(&text[start..], offset + start, level, original)?);
         }
 
         Ok(runs)
@@ -815,8 +880,13 @@ impl TextRenderer {
         Ok(())
     }
 
-    pub fn set_fallback_fonts(&mut self, paths: Vec<std::path::PathBuf>) {
+    pub fn set_fallback_fonts(
+        &mut self,
+        paths: Vec<std::path::PathBuf>,
+        preferred_emoji: Option<std::path::PathBuf>,
+    ) {
         self.fallback_sources = paths;
+        self.preferred_emoji = preferred_emoji;
         self.fallback_choice_cache.clear();
         self.font_run_cache.clear();
         self.token_range_cache.clear();
@@ -827,8 +897,18 @@ impl TextRenderer {
         &mut self,
         path: &std::path::Path,
         size: u32,
+        index: u32,
     ) -> anyhow::Result<FontHandle> {
-        self.font_manager.load_font(path, size, 0)
+        self.font_manager
+            .load_font(path, size, isize::try_from(index)?)
+    }
+
+    pub fn validate_primary_font(
+        &mut self,
+        face: &crate::system_fonts::Face,
+    ) -> anyhow::Result<()> {
+        let handle = self.load_primary_font(&face.path, 16, face.index)?;
+        self.font_manager.validate_ui_font(handle)
     }
 
     /// Registers a lazy fallback face.
@@ -1790,4 +1870,40 @@ fn bordered_glyph(glyph: &Glyph) -> anyhow::Result<Vec<u8>> {
     }
 
     Ok(pixels)
+}
+
+#[cfg(test)]
+mod system_font_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn alternate_text_face_keeps_emoji_and_script_fallbacks() -> anyhow::Result<()> {
+        let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
+        let emoji = assets.join("NotoColorEmoji.ttf");
+        let arabic = assets.join("NotoSansArabic-Regular.ttf");
+        let hebrew = assets.join("NotoSansHebrew-Regular.ttf");
+        let mut renderer = TextRenderer::new()?;
+        let primary = renderer.load_primary_font(&assets.join("NotoSans-Bold.ttf"), 16, 0)?;
+        let expected = [
+            ("😀", renderer.load_primary_font(&emoji, 16, 0)?),
+            ("العربية", renderer.load_primary_font(&arabic, 16, 0)?),
+            ("עברית", renderer.load_primary_font(&hebrew, 16, 0)?),
+        ];
+        renderer.set_fallback_fonts(vec![emoji.clone(), arabic, hebrew], Some(emoji));
+
+        for (text, font) in expected {
+            let runs = renderer.build_shaped_runs_cached(primary, text)?;
+            assert!(!runs.is_empty());
+            assert!(
+                runs.iter().all(|run| {
+                    run.font_handle == font
+                        && run.shaped_glyphs.iter().all(|glyph| glyph.glyph_idx != 0)
+                }),
+                "{text}"
+            );
+        }
+
+        Ok(())
+    }
 }
