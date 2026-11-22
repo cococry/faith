@@ -10,6 +10,8 @@ use crate::{
     },
 };
 
+pub const RENAME_INPUT: &str = "conversation-name";
+
 pub enum Submission {
     Create,
     Send(String),
@@ -20,6 +22,7 @@ pub struct State {
     pub submission: Option<(u64, Submission)>,
     pub partners: Vec<(Id, String)>,
     pub naming: bool,
+    pub renaming: Option<Id>,
     pub require_username: bool,
     pub disclose_username: Option<bool>,
     pub request_disclosure: HashMap<Id, bool>,
@@ -36,6 +39,7 @@ impl Default for State {
             submission: None,
             partners: Vec::new(),
             naming: false,
+            renaming: None,
             require_username: false,
             disclose_username: None,
             request_disclosure: HashMap::new(),
@@ -53,6 +57,30 @@ impl State {
             session: self.session + 1,
             ..Self::default()
         };
+    }
+
+    pub fn invalidate_history_layout(&mut self) {
+        self.history_layout.get_mut().take();
+    }
+
+    pub fn contact_capacity(&self) -> bool {
+        self.partners.len() < faith_client::MAX_MEMBERS - 1
+    }
+
+    pub fn contact_selected(&self, id: Id) -> bool {
+        self.partners.iter().any(|(partner, _)| *partner == id)
+    }
+
+    pub fn toggle_contact(&mut self, id: Id) {
+        if let Some(index) = self.partners.iter().position(|(partner, _)| *partner == id) {
+            self.partners.remove(index);
+        } else if let Some(partner) = self.valid_partner(id, "") {
+            self.partners.push(partner);
+        }
+    }
+
+    pub fn creation_step(&self) -> (u64, bool) {
+        (self.form, self.naming)
     }
 
     pub fn title_id(&self) -> String {
@@ -106,8 +134,9 @@ impl State {
     }
 
     fn valid_partner(&self, id: Id, name: &str) -> Option<(Id, String)> {
-        (self.partners.len() < faith_client::MAX_MEMBERS - 1
+        (self.contact_capacity()
             && self.snapshot.auth != Some(id)
+            && !name.chars().any(char::is_control)
             && !self.partners.iter().any(|(existing, _)| *existing == id))
         .then(|| (id, name.trim().to_owned()))
     }
@@ -118,12 +147,12 @@ impl State {
         ui.focus_input(&self.partner_id());
     }
 
-    pub fn default_title(&self) -> String {
+    pub fn default_title(&self, name_for: impl Fn(&Id, &str) -> String) -> String {
         let mut title = self
             .partners
             .iter()
             .take(3)
-            .map(|(id, name)| partner_label(id, name))
+            .map(|(id, name)| name_for(id, name))
             .collect::<Vec<_>>()
             .join(", ");
         if self.partners.len() > 3 {
@@ -134,7 +163,7 @@ impl State {
     }
 }
 
-fn partner_label(id: &Id, name: &str) -> String {
+pub fn partner_label(id: &Id, name: &str) -> String {
     if name.is_empty() {
         format!("{}…", &id.to_string()[..4])
     } else {
@@ -265,7 +294,10 @@ pub fn creation(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Re
             "Conversation name",
             &title_id,
             "Name your group",
-            Some(256),
+            InputOptions {
+                max_chars: Some(256),
+                ..Default::default()
+            },
             editing,
         )?;
         if editing && form.snapshot.username.is_some() {
@@ -334,7 +366,10 @@ pub fn creation(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Re
             "Auth ID",
             &auth_id,
             "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
-            Some(32),
+            InputOptions {
+                max_chars: Some(32),
+                ..Default::default()
+            },
             true,
         )?;
         ui.space(8.0);
@@ -352,17 +387,20 @@ pub fn creation(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Re
         let name = form_input(
             ui,
             gpu,
-            "Display name (optional)",
+            "Local contact name (optional)",
             &name_id,
-            "Enter a display name",
-            Some(20),
+            "Enter a local name",
+            InputOptions {
+                max_chars: Some(20),
+                ..Default::default()
+            },
             true,
         )?;
         ui.space(8.0);
         label(
             ui,
             gpu,
-            "The name displayed locally when texting your partner.",
+            "A local name saves this Auth ID to Contacts when you create the conversation.",
             12,
             false,
             true,
@@ -375,6 +413,12 @@ pub fn creation(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Re
         let draft_empty = entered_auth.is_empty() && name.trim().is_empty();
         can_continue = partner.is_some() || draft_empty && !form.partners.is_empty();
         ui.space(12.0);
+        let button_y = ui.position().1;
+        let inline = ui.div_width() >= 300.0;
+        if inline {
+            ui.push_sizing(Some(118.0), None);
+        }
+
         let add = command_button(
             ui,
             gpu,
@@ -384,10 +428,32 @@ pub fn creation(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Re
             partner.is_some(),
             false,
         )?;
+        if inline {
+            ui.pop_sizing();
+        }
+
         if let Some((id, name)) = partner.as_ref()
             && (add || ui.input_submitted(&auth_id) || ui.input_submitted(&name_id))
         {
             action = Action::AddChatPartner(*id, name.clone());
+        }
+
+        if inline {
+            ui.set_position(128.0, button_y);
+        } else {
+            ui.space(8.0);
+        }
+
+        if command_button(
+            ui,
+            gpu,
+            "add-from-contacts",
+            crate::contacts::ICON,
+            "Add from contacts",
+            editing,
+            false,
+        )? {
+            action = Action::OpenContactPicker;
         }
 
         if !entered_auth.is_empty() && parsed_auth.is_none() {
@@ -410,7 +476,7 @@ pub fn creation(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Re
             let mut x = 0.0;
             let mut y = ui.position().1;
             for (index, (id, name)) in form.partners.iter().enumerate() {
-                let title = partner_label(id, name);
+                let title = app.partner_label(id, name);
                 ui.push_style(Style {
                     font_size: 13,
                     ..ui.style()
@@ -443,25 +509,11 @@ pub fn creation(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Re
     }
 
     ui.div_end();
-    ui.set_position(x, footer);
-    if command_button(
-        ui,
-        gpu,
-        "chat-cancel",
-        "",
-        if naming {
-            "Back"
-        } else {
-            "Cancel"
-        },
-        editing,
-        false,
-    )? {
-        action = if naming {
-            Action::EditChatPartners
-        } else {
-            Action::CancelConversation
-        };
+    if !naming {
+        ui.set_position(x, footer);
+        if command_button(ui, gpu, "chat-cancel", "", "Cancel", editing, false)? {
+            action = Action::CancelConversation;
+        }
     }
 
     let button_width = (if naming {
@@ -499,8 +551,7 @@ pub fn creation(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Re
                     required: form.require_username,
                     disclose: form.snapshot.username.is_some() && form.discloses_username(),
                 },
-                use_disclosed_title: matches!(form.partners.as_slice(), [(_, name)] if name.is_empty())
-                    && title.trim() == form.default_title(),
+                automatic_title: title.trim() == app.default_conversation_title(),
             }
         } else {
             Action::NameNewConversation(partner)
@@ -510,13 +561,13 @@ pub fn creation(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Re
     Ok(action)
 }
 
-fn form_input(
+pub fn form_input(
     ui: &mut Framework,
     gpu: &mut Renderer,
     title: &str,
     id: &str,
     hint: &str,
-    max_chars: Option<usize>,
+    options: InputOptions,
     enabled: bool,
 ) -> anyhow::Result<String> {
     label(ui, gpu, title, 13, true, true, false)?;
@@ -525,20 +576,12 @@ fn form_input(
         enabled,
         ..crate::profile_input_style(ui)
     });
-    let result = ui.input_with_hint(
-        gpu,
-        id,
-        InputOptions {
-            max_chars,
-            ..Default::default()
-        },
-        hint,
-    );
+    let result = ui.input_with_hint(gpu, id, options, hint);
     ui.pop_style();
     result
 }
 
-fn command_button(
+pub fn command_button(
     ui: &mut Framework,
     gpu: &mut Renderer,
     id: &str,
@@ -607,33 +650,13 @@ pub fn requests(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Re
     }
 
     if snapshot.requests.is_empty() {
-        let top = (ui.div_height() * 0.42 - 36.0).max(ui.position().1 + 24.0);
-        ui.set_position(0.0, top);
-        ui.div_begin_id(
-            "requests-empty",
-            DivOptions {
-                width: Some(ui.div_width()),
-                ..Default::default()
-            },
-        )?;
-        ui.push_style(Style {
-            font_size: 36,
-            color: ui.theme().muted,
-            ..ui.style()
-        });
-        ui.text_centered(gpu, crate::REQUESTS, Some(Font::Icons))?;
-        ui.pop_style();
-        ui.space(16.0);
-        label(
+        crate::empty_state(
             ui,
             gpu,
+            "requests-empty",
+            crate::REQUESTS,
             "No pending message requests",
-            14,
-            false,
-            true,
-            true,
         )?;
-        ui.div_end();
     }
 
     let mut action = Action::None;
@@ -672,7 +695,15 @@ pub fn requests(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Re
         } else {
             &request.username
         };
-        label(ui, gpu, name, 14, true, false, false)?;
+        label(
+            ui,
+            gpu,
+            app.contact_name(request.requester, name),
+            14,
+            true,
+            false,
+            false,
+        )?;
 
         let mut share = has_username && app.chat.shares_on_request(id);
         if request.required {
@@ -833,12 +864,19 @@ pub fn pending_invites(
                 ..Default::default()
             },
         )?;
-        label(ui, gpu, &invite.title, 14, true, false, false)?;
+        let title = invite.title_members.as_ref().map_or_else(
+            || std::borrow::Cow::Borrowed(invite.title.as_str()),
+            |members| app.member_title(members, None, &invite.title),
+        );
+        label(ui, gpu, &title, 14, true, false, false)?;
         ui.space(4.0);
         label(
             ui,
             gpu,
-            &format!("Invite to {}", invite.recipient_name),
+            &format!(
+                "Invite to {}",
+                app.contact_name(invite.recipient, &invite.recipient_name)
+            ),
             12,
             false,
             true,
@@ -1054,7 +1092,68 @@ pub fn conversation(
         width: Some(inner_width),
         ..Default::default()
     })?;
-    label(ui, gpu, &chat.title, 20, true, false, false)?;
+    let partner = chat.direct_partner();
+    let contact = partner.filter(|&member| app.contacts.get(member).is_some());
+    let contact_action = match partner {
+        Some(member) if app.can_save_partner(member) => Some((
+            "Save contact",
+            Action::PromptSaveConversationContact {
+                profile: profile.clone(),
+                id: chat.id,
+                member,
+            },
+        )),
+        None if chat
+            .members
+            .iter()
+            .any(|&member| app.can_save_partner(member)) =>
+        {
+            Some(("Save contact", Action::OpenConversationContacts))
+        }
+        _ => None,
+    };
+    let button_width = 108.0_f32.min(inner_width * 0.5);
+    let (x, y) = ui.position();
+    let title_width = if contact_action.is_some() {
+        (inner_width - button_width - 8.0).max(1.0)
+    } else {
+        inner_width
+    };
+    ui.push_sizing(Some(title_width), None);
+    let title = app.conversation_title(chat);
+    if let Some(member) = contact {
+        ui.push_style(Style {
+            font_size: 20,
+            ..ui.style()
+        });
+        let clicked = ui.text_link(gpu, "conversation-title-contact", &title, Font::Bold);
+        ui.pop_style();
+        if clicked? {
+            action = Action::OpenContact(member);
+        }
+    } else {
+        label(ui, gpu, &title, 20, true, false, false)?;
+    }
+    ui.pop_sizing();
+    if let Some(at) = ui.context_press([x, y, title_width, ui.position().1 - y]) {
+        action = Action::OpenRowMenu(
+            crate::RowMenu::Conversation {
+                profile: profile.clone(),
+                id: chat.id,
+            },
+            at,
+        );
+    }
+
+    if let Some((title, command)) = contact_action {
+        ui.set_position(inner_width - button_width, y);
+        ui.push_sizing(Some(button_width), Some(32.0));
+        let save = command_button(ui, gpu, "conversation-contact", "", title, true, false);
+        ui.pop_sizing();
+        if save? {
+            action = command;
+        }
+    }
 
     if !snapshot.status.is_empty()
         && (!snapshot.authorized || snapshot.pending || snapshot.delivering)
@@ -1078,12 +1177,16 @@ pub fn conversation(
     let history_bottom = clipboard_position.map_or(composer, |position| position[1]);
     let history = (history_bottom - header - 9.0).max(0.0);
     if history > 0.0
-        && let Some(sender) = messages(ui, gpu, app, chat.id, [20.0, header, inner_width, history])?
+        && let Some(member) = messages(ui, gpu, app, chat, [20.0, header, inner_width, history])?
     {
-        action = Action::PromptSenderName {
-            profile: profile.clone(),
-            id: chat.id,
-            sender,
+        action = if app.contacts.get(member).is_some() {
+            Action::OpenContact(member)
+        } else {
+            Action::PromptSaveConversationContact {
+                profile: profile.clone(),
+                id: chat.id,
+                member,
+            }
         };
     }
 
@@ -1132,6 +1235,7 @@ struct Bubble {
     height: f32,
     width: f32,
     actions: f32,
+    view_contact: bool,
 }
 
 struct HistoryLayout {
@@ -1145,31 +1249,41 @@ struct HistoryLayout {
 impl HistoryLayout {
     fn measure(
         ui: &mut Framework,
-        snapshot: &client::Snapshot,
+        app: &App,
+        chat: &client::Chat,
         limit: f32,
     ) -> anyhow::Result<Self> {
+        let snapshot = &app.chat.snapshot;
         let padding = limit.min(20.0) * 0.5;
         let content = (limit - padding * 2.0).max(1.0);
         let mut extent = 0.0;
+        let group = chat.direct_partner().is_none();
         let mut bubbles = Vec::with_capacity(snapshot.messages.len());
         for message in snapshot.messages.iter() {
-            let author = author(snapshot, message);
+            let author = author(app, message);
             ui.push_style(Style {
                 font_size: 14,
                 ..ui.style()
             });
             let body = ui.wrapped_text_size(&message.body, None, content);
             ui.pop_style();
+            let other = group && snapshot.auth.is_some_and(|auth| auth != message.sender);
+            let view_contact = other && app.contacts.get(message.sender).is_some();
+            let inset = if view_contact {
+                2.0 * crate::ui::framework::TEXT_LINK_INSET
+            } else {
+                0.0
+            };
             ui.push_style(Style {
                 font_size: 12,
                 ..ui.style()
             });
-            let name = ui.wrapped_text_size(author, Some(Font::Bold), content);
+            let name = ui.wrapped_text_size(author, Some(Font::Bold), (content - inset).max(1.0));
             ui.pop_style();
             let (body, name) = (body?, name?);
-            let width = (body.0.max(name.0).ceil() + 2.0 * padding + 1.0).min(limit);
+            let width = (body.0.max(name.0 + inset).ceil() + 2.0 * padding + 1.0).min(limit);
             let height = body.1 + name.1 + 2.0 * padding;
-            let actions = if can_name_sender(snapshot, message) {
+            let actions = if other && !view_contact && chat.members.contains(&message.sender) {
                 MESSAGE_ACTION_SIZE + MESSAGE_ACTION_GAP
             } else {
                 0.0
@@ -1179,6 +1293,7 @@ impl HistoryLayout {
                 height,
                 width,
                 actions,
+                view_contact,
             });
             extent += height + actions + 8.0;
         }
@@ -1193,30 +1308,26 @@ impl HistoryLayout {
     }
 }
 
-fn author<'a>(snapshot: &client::Snapshot, message: &'a client::Message) -> &'a str {
-    if snapshot.auth == Some(message.sender) {
+fn author<'a>(app: &'a App, message: &'a client::Message) -> &'a str {
+    if app.chat.snapshot.auth == Some(message.sender) {
         "You"
     } else {
-        &message.author
+        app.contact_name(message.sender, &message.author)
     }
-}
-
-pub fn can_name_sender(snapshot: &client::Snapshot, message: &client::Message) -> bool {
-    snapshot.auth != Some(message.sender) && !message.has_name
 }
 
 fn messages(
     ui: &mut Framework,
     gpu: &mut Renderer,
     app: &App,
-    chat: Id,
+    chat: &client::Chat,
     [x, y, width, height]: [f32; 4],
 ) -> anyhow::Result<Option<Id>> {
     let snapshot = &app.chat.snapshot;
     let mut sender = None;
     ui.set_position(x, y);
     ui.div_begin_id(
-        &app.chat.composer_id(chat),
+        &app.chat.composer_id(chat.id),
         DivOptions {
             width: Some(width),
             height: Some(height),
@@ -1225,7 +1336,7 @@ fn messages(
     )?;
     ui.follow_scroll_end();
 
-    if snapshot.selected == Some(chat) {
+    if snapshot.selected == Some(chat.id) {
         let available = (ui.div_width() - 12.0).max(1.0);
         let limit = (available * 0.77).clamp(1.0, 520.0);
         if snapshot.messages.is_empty() {
@@ -1238,7 +1349,7 @@ fn messages(
                 || layout.scale != ui.layout_scale()
                 || !Arc::ptr_eq(&layout.messages, &snapshot.messages)
         }) {
-            *cache = Some(HistoryLayout::measure(ui, snapshot, limit)?);
+            *cache = Some(HistoryLayout::measure(ui, app, chat, limit)?);
         }
 
         let layout = cache.as_ref().unwrap();
@@ -1293,7 +1404,7 @@ fn messages(
                     color: ui.theme().primary_text,
                     ..ui.style()
                 });
-                ui.text(gpu, author(snapshot, message), Some(Font::Bold))?;
+                ui.text(gpu, author(app, message), Some(Font::Bold))?;
                 ui.pop_style();
                 ui.push_style(Style {
                     font_size: 14,
@@ -1303,7 +1414,23 @@ fn messages(
                 ui.text(gpu, &message.body, None)?;
                 ui.pop_style();
             } else {
-                label(ui, gpu, author(snapshot, message), 12, true, true, false)?;
+                let name = author(app, message);
+                if bubble.view_contact {
+                    ui.push_style(Style {
+                        font_size: 12,
+                        color: ui.theme().muted,
+                        ..ui.style()
+                    });
+                    let clicked =
+                        ui.text_link(gpu, &format!("message-author-{row_id}"), name, Font::Bold);
+                    ui.pop_style();
+                    if clicked? {
+                        sender = Some(message.sender);
+                    }
+                } else {
+                    label(ui, gpu, name, 12, true, true, false)?;
+                }
+
                 label(ui, gpu, &message.body, 14, false, false, false)?;
             }
 
@@ -1321,7 +1448,7 @@ fn messages(
             {
                 ui.set_position(0.0, bubble.y + bubble.height + MESSAGE_ACTION_GAP);
                 ui.push_style(Style {
-                    tooltip: Some("Name sender locally"),
+                    tooltip: Some("Save contact"),
                     font_size: 14,
                     radius: MESSAGE_ACTION_SIZE * 0.5,
                     color: ui.theme().text,
@@ -1332,7 +1459,11 @@ fn messages(
                     Some(MESSAGE_ACTION_SIZE.min(available)),
                     Some(MESSAGE_ACTION_SIZE),
                 );
-                let clicked = ui.icon_button(gpu, &format!("name-sender-{row_id}"), ADD);
+                let clicked = ui.icon_button(
+                    gpu,
+                    &format!("message-contact-{row_id}"),
+                    crate::contacts::ICON,
+                );
                 ui.pop_sizing();
                 ui.pop_style();
 
@@ -1352,6 +1483,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn contact_picker_toggles_recipients_and_keeps_membership_valid() {
+        let mut state = State::default();
+        let own = Id([0; 16]);
+        state.snapshot.auth = Some(own);
+        state.toggle_contact(own);
+        assert!(state.partners.is_empty());
+
+        for i in 1..faith_client::MAX_MEMBERS {
+            state.toggle_contact(Id([i as u8; 16]));
+        }
+
+        let first = Id([1; 16]);
+        let extra = Id([250; 16]);
+        assert!(state.contact_selected(first));
+        assert!(!state.contact_capacity());
+        state.toggle_contact(extra);
+        assert!(!state.contact_selected(extra));
+
+        state.toggle_contact(first);
+        assert!(!state.contact_selected(first));
+        state.toggle_contact(extra);
+        assert!(state.contact_selected(extra));
+        assert!(!state.contact_capacity());
+    }
+
+    #[test]
     fn group_title_uses_three_partners_and_shortens_unnamed_ids() {
         let state = State {
             partners: vec![
@@ -1363,6 +1520,9 @@ mod tests {
             ..State::default()
         };
 
-        assert_eq!(state.default_title(), "Alice, 0202…, Caren & more");
+        assert_eq!(
+            state.default_title(partner_label),
+            "Alice, 0202…, Caren & more"
+        );
     }
 }

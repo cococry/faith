@@ -1,4 +1,4 @@
-use super::animation::{Curve, MORPH_DURATION, Motion, Presence, Scheduler, Transition};
+use super::animation::{Curve, Hover, MORPH_DURATION, Motion, Presence, Scheduler, Transition};
 use super::focus::{Control, Kind as FocusKind, Navigation};
 use super::scroll::{self, Areas, PrepareOptions, View};
 use super::theme::{CornerRadii, Theme};
@@ -7,7 +7,7 @@ use super::{
     text::TextLayoutOptions,
     widgets::{
         button, checkbox, dropdown,
-        input::{Bounds, InputField, InputOptions},
+        input::{Bounds, InputField, InputOptions, InputPaint},
         slider,
     },
 };
@@ -26,6 +26,8 @@ use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
 };
+
+pub const TEXT_LINK_INSET: f32 = 4.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Style {
@@ -269,6 +271,7 @@ pub struct Framework {
     styles: Vec<Style>,
     sizing: Vec<(Option<f32>, Option<f32>)>,
     inputs: HashMap<String, InputField>,
+    text_link_hover: HashMap<String, Hover>,
     sliders: HashMap<String, slider::State>,
     focus_order: Vec<String>,
     navigation: Navigation,
@@ -354,6 +357,7 @@ impl Framework {
             styles: vec![Style::default()],
             sizing: vec![],
             inputs: HashMap::new(),
+            text_link_hover: HashMap::new(),
             sliders: HashMap::new(),
             focus_order: Vec::new(),
             navigation: Navigation::default(),
@@ -547,6 +551,20 @@ impl Framework {
             })
     }
 
+    pub fn context_press(&self, bounds: [f32; 4]) -> Option<CursorPosition> {
+        self.pointer.filter(|_| {
+            self.region_hovered(bounds)
+                && self.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        WindowEvent::MouseButtonPressed {
+                            button: MouseButton::Right
+                        }
+                    )
+                })
+        })
+    }
+
     pub fn pointer_position(&self) -> Option<CursorPosition> {
         self.pointer
     }
@@ -654,8 +672,12 @@ impl Framework {
                         state.cursor = None;
                     }
                     WindowEvent::MouseLeft => pointer = None,
-                    WindowEvent::MouseButtonPressed { .. }
-                        if !pointer.is_some_and(|p| contains(bounds, p)) =>
+                    WindowEvent::MouseButtonPressed { button }
+                        if state.dismisses_on_press(
+                            *button,
+                            pointer.is_some_and(|p| contains(bounds, p)),
+                            self.frame_time,
+                        ) =>
                     {
                         state.close()
                     }
@@ -1400,6 +1422,9 @@ impl Framework {
                 .is_some_and(|count| occurrence < count)
         });
 
+        self.text_link_hover
+            .retain(|id, _| self.button_occurrences.contains_key(id));
+
         self.reveal_focus = false;
         self.sliders.retain(|id, _| self.focus_order.contains(id));
         if self.modal_input
@@ -1474,7 +1499,16 @@ impl Framework {
 
     /* fixed-height lists can skip hidden rows without measuring their text */
     pub fn visible_rows(&self, row_height: f32, count: usize) -> std::ops::Range<usize> {
-        let origin = self.layouts.last().unwrap().bounds.y;
+        self.visible_rows_from(0.0, row_height, count)
+    }
+
+    pub fn visible_rows_from(
+        &self,
+        offset: f32,
+        row_height: f32,
+        count: usize,
+    ) -> std::ops::Range<usize> {
+        let origin = self.layouts.last().unwrap().bounds.y + offset;
         let clip = self.clip_bounds();
         let height = row_height.max(1.0);
         let first = (((clip.y - origin) / height).floor().max(0.0) as usize).min(count);
@@ -1967,6 +2001,82 @@ impl Framework {
         self.ui_renderer.pop_clip();
         result?;
         Ok(())
+    }
+
+    pub fn text_link<G: GraphicsDevice>(
+        &mut self,
+        gpu: &mut G,
+        id: &str,
+        value: &str,
+        font: Font,
+    ) -> anyhow::Result<bool> {
+        let style = self.style();
+        let font = self.font(font)?;
+        let width = self
+            .sizing
+            .last()
+            .unwrap()
+            .0
+            .unwrap_or_else(|| self.div_width());
+        let layout = self.text_renderer.measure_with_options(
+            value,
+            font,
+            TextLayoutOptions {
+                max_width: (width - 2.0 * TEXT_LINK_INSET).max(1.0),
+            },
+        )?;
+        let bounds = self.place_named(
+            layout.width + 2.0 * TEXT_LINK_INSET,
+            layout.height,
+            Some(id),
+        );
+        if !self.visible(bounds) {
+            return Ok(false);
+        }
+
+        self.button_occurrences.insert(id.to_owned(), 1);
+        let x = bounds.x + TEXT_LINK_INSET;
+        let hit = Bounds {
+            x,
+            width: layout.width.min(width),
+            ..bounds
+        };
+        let response = self.button_response((id.to_owned(), 0), hit, style);
+        let mut emphasis = 0.0;
+        if response.hovered || self.text_link_hover.contains_key(id) {
+            let hover = self.text_link_hover.entry(id.to_owned()).or_default();
+            let (value, active) = hover.update(
+                response.hovered,
+                self.frame_time,
+                self.animations,
+                self.curve,
+            );
+            emphasis = value;
+            if active {
+                self.animate_until(self.frame_time);
+            } else if !response.hovered {
+                self.text_link_hover.remove(id);
+            }
+        }
+
+        self.text_renderer.color = style.color;
+        let start = self.ui_renderer.mark().0;
+        self.text_renderer.render_layout(
+            [x, bounds.y],
+            &layout,
+            layout.width,
+            false,
+            gpu,
+            &mut self.ui_renderer,
+        )?;
+        if emphasis > 0.0 {
+            let growth = 0.08_f32.min(2.0 * TEXT_LINK_INSET / layout.width.max(1.0));
+            let center = [x + layout.width * 0.5, bounds.y + layout.height * 0.5];
+            self.ui_renderer
+                .scale_text_since(start, center, 1.0 + growth * emphasis);
+        }
+
+        Ok(response.clicked)
     }
 
     pub fn slider_dragging(&self) -> bool {
@@ -2510,6 +2620,17 @@ impl Framework {
             self.animate_until(next);
         }
 
+        let background = self.theme.background;
+        self.ui_renderer.rounded_box(
+            [x - 8.0, y - 4.0, metrics.width + 16.0, metrics.height + 8.0],
+            self.corner_radii().control,
+            Some(Color {
+                a: background.a * opacity,
+                ..background
+            }),
+            None,
+        )?;
+
         let color = if self.zoom_reset_pressed {
             self.theme.selected_icon
         } else if hovered {
@@ -2748,6 +2869,37 @@ impl Framework {
         id: &str,
         row: ActionRow<'_>,
     ) -> anyhow::Result<button::Response> {
+        self.action_row_with_space(gpu, id, row, 0.0)
+    }
+
+    pub fn action_row_with_checkbox<G: GraphicsDevice>(
+        &mut self,
+        gpu: &mut G,
+        id: &str,
+        row: ActionRow<'_>,
+        checked: Option<bool>,
+    ) -> anyhow::Result<button::Response> {
+        self.action_row_content(gpu, id, row, checked, 0.0)
+    }
+
+    pub fn action_row_with_space<G: GraphicsDevice>(
+        &mut self,
+        gpu: &mut G,
+        id: &str,
+        row: ActionRow<'_>,
+        trailing_space: f32,
+    ) -> anyhow::Result<button::Response> {
+        self.action_row_content(gpu, id, row, None, trailing_space)
+    }
+
+    fn action_row_content<G: GraphicsDevice>(
+        &mut self,
+        gpu: &mut G,
+        id: &str,
+        row: ActionRow<'_>,
+        checked: Option<bool>,
+        trailing_space: f32,
+    ) -> anyhow::Result<button::Response> {
         let bounds = self.place_named(self.div_width(), 56.0, Some(id));
         let key = (id.to_owned(), 0);
         self.button_occurrences.insert(id.to_owned(), 1);
@@ -2810,10 +2962,15 @@ impl Framework {
                 &mut self.ui_renderer,
             )?;
             let badge_width = badge.as_ref().map_or(0.0, |layout| layout.width + 16.0);
+            let reserved = if checked.is_some() {
+                26.0
+            } else {
+                badge_width
+            };
             self.ui_renderer.push_clip([
                 bounds.x + 44.0,
                 bounds.y,
-                (bounds.width - 56.0 - badge_width - 8.0).max(0.0),
+                (bounds.width - 56.0 - reserved - 8.0 - trailing_space).max(0.0),
                 bounds.height,
             ]);
             let result = (|| -> anyhow::Result<()> {
@@ -2836,7 +2993,38 @@ impl Framework {
                 )
             })();
             self.ui_renderer.pop_clip();
-            if let (Some(value), Some(layout)) = (row.badge, badge) {
+            if let Some(checked) = checked {
+                let x = bounds.x + bounds.width - 30.0;
+                let y = bounds.y + (bounds.height - 18.0) * 0.5;
+                self.ui_renderer.rounded_box(
+                    [x, y, 18.0, 18.0],
+                    if self.rounded_corners {
+                        4.0
+                    } else {
+                        0.0
+                    },
+                    checked.then_some(self.theme.primary),
+                    Some(if checked {
+                        self.theme.primary
+                    } else {
+                        self.theme.muted
+                    }),
+                )?;
+                if checked {
+                    let glyph = "\u{eab2}";
+                    let font = self.font_at(Font::Icons, 14)?;
+                    let metrics = self.text_renderer.measure(glyph, font)?;
+                    self.text_renderer.color = self.theme.primary_text;
+                    self.text_renderer.render(
+                        x + (18.0 - metrics.width) * 0.5,
+                        y + (18.0 - metrics.height) * 0.5,
+                        glyph,
+                        font,
+                        gpu,
+                        &mut self.ui_renderer,
+                    )?;
+                }
+            } else if let (Some(value), Some(layout)) = (row.badge, badge) {
                 let height = (layout.height + 6.0).min(bounds.height - 12.0);
                 let badge_x = bounds.x + bounds.width - badge_width - 10.0;
                 let badge_y = bounds.y + (bounds.height - height) * 0.5;
@@ -3136,7 +3324,18 @@ impl Framework {
         options: InputOptions,
         hint: &str,
     ) -> anyhow::Result<String> {
-        let font = self.font(Font::Regular)?;
+        self.input_with_font(gpu, id, options, hint, Font::Regular)
+    }
+
+    pub fn input_with_font<G: GraphicsDevice>(
+        &mut self,
+        gpu: &mut G,
+        id: &str,
+        options: InputOptions,
+        hint: &str,
+        font: Font,
+    ) -> anyhow::Result<String> {
+        let font = self.font(font)?;
         let s = self.style();
         let b = self.place_named(
             if self.divs.last().is_some_and(|div| div.width.is_none()) {
@@ -3216,7 +3415,11 @@ impl Framework {
         self.ui_renderer.push_clip(content_clip(b, s));
         let result = field.render(
             b,
-            s,
+            InputPaint {
+                padding: s.padding,
+                caret: s.color,
+                selection: s.border_color.unwrap_or(self.theme.border),
+            },
             font,
             &mut self.text_renderer,
             gpu,
@@ -3224,9 +3427,12 @@ impl Framework {
         );
         if field.text().is_empty() && !hint.is_empty() {
             self.text_renderer.color = self.theme.muted;
+            let hint_height = self.text_renderer.measure(hint, font)?.height;
+            let hint_y =
+                b.y + s.padding + (b.height - 2.0 * s.padding - hint_height).max(0.0) * 0.5;
             let hint_result = self.text_renderer.render(
                 b.x + s.padding,
-                b.y + s.padding,
+                hint_y,
                 hint,
                 font,
                 gpu,

@@ -1,6 +1,12 @@
-use crate::{platform::mouse::CursorPosition, ui::widgets::input::Bounds};
+use std::time::{Duration, Instant};
+
+use crate::{
+    platform::mouse::{CursorPosition, MouseButton},
+    ui::widgets::input::Bounds,
+};
 
 pub const ROW_HEIGHT: f32 = 38.0;
+const CONTEXT_REPEAT_GUARD: Duration = Duration::from_millis(200);
 
 /* we keep the icon and label together for each menu command */
 pub struct Item<'a> {
@@ -11,6 +17,7 @@ pub struct Item<'a> {
 #[derive(Default)]
 pub struct State {
     open: bool,
+    context_opened_at: Option<Instant>,
     pub(crate) presence: crate::ui::animation::Presence,
     pub(crate) origin: Option<CursorPosition>,
     pub(crate) cursor: Option<usize>,
@@ -28,7 +35,25 @@ impl State {
     pub fn open(&mut self, position: CursorPosition) {
         self.origin = Some(position);
         self.open = true;
+        self.context_opened_at = None;
         self.cursor = None;
+    }
+
+    pub fn open_context(&mut self, position: CursorPosition, now: Instant) {
+        self.open(position);
+        self.context_opened_at = Some(now);
+    }
+
+    pub(crate) fn dismisses_on_press(
+        &self,
+        button: MouseButton,
+        inside: bool,
+        now: Instant,
+    ) -> bool {
+        match (button, self.context_opened_at) {
+            (MouseButton::Right, Some(opened)) => now - opened >= CONTEXT_REPEAT_GUARD,
+            _ => !inside,
+        }
     }
 
     pub fn close(&mut self) {
@@ -52,6 +77,33 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn right_click_toggles_context_menus_after_the_repeat_guard() {
+        let mut state = State::default();
+        let position = CursorPosition { x: 10.0, y: 20.0 };
+        let opened = Instant::now();
+        state.open_context(position, opened);
+        for inside in [false, true] {
+            assert!(!state.dismisses_on_press(
+                MouseButton::Right,
+                inside,
+                opened + Duration::from_millis(60)
+            ));
+            assert!(state.dismisses_on_press(
+                MouseButton::Right,
+                inside,
+                opened + CONTEXT_REPEAT_GUARD
+            ));
+        }
+
+        assert!(state.dismisses_on_press(MouseButton::Left, false, opened));
+        assert!(!state.dismisses_on_press(MouseButton::Left, true, opened));
+
+        state.open(position);
+        assert!(state.dismisses_on_press(MouseButton::Right, false, opened));
+        assert!(!state.dismisses_on_press(MouseButton::Right, true, opened));
+    }
 
     #[test]
     fn anchors_at_cursor_and_stays_inside_window() {

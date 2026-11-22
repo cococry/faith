@@ -21,6 +21,7 @@ const ROW: f32 = 56.0;
 struct SearchResult {
     index: usize,
     match_score: i32,
+    implicit_delete: bool,
     destination: u8,
     score: i32,
     path: Vec<usize>,
@@ -36,10 +37,21 @@ struct Match<'a> {
 fn destination_rank(entry: &Entry, context: &Context) -> u8 {
     match &entry.command {
         Action::OpenConversation { .. } => 2 + u8::from(entry.owner == context.profile),
-        Action::OpenProfile(_) => 0,
+        Action::OpenProfile(_) | Action::OpenContact(_) => 0,
         _ if entry.id == "profile-conversations" => 2,
         _ => 1,
     }
+}
+
+fn is_delete_result(entry: &Entry) -> bool {
+    matches!(
+        entry.command,
+        Action::ConfirmDeleteProfile(_)
+            | Action::DeleteProfile(_)
+            | Action::ConfirmDeleteContact(_)
+            | Action::ConfirmDeleteContactInList(_)
+            | Action::DeleteContact(_)
+    ) || matches!(entry.id.as_str(), "delete-profile" | "delete-contact")
 }
 
 fn find<'a>(
@@ -133,7 +145,8 @@ struct Level {
 
 #[derive(Default)]
 pub struct Shell {
-    name_target: Option<(Profile, faith_client::Id, Option<faith_client::Id>)>,
+    contact_picker: bool,
+    save_contact_target: Option<(Profile, faith_client::Id, faith_client::Id)>,
     open: bool,
     presence: crate::ui::animation::Presence,
     entries: Vec<Entry>,
@@ -158,7 +171,8 @@ impl Shell {
     }
 
     pub fn open(&mut self, app: &App, zoom: u32, ui: &mut Framework) {
-        self.name_target = None;
+        self.contact_picker = false;
+        self.save_contact_target = None;
         self.levels.clear();
         self.placeholder = "Run an action directly".into();
         self.entries = catalog::build(app, zoom);
@@ -171,48 +185,52 @@ impl Shell {
         ui.clear_input(QUERY);
     }
 
-    pub fn open_conversation_name(
-        &mut self,
-        app: &App,
-        zoom: u32,
-        ui: &mut Framework,
-        profile: Profile,
-        id: faith_client::Id,
-    ) {
-        self.open(app, zoom, ui);
-        if let Some(index) = self
-            .entries
-            .iter()
-            .position(|entry| entry.id == "name-conversation")
-        {
-            self.enter(index, ui);
+    pub fn open_contact_picker(&mut self, app: &App, ui: &mut Framework) {
+        let Some(picker) = catalog::contact_picker(app) else {
+            return;
+        };
+
+        self.open_collection(app, ui, picker);
+    }
+
+    pub fn open_conversation_contacts(&mut self, app: &App, ui: &mut Framework) {
+        if let Some(collection) = catalog::conversation_contacts(app) {
+            self.open_collection(app, ui, collection);
         }
-
-        self.prompt_conversation_name(ui, profile, id);
     }
 
-    fn prompt_conversation_name(
+    fn open_collection(&mut self, app: &App, ui: &mut Framework, collection: Entry) {
+        self.contact_picker = collection.id == "add-contact-to-conversation";
+        self.save_contact_target = None;
+        self.levels.clear();
+        self.placeholder = collection.label;
+        self.entries = collection.children.unwrap_or_default();
+        self.context = Some(Context::from_app(app));
+        self.query.clear();
+        self.selected = 0;
+        self.reveal = true;
+        self.open = true;
+        self.search("");
+        ui.clear_input(QUERY);
+    }
+
+    pub fn prompt_save_contact(
         &mut self,
         ui: &mut Framework,
         profile: Profile,
         id: faith_client::Id,
-    ) {
-        self.name_target = Some((profile, id, None));
-        ui.clear_input(NAME);
-        ui.animate_until(std::time::Instant::now());
-    }
-
-    pub fn open_sender_name(
-        &mut self,
-        ui: &mut Framework,
-        profile: Profile,
-        id: faith_client::Id,
-        sender: faith_client::Id,
+        member: faith_client::Id,
+        username: Option<&str>,
     ) {
         self.levels.clear();
         self.open = true;
-        self.name_target = Some((profile, id, Some(sender)));
+        self.contact_picker = false;
+        self.save_contact_target = Some((profile, id, member));
         ui.clear_input(NAME);
+        if let Some(username) = username {
+            ui.set_input(NAME, username);
+        }
+
         ui.animate_until(std::time::Instant::now());
     }
 
@@ -223,6 +241,7 @@ impl Shell {
                 let scope = match prefix.trim().to_lowercase().as_str() {
                     "profile" | "profiles" | "account" => Some(Kind::Profile),
                     "chat" | "conversation" => Some(Kind::Conversation),
+                    "contact" | "contacts" => Some(Kind::Contact),
                     "settings" | "setting" => Some(Kind::Settings),
                     "theme" => Some(Kind::Theme),
                     _ => None,
@@ -235,6 +254,12 @@ impl Shell {
             });
         let normalized = rank::normalize(text);
         let words: Vec<_> = normalized.split_whitespace().collect();
+        let requests_deletion = words.iter().any(|word| {
+            word.len() >= 3
+                && ["delete", "remove", "erase"]
+                    .iter()
+                    .any(|verb| verb.starts_with(word))
+        });
         let tokens: Vec<Vec<char>> = words
             .iter()
             .filter(|word| {
@@ -289,6 +314,7 @@ impl Shell {
             results.push(SearchResult {
                 index,
                 match_score: matched.score + preference,
+                implicit_delete: !requests_deletion && is_delete_result(target),
                 destination: destination_rank(target, context),
                 score: score + target.context_bonus(context) + usage,
                 path: matched.path,
@@ -297,8 +323,9 @@ impl Shell {
         }
 
         results.sort_unstable_by(|a, b| {
-            b.match_score
-                .cmp(&a.match_score)
+            a.implicit_delete
+                .cmp(&b.implicit_delete)
+                .then_with(|| b.match_score.cmp(&a.match_score))
                 .then_with(|| b.destination.cmp(&a.destination))
                 .then_with(|| b.score.cmp(&a.score))
                 .then_with(|| a.title.cmp(&b.title))
@@ -317,6 +344,7 @@ impl Shell {
         let children = std::mem::replace(&mut self.entries, level.entries);
         self.entries[level.parent].children = Some(children);
         self.placeholder = level.placeholder;
+        self.contact_picker = false;
         self.search(&level.query);
         self.selected = level.selected.min(self.results.len().saturating_sub(1));
         ui.set_input(QUERY, &self.query);
@@ -325,6 +353,7 @@ impl Shell {
     }
 
     fn enter(&mut self, index: usize, ui: &mut Framework) {
+        self.contact_picker = self.entries[index].id == "add-contact-to-conversation";
         let children = self.entries[index].children.take().unwrap();
         let placeholder = format!(
             "Search {}",
@@ -363,9 +392,8 @@ impl Shell {
             }
             return None;
         }
-        if let Action::PromptConversationName { profile, id } = &entry.command {
-            self.prompt_conversation_name(ui, profile.clone(), *id);
-            return None;
+        if matches!(entry.command, Action::ToggleContactPartner(_)) {
+            return Some(entry.command.clone());
         }
 
         self.clock += 1;
@@ -376,21 +404,15 @@ impl Shell {
         Some(entry.command.clone())
     }
 
-    fn render_name(
+    fn render_save_contact(
         &mut self,
         ui: &mut Framework,
         gpu: &mut Renderer,
         [x, y, width, height]: [f32; 4],
     ) -> anyhow::Result<Option<Action>> {
-        let Some((profile, id, sender)) = &self.name_target else {
+        let Some((profile, id, member)) = &self.save_contact_target else {
             return Ok(None);
         };
-        let (title, hint, max_chars) = if sender.is_some() {
-            ("Name sender locally", "Display name", 20)
-        } else {
-            ("Name conversation", "Conversation name", 256)
-        };
-
         ui.set_position(x, y);
         ui.push_style(Style {
             padding: 16.0,
@@ -407,7 +429,7 @@ impl Shell {
                 ..Default::default()
             },
         )?;
-        crate::label(ui, gpu, title, 15, true, false, false)?;
+        crate::label(ui, gpu, "Save contact", 15, true, false, false)?;
         ui.space(12.0);
 
         let width = ui.div_width();
@@ -432,10 +454,10 @@ impl Shell {
             gpu,
             NAME,
             InputOptions {
-                max_chars: Some(max_chars),
+                max_chars: Some(crate::contacts::NAME_MAX),
                 filter: None,
             },
-            hint,
+            "Name",
         )?;
         ui.pop_sizing();
         ui.pop_style();
@@ -461,7 +483,7 @@ impl Shell {
             ..ui.style()
         });
         ui.push_sizing(Some(done_width), Some(40.0));
-        let done = ui.icon_label_button(gpu, "quickshell-name-done", "", "Done")?;
+        let done = ui.icon_label_button(gpu, "quickshell-save-contact", "", "Save")?;
         ui.pop_sizing();
         ui.pop_style();
         ui.div_end();
@@ -469,21 +491,11 @@ impl Shell {
 
         if enabled && (done || ui.input_submitted(NAME)) {
             self.open = false;
-            let profile = profile.clone();
-            let id = *id;
-            let name = name.to_owned();
-            return Ok(Some(match sender {
-                Some(sender) => Action::NameSender {
-                    profile,
-                    id,
-                    sender: *sender,
-                    name,
-                },
-                None => Action::RenameConversation {
-                    profile,
-                    id,
-                    title: name,
-                },
+            return Ok(Some(Action::SaveConversationContact {
+                profile: profile.clone(),
+                id: *id,
+                member: *member,
+                name: name.to_owned(),
             }));
         }
 
@@ -494,6 +506,7 @@ impl Shell {
         &mut self,
         ui: &mut Framework,
         gpu: &mut Renderer,
+        app: &App,
     ) -> anyhow::Result<Option<Action>> {
         if self.open {
             ui.begin_overlay()?;
@@ -503,11 +516,7 @@ impl Shell {
 
         let mut presence = ui.presence(&mut self.presence, self.open);
         ui.overlay_opacity(presence);
-        let naming = self.name_target.is_some();
-        let naming_sender = self
-            .name_target
-            .as_ref()
-            .is_some_and(|(_, _, sender)| sender.is_some());
+        let naming = self.save_contact_target.is_some();
 
         if !naming
             && !self.levels.is_empty()
@@ -600,15 +609,7 @@ impl Shell {
                     }
                 )
             });
-            if naming && !naming_sender && escape {
-                self.name_target = None;
-                ui.set_input(QUERY, &self.query);
-                ui.animate_until(std::time::Instant::now());
-                ui.end_overlay()?;
-                return Ok(None);
-            }
-
-            if !escape || !self.back(ui) {
+            if !escape || self.contact_picker || !self.back(ui) {
                 self.open = false;
                 ui.ignore_overlay_input();
                 presence = ui.presence(&mut self.presence, false);
@@ -617,7 +618,7 @@ impl Shell {
         }
 
         if naming {
-            let action = self.render_name(ui, gpu, [x, top, width, height])?;
+            let action = self.render_save_contact(ui, gpu, [x, top, width, height])?;
             ui.end_overlay()?;
             return Ok(action);
         }
@@ -781,16 +782,26 @@ impl Shell {
         for rank in visible {
             let result = &self.results[rank];
             let entry = descendant(&self.entries[result.index], &result.path);
-            let response = ui.action_row(
+            let checked = match entry.command {
+                Action::ToggleContactPartner(id) => Some(app.chat.contact_selected(id)),
+                _ => None,
+            };
+            let detail = if checked == Some(false) && !app.chat.contact_capacity() {
+                "Conversation is full"
+            } else {
+                &entry.detail
+            };
+            let response = ui.action_row_with_checkbox(
                 gpu,
                 &format!("quickshell:{}", entry.id),
                 ActionRow {
                     title: &result.title,
-                    detail: &entry.detail,
+                    detail,
                     icon: entry.icon(),
                     selected: rank == self.selected,
                     badge: None,
                 },
+                checked,
             )?;
             if response.hovered && mouse_moved && self.selected != rank {
                 self.selected = rank;
@@ -842,6 +853,59 @@ impl Shell {
 #[cfg(test)]
 mod ranking_tests {
     use super::*;
+
+    #[test]
+    fn profile_deletion_ranks_below_navigation_for_a_name_only() {
+        let profile = Profile {
+            alias: "luca".into(),
+            path: "luca".into(),
+        };
+        let id = faith_client::Id([1; 16]);
+        let mut conversations = Entry::conversation(&profile, id, "Open conversation");
+        conversations.id = "profile-conversations".into();
+        conversations.command = Action::None;
+        conversations.children = Some(vec![Entry::conversation(&profile, id, "Simon")]);
+
+        let mut delete_profile = Entry::profile(&profile);
+        delete_profile.id = "delete-profile:luca".into();
+        delete_profile.label = profile.alias.clone();
+        delete_profile.command = Action::ConfirmDeleteProfile(profile.clone());
+        let mut delete_profiles = Entry::profile(&profile);
+        delete_profiles.id = "delete-profile".into();
+        delete_profiles.label = "Delete a profile".into();
+        delete_profiles.primary = rank::Text::new("delete profile");
+        delete_profiles.terms.clear();
+        delete_profiles.command = Action::None;
+        delete_profiles.children = Some(vec![delete_profile]);
+
+        let mut shell = Shell {
+            entries: vec![delete_profiles, Entry::profile(&profile), conversations],
+            context: Some(Context {
+                kind: Kind::Profile,
+                profile: Some(profile.path.clone()),
+            }),
+            ..Default::default()
+        };
+
+        shell.search("luca");
+        assert_eq!(
+            shell
+                .results
+                .iter()
+                .map(|result| result.index)
+                .collect::<Vec<_>>(),
+            [1, 2, 0]
+        );
+        assert_eq!(shell.results[2].path, [0]);
+
+        shell.search("delete luca");
+        assert_eq!(shell.results[0].index, 0);
+        assert_eq!(shell.results[0].path, [0]);
+
+        shell.search("delete profile");
+        assert_eq!(shell.results[0].index, 0);
+        assert!(shell.results[0].path.is_empty());
+    }
 
     #[test]
     fn conversation_title_beats_a_profile_with_the_same_name() {

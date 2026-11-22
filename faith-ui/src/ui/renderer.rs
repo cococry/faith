@@ -213,6 +213,15 @@ impl UIRenderer {
         (self.atlas_instances.len(), self.dedicated_instances.len())
     }
 
+    pub(crate) fn scale_text_since(&mut self, start: usize, center: [f32; 2], scale: f32) {
+        for glyph in &mut self.atlas_instances[start..] {
+            glyph.rect[0] = center[0] + (glyph.rect[0] - center[0]) * scale;
+            glyph.rect[1] = center[1] + (glyph.rect[1] - center[1]) * scale;
+            glyph.rect[2] *= scale;
+            glyph.rect[3] *= scale;
+        }
+    }
+
     /* deferred boxes need the same fade as the text and images around them */
     pub(crate) fn fade_since(&mut self, mark: (usize, usize), opacity: f32) {
         if opacity >= 1.0 {

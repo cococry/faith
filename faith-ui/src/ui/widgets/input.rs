@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use crate::{
-    graphics::{FontHandle, GraphicsDevice},
+    graphics::{Color, FontHandle, GraphicsDevice},
     platform::event::{Key, WindowEvent},
     ui::{TextRenderer, UIRenderer},
 };
@@ -28,6 +28,12 @@ pub struct InputResponse {
 pub struct InputOptions {
     pub max_chars: Option<usize>,
     pub filter: Option<fn(char) -> bool>,
+}
+
+pub struct InputPaint {
+    pub padding: f32,
+    pub caret: Color,
+    pub selection: Color,
 }
 
 /// A single-line, UTF-8 input widget. Editing is grapheme-aware; platform text
@@ -276,34 +282,35 @@ impl InputField {
     pub fn render<G: GraphicsDevice>(
         &mut self,
         bounds: Bounds,
-        style: super::super::framework::Style,
+        paint: InputPaint,
         font: FontHandle,
         text: &mut TextRenderer,
         gpu: &mut G,
         ui: &mut UIRenderer,
     ) -> anyhow::Result<()> {
-        let available = (bounds.width - style.padding * 2.0).max(0.0);
+        let available = (bounds.width - paint.padding * 2.0).max(0.0);
         let caret_width = 1.5_f32.min(available);
         let caret = text.caret_x(&self.text, font, self.cursor)?;
         self.scroll_x = scroll_to_caret(self.scroll_x, caret, (available - caret_width).max(0.0));
-        let x = bounds.x + style.padding;
-        let y = bounds.y + style.padding;
-        let height = (bounds.height - style.padding * 2.0).max(0.0);
+        let x = bounds.x + paint.padding;
+        let y = bounds.y + paint.padding;
+        let height = (bounds.height - paint.padding * 2.0).max(0.0);
         ui.push_clip([x, y, available, height]);
         let result = (|| -> anyhow::Result<()> {
             if self.focused && self.selected {
-                ui.quad(
-                    [x - self.scroll_x, y, caret, height],
-                    style.border_color.unwrap_or(style.color),
-                )?;
+                ui.quad([x - self.scroll_x, y, caret, height], paint.selection)?;
             }
 
-            text.render(x - self.scroll_x, y, &self.text, font, gpu, ui)?;
+            if !self.text.is_empty() {
+                let text_height = text.measure(&self.text, font)?.height;
+                let text_y = y + (height - text_height).max(0.0) * 0.5;
+                text.render(x - self.scroll_x, text_y, &self.text, font, gpu, ui)?;
+            }
 
             if self.caret_visible {
                 ui.quad(
                     [x + caret - self.scroll_x, y, caret_width, height],
-                    style.color,
+                    paint.caret,
                 )?;
             }
 

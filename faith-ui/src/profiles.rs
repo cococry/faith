@@ -1,6 +1,6 @@
 use std::{
-    fs,
-    os::unix::fs::{DirBuilderExt, MetadataExt},
+    fs::{self, OpenOptions},
+    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
 };
 
@@ -95,6 +95,42 @@ pub fn create(root: &Path, alias: &str) -> anyhow::Result<Profile> {
     })
 }
 
+pub fn delete(root: &Path, profile: &Profile) -> anyhow::Result<Option<std::io::Error>> {
+    anyhow::ensure!(
+        profile.path.parent() == Some(root),
+        "Profile is outside the profiles directory"
+    );
+    let metadata = fs::symlink_metadata(&profile.path)?;
+    anyhow::ensure!(
+        metadata.is_dir() && metadata.uid() == unsafe { nix::libc::geteuid() },
+        "Profile must be an owned directory"
+    );
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK | nix::libc::O_CLOEXEC)
+        .open(profile.path.join("profile.lock"))?;
+    let metadata = lock.metadata()?;
+    anyhow::ensure!(
+        metadata.is_file() && metadata.uid() == unsafe { nix::libc::geteuid() },
+        "Profile lock must be an owned regular file"
+    );
+    lock.try_lock()
+        .map_err(|_| anyhow::anyhow!("Profile is open in another Faith session"))?;
+
+    let staging = root.join(format!(".deleted-{}", faith_client::Id::random()?));
+    fs::DirBuilder::new().mode(0o700).create(&staging)?;
+    if let Err(error) = fs::rename(&profile.path, staging.join("profile")) {
+        let _ = fs::remove_dir(&staging);
+        return Err(error.into());
+    }
+
+    Ok(fs::remove_dir_all(staging).err())
+}
+
 pub const USERNAME_MAX: usize = 20;
 pub const USERNAME_ERROR: &str = "Use 1–20 ASCII letters, digits 1–9, or underscores.";
 
@@ -163,6 +199,33 @@ pub fn prepare_claim(root: &Path, alias: &str) -> anyhow::Result<Profile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deletion_respects_profile_locks_and_leaves_other_profiles() -> anyhow::Result<()> {
+        let root =
+            std::env::temp_dir().join(format!("faith-delete-{}", faith_client::Id::random()?));
+        fs::DirBuilder::new().mode(0o700).create(&root)?;
+        let result = (|| -> anyhow::Result<()> {
+            let home = create(&root, "Home")?;
+            let work = create(&root, "Work")?;
+            fs::write(home.path.join("identity.bin"), b"identity")?;
+            let lock = fs::File::create(home.path.join("profile.lock"))?;
+            lock.try_lock()?;
+            assert!(delete(&root, &home).is_err());
+            assert!(home.path.join("identity.bin").is_file());
+            drop(lock);
+
+            assert!(delete(&root, &home)?.is_none());
+            assert!(!home.path.exists());
+            assert!(work.path.is_dir());
+            assert_eq!(fs::read_dir(&root)?.count(), 1);
+            Ok(())
+        })();
+        let cleanup = fs::remove_dir_all(&root);
+        result?;
+        cleanup?;
+        Ok(())
+    }
 
     #[test]
     fn username_character_rules_match_the_protocol() {

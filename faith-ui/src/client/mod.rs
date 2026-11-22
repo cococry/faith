@@ -20,9 +20,11 @@ use std::{
 };
 
 use store::Store;
-pub use store::conversation_titles;
+pub use store::{legacy_aliases, profile_conversations, profile_usernames};
 
 // These values are defined by the Faith wire protocol.
+pub const CONVERSATION_NAME_MAX: usize = 20;
+
 const REQUEST_EVENT: u32 = 2;
 const RESPONSE_EVENT: u32 = 3;
 const USERNAMES_EVENT: u32 = 4;
@@ -43,6 +45,7 @@ pub struct Request {
 pub struct PendingInvite {
     pub conversation: Id,
     pub title: String,
+    pub title_members: Option<Arc<[Id]>>,
     pub recipient: Id,
     pub recipient_name: String,
     pub accepted: Option<bool>,
@@ -53,6 +56,8 @@ struct Metadata {
     title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     title_from: Option<[u8; 16]>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    automatic_title: bool,
     partners: Vec<([u8; 16], String)>,
 }
 
@@ -60,9 +65,21 @@ struct Metadata {
 pub struct Chat {
     pub id: Id,
     pub title: String,
-    pub needs_name: bool,
     pub last: String,
-    metadata: Option<Metadata>,
+    pub members: Vec<Id>,
+    pub own_auth: Option<Id>,
+    pub name_members: bool,
+}
+
+impl Chat {
+    pub fn direct_partner(&self) -> Option<Id> {
+        let own = self.own_auth?;
+        match self.members.as_slice() {
+            [first, second] if *first == own => Some(*second),
+            [first, second] if *second == own => Some(*first),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -70,7 +87,6 @@ pub struct Message {
     pub row_id: i64,
     pub sender: Id,
     pub author: String,
-    pub has_name: bool,
     pub body: String,
 }
 
@@ -86,16 +102,11 @@ pub enum Command {
         id: Id,
         title: String,
     },
-    NameSender {
-        id: Id,
-        sender: Id,
-        name: String,
-    },
     Create {
         title: String,
-        partners: Vec<(Id, String)>,
+        partners: Vec<Id>,
         policy: InvitationPolicy,
-        use_disclosed_title: bool,
+        automatic_title: bool,
     },
     Send {
         id: Id,
@@ -123,6 +134,7 @@ pub struct Snapshot {
     pub selected: Option<Id>,
     pub conversations: Arc<[Chat]>,
     pub messages: Arc<[Message]>,
+    pub disclosed: Arc<[(Id, String)]>,
     pub notices: Arc<[String]>,
     pub requests: Arc<[Request]>,
     pub pending_invites: Arc<[PendingInvite]>,
@@ -217,7 +229,9 @@ impl Session {
                     )?;
                     let (auth, _) = client.identity()?;
                     store.remember_auth(auth)?;
+                    let disclosed = store.usernames()?.into();
                     let mut state = Worker {
+                        disclosed,
                         client,
                         store,
                         auth,
@@ -292,6 +306,19 @@ impl Session {
         Ok(id)
     }
 
+    pub fn wait_for_close(path: &std::path::Path) -> anyhow::Result<()> {
+        let path = std::path::absolute(path)?;
+        let worker = retiring_sessions()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&path);
+        if let Some(worker) = worker {
+            let _ = worker.join();
+        }
+
+        Ok(())
+    }
+
     pub fn snapshot_since(&self, generation: u64) -> Option<Snapshot> {
         let snapshot = self.snapshot.lock().unwrap_or_else(|e| e.into_inner());
         (snapshot.generation != generation).then(|| snapshot.clone())
@@ -325,6 +352,7 @@ struct Inflight {
 }
 
 struct Worker {
+    disclosed: Arc<[(Id, String)]>,
     client: Client,
     store: Arc<Store>,
     auth: Id,
@@ -377,6 +405,7 @@ impl Worker {
             selected: self.selected,
             conversations: conversations.into(),
             messages: messages.into(),
+            disclosed: self.disclosed.clone(),
             notices: self.notices.iter().cloned().collect(),
             requests: self.store.requests()?.into(),
             pending_invites: self.store.pending_invites(self.auth)?.into(),
@@ -477,7 +506,7 @@ impl Worker {
                 title,
                 partners,
                 policy,
-                use_disclosed_title,
+                automatic_title,
             } => {
                 let not_accepted = self
                     .store
@@ -500,20 +529,14 @@ impl Worker {
                 );
                 let mut members = vec![self.auth];
 
-                for (id, _) in &partners {
+                for id in partners {
                     anyhow::ensure!(
-                        !members.contains(id),
+                        !members.contains(&id),
                         "Each partner needs a different Auth ID, excluding your own"
                     );
-                    members.push(*id);
+                    members.push(id);
                 }
 
-                let title_from = match partners.as_slice() {
-                    [(id, name)] if use_disclosed_title && !policy.required && name.is_empty() => {
-                        Some(id.0)
-                    }
-                    _ => None,
-                };
                 let conversation = Id::random()?;
                 let packet = GroupPacket {
                     kind: GroupKind::Create,
@@ -527,13 +550,14 @@ impl Worker {
                     packet,
                     members,
                     Some(&Metadata {
-                        title,
-                        title_from,
-                        partners: partners
-                            .into_iter()
-                            .filter(|(_, name)| !name.is_empty())
-                            .map(|(id, name)| (id.0, name))
-                            .collect(),
+                        title: if automatic_title {
+                            String::new()
+                        } else {
+                            title
+                        },
+                        title_from: None,
+                        automatic_title,
+                        partners: Vec::new(),
                     }),
                     Some(policy),
                 )?;
@@ -542,19 +566,7 @@ impl Worker {
             }
 
             Command::Rename { id, title } => {
-                anyhow::ensure!(!title.trim().is_empty(), "Enter a conversation name");
-                self.store.rename(id, self.auth, title)?;
-            }
-
-            Command::NameSender { id, sender, name } => {
-                anyhow::ensure!(sender != self.auth, "Choose another sender");
-                anyhow::ensure!(
-                    !name.trim().is_empty()
-                        && name.chars().count() <= 20
-                        && !name.chars().any(char::is_control),
-                    "Use 1–20 characters for the local name"
-                );
-                self.store.name_sender(id, sender, name.trim())?;
+                self.store.rename(id, &title)?;
             }
 
             Command::Send { id, body } => {
@@ -781,6 +793,10 @@ impl Worker {
                         if self.auth_error.is_none() {
                             self.status = "Disconnected; awaiting reconnect".into();
                         }
+                    }
+
+                    EventKind::ConversationUsernames | EventKind::ConversationRequest => {
+                        self.disclosed = self.store.usernames()?.into();
                     }
 
                     EventKind::ConversationResponse => {
