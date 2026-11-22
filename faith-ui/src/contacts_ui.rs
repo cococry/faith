@@ -3,7 +3,9 @@ use faith_client::Id;
 use crate::{
     ACCOUNTS, ADD, Action, App, Font, Framework, GROUP, Profile, Renderer, Style,
     contacts::{DELETE, EDIT, NAME_MAX},
-    icon, label, list_header, row_button,
+    label, list_header,
+    platform::{WindowEvent, event::Key},
+    row_button,
     ui::{
         framework::{ActionRow, DivOptions},
         widgets::input::InputOptions,
@@ -110,29 +112,49 @@ pub fn page(
     )?;
 
     if let Some(contact) = contact {
+        let header_y = ui.position().1;
         ui.push_style(Style {
             font_size: 52,
             ..ui.style()
         });
         ui.text(gpu, ACCOUNTS, Some(Font::Icons))?;
         ui.pop_style();
+
+        if app.contact_mode == Mode::View {
+            let width = ui.div_width();
+            for (offset, id, glyph, tooltip, command) in [
+                (
+                    88.0,
+                    "edit-contact",
+                    EDIT,
+                    "Edit local name",
+                    Action::EditContact(contact.id),
+                ),
+                (
+                    40.0,
+                    "delete-contact",
+                    DELETE,
+                    "Delete contact",
+                    Action::ConfirmDeleteContact(contact.id),
+                ),
+            ] {
+                ui.set_position((width - offset).max(0.0), header_y);
+                if header_icon(ui, gpu, id, glyph, tooltip)? {
+                    action = command;
+                }
+            }
+        }
+
         ui.space(10.0);
-        label(ui, gpu, &contact.display, 26, true, false, false)?;
+        if app.contact_mode == Mode::Edit {
+            action = edit_title(ui, gpu, contact.id)?;
+        } else {
+            label(ui, gpu, &contact.display, 26, true, false, false)?;
+        }
+
         ui.space(6.0);
         label(ui, gpu, &contact.auth, 14, false, true, false)?;
         ui.space(12.0);
-
-        if app.contact_mode == Mode::View {
-            let (x, y) = ui.position();
-            if icon(ui, gpu, "edit-contact", EDIT, false, "Edit local name")? {
-                action = Action::EditContact(contact.id);
-            }
-
-            ui.set_position(x + 48.0, y);
-            if icon(ui, gpu, "delete-contact", DELETE, false, "Delete contact")? {
-                action = Action::ConfirmDeleteContact(contact.id);
-            }
-        }
     } else if app.contact_mode == Mode::Add {
         label(ui, gpu, "Add contact", 26, true, false, false)?;
         ui.space(16.0);
@@ -154,27 +176,24 @@ pub fn page(
         )?;
     }
 
-    if matches!(app.contact_mode, Mode::Add | Mode::Edit) {
-        let id = if app.contact_mode == Mode::Add {
-            label(ui, gpu, "Auth ID", 14, true, false, false)?;
-            ui.space(6.0);
-            let auth = ui.input_with_hint(
-                gpu,
-                "contact-auth",
-                InputOptions {
-                    max_chars: Some(32),
-                    filter: Some(|c| c.is_ascii_hexdigit()),
-                    ..Default::default()
-                },
-                "32-character Auth ID",
-            )?;
-            ui.space(12.0);
-            auth.parse::<Id>()
-                .ok()
-                .filter(|id| app.contacts.get(*id).is_none())
-        } else {
-            selected
-        };
+    if app.contact_mode == Mode::Add {
+        label(ui, gpu, "Auth ID", 14, true, false, false)?;
+        ui.space(6.0);
+        let auth = ui.input_with_hint(
+            gpu,
+            "contact-auth",
+            InputOptions {
+                max_chars: Some(32),
+                filter: Some(|c| c.is_ascii_hexdigit()),
+                ..Default::default()
+            },
+            "32-character Auth ID",
+        )?;
+        ui.space(12.0);
+        let id = auth
+            .parse::<Id>()
+            .ok()
+            .filter(|id| app.contacts.get(*id).is_none());
 
         label(ui, gpu, "Local name", 14, true, false, false)?;
         ui.space(6.0);
@@ -280,4 +299,83 @@ pub fn page(
 
     ui.div_end();
     Ok(action)
+}
+
+fn header_icon(
+    ui: &mut Framework,
+    gpu: &mut Renderer,
+    id: &str,
+    glyph: &str,
+    tooltip: &'static str,
+) -> anyhow::Result<bool> {
+    ui.push_style(Style {
+        tooltip: Some(tooltip),
+        font_size: 20,
+        padding: 4.0,
+        radius: ui.corner_radii().icon,
+        color: ui.theme().text,
+        background: None,
+        ..ui.style()
+    });
+    ui.push_sizing(Some(40.0), Some(40.0));
+    let clicked = ui.icon_button(gpu, id, glyph);
+    ui.pop_sizing();
+    ui.pop_style();
+    clicked
+}
+
+fn edit_title(ui: &mut Framework, gpu: &mut Renderer, id: Id) -> anyhow::Result<Action> {
+    let width = ui.div_width();
+    let y = ui.position().1;
+    ui.push_style(Style {
+        font_size: 26,
+        padding: 0.0,
+        color: ui.theme().text,
+        background: None,
+        border_color: None,
+        ..ui.style()
+    });
+    ui.push_sizing(Some((width - 96.0).max(1.0)), Some(40.0));
+    let name = ui.input_with_font(
+        gpu,
+        "contact-name",
+        InputOptions {
+            max_chars: Some(NAME_MAX),
+            filter: Some(|c| !c.is_control()),
+        },
+        "Nickname",
+        Font::Bold,
+    );
+    ui.pop_sizing();
+    ui.pop_style();
+    let name = name?;
+
+    ui.set_position((width - 88.0).max(0.0), y);
+    let cancel = header_icon(
+        ui,
+        gpu,
+        "cancel-nickname",
+        "\u{ea76}",
+        "Cancel nickname edit",
+    )?;
+    ui.set_position((width - 40.0).max(0.0), y);
+    let save = header_icon(ui, gpu, "save-nickname", "\u{eab2}", "Save nickname")?;
+
+    if cancel
+        || ui.events().iter().any(|event| {
+            matches!(
+                event,
+                WindowEvent::KeyPressed {
+                    key: Key::Escape,
+                    ..
+                }
+            )
+        })
+    {
+        Ok(Action::CancelContactEdit)
+    } else if save || ui.input_submitted("contact-name") {
+        Ok(Action::SaveContact(id, name))
+    } else {
+        Ok(Action::None)
+    }
 }

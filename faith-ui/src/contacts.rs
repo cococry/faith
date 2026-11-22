@@ -119,6 +119,14 @@ impl Book {
         self.reload()
     }
 
+    pub fn remove_nickname(&mut self, id: Id) -> anyhow::Result<()> {
+        let updated = self
+            .db
+            .execute("UPDATE contacts SET alias='' WHERE auth=?", [id.0])?;
+        anyhow::ensure!(updated != 0, "Contact is unavailable");
+        self.reload()
+    }
+
     pub fn delete(&mut self, id: Id) -> anyhow::Result<()> {
         let tx = self.db.transaction()?;
         tx.execute("INSERT OR IGNORE INTO deleted_contacts VALUES(?)", [id.0])?;
@@ -138,10 +146,12 @@ impl Book {
 
     pub fn apply_usernames(&mut self, usernames: &HashMap<Id, String>) {
         for contact in &mut self.entries {
-            contact.display = usernames.get(&contact.id).map_or_else(
-                || contact.name.clone(),
-                |username| format!("{} ({username})", contact.name),
-            );
+            contact.display = match (contact.name.is_empty(), usernames.get(&contact.id)) {
+                (true, Some(username)) => username.clone(),
+                (true, None) => contact.auth.clone(),
+                (false, Some(username)) => format!("{} ({username})", contact.name),
+                (false, None) => contact.name.clone(),
+            };
         }
     }
 
@@ -153,10 +163,16 @@ impl Book {
             .query_map([], |row| {
                 let id = Id(row.get(0)?);
                 let name: String = row.get(1)?;
+                let auth = id.to_string();
+                let display = if name.is_empty() {
+                    auth.clone()
+                } else {
+                    name.clone()
+                };
                 Ok(Contact {
                     id,
-                    auth: id.to_string(),
-                    display: name.clone(),
+                    auth,
+                    display,
                     name,
                 })
             })?
@@ -212,6 +228,10 @@ mod tests {
             book.save(&[(bob, "Robert".into())])?;
             book.apply_usernames(&HashMap::from([(bob, "bobthekiller69".into())]));
             assert_eq!(book.display(bob, ""), "Robert (bobthekiller69)");
+            book.remove_nickname(other)?;
+            assert_eq!(book.display(other, ""), other.to_string());
+            book.apply_usernames(&HashMap::from([(other, "charlie".into())]));
+            assert_eq!(book.display(other, ""), "charlie");
             book.delete(alice)?;
             drop(book);
 
@@ -222,6 +242,8 @@ mod tests {
             assert_eq!(reopened.entries.len(), 2);
             assert_eq!(reopened.get(bob).unwrap().name, "Robert");
             assert!(reopened.get(alice).is_none());
+            assert!(reopened.get(other).unwrap().name.is_empty());
+            assert_eq!(reopened.display(other, ""), other.to_string());
             Ok(())
         })();
         let cleanup = fs::remove_dir_all(&root);

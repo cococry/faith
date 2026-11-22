@@ -913,14 +913,21 @@ impl App {
             }
 
             Action::CancelContactEdit => {
+                ui.clear_input("contact-name");
                 self.contact_mode = contacts_ui::Mode::View;
                 self.error.clear();
             }
 
             Action::SaveContact(id, name) => {
-                self.contacts.save(&[(id, name)])?;
+                if self.contact_mode == contacts_ui::Mode::Edit && name.trim().is_empty() {
+                    self.contacts.remove_nickname(id)?;
+                } else {
+                    self.contacts.save(&[(id, name)])?;
+                }
+
                 self.page = Page::Contacts(Some(id));
                 self.sync_contact_names();
+                ui.clear_input("contact-name");
                 self.contact_mode = contacts_ui::Mode::View;
                 self.error.clear();
             }

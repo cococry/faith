@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use crate::{
-    graphics::{FontHandle, GraphicsDevice},
+    graphics::{Color, FontHandle, GraphicsDevice},
     platform::event::{Key, WindowEvent},
     ui::{TextRenderer, UIRenderer},
 };
@@ -277,6 +277,7 @@ impl InputField {
         &mut self,
         bounds: Bounds,
         style: super::super::framework::Style,
+        selection_color: Color,
         font: FontHandle,
         text: &mut TextRenderer,
         gpu: &mut G,
@@ -292,10 +293,7 @@ impl InputField {
         ui.push_clip([x, y, available, height]);
         let result = (|| -> anyhow::Result<()> {
             if self.focused && self.selected {
-                ui.quad(
-                    [x - self.scroll_x, y, caret, height],
-                    style.border_color.unwrap_or(style.color),
-                )?;
+                ui.quad([x - self.scroll_x, y, caret, height], selection_color)?;
             }
 
             text.render(x - self.scroll_x, y, &self.text, font, gpu, ui)?;

@@ -3209,7 +3209,18 @@ impl Framework {
         options: InputOptions,
         hint: &str,
     ) -> anyhow::Result<String> {
-        let font = self.font(Font::Regular)?;
+        self.input_with_font(gpu, id, options, hint, Font::Regular)
+    }
+
+    pub fn input_with_font<G: GraphicsDevice>(
+        &mut self,
+        gpu: &mut G,
+        id: &str,
+        options: InputOptions,
+        hint: &str,
+        font: Font,
+    ) -> anyhow::Result<String> {
+        let font = self.font(font)?;
         let s = self.style();
         let b = self.place_named(
             if self.divs.last().is_some_and(|div| div.width.is_none()) {
@@ -3290,6 +3301,7 @@ impl Framework {
         let result = field.render(
             b,
             s,
+            s.border_color.unwrap_or(self.theme.border),
             font,
             &mut self.text_renderer,
             gpu,
