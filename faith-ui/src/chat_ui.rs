@@ -10,6 +10,8 @@ use crate::{
     },
 };
 
+pub const RENAME_INPUT: &str = "conversation-name";
+
 pub enum Submission {
     Create,
     Send(String),
@@ -20,6 +22,7 @@ pub struct State {
     pub submission: Option<(u64, Submission)>,
     pub partners: Vec<(Id, String)>,
     pub naming: bool,
+    pub renaming: Option<Id>,
     pub require_username: bool,
     pub disclose_username: Option<bool>,
     pub request_disclosure: HashMap<Id, bool>,
@@ -36,6 +39,7 @@ impl Default for State {
             submission: None,
             partners: Vec::new(),
             naming: false,
+            renaming: None,
             require_username: false,
             disclose_username: None,
             request_disclosure: HashMap::new(),
@@ -1117,6 +1121,7 @@ pub fn conversation(
         width: Some(inner_width),
         ..Default::default()
     })?;
+    let (x, y) = ui.position();
     label(
         ui,
         gpu,
@@ -1126,6 +1131,15 @@ pub fn conversation(
         false,
         false,
     )?;
+    if let Some(at) = ui.context_press([x, y, inner_width, ui.position().1 - y]) {
+        action = Action::OpenRowMenu(
+            crate::RowMenu::Conversation {
+                profile: profile.clone(),
+                id: chat.id,
+            },
+            at,
+        );
+    }
 
     if !snapshot.status.is_empty()
         && (!snapshot.authorized || snapshot.pending || snapshot.delivering)

@@ -14,7 +14,7 @@ mod ui;
 
 use clap::{CommandFactory, FromArgMatches};
 use graphics::{GraphicsDevice, Renderer};
-use platform::{Platform, WindowConfig, WindowEvent, mouse::CursorPosition};
+use platform::{Platform, WindowConfig, WindowEvent, event::Key, mouse::CursorPosition};
 use profiles::Profile;
 use ui::{
     framework::{DivOptions, Font, Fonts, Framework, Style},
@@ -85,6 +85,10 @@ struct Location {
 enum RowMenu {
     Profile(Profile),
     Contact(faith_client::Id),
+    Conversation {
+        profile: Profile,
+        id: faith_client::Id,
+    },
 }
 
 enum PopupMenu {
@@ -162,7 +166,7 @@ enum Action {
     FocusChatPartner,
     NameNewConversation(Option<(faith_client::Id, String)>),
     EditChatPartners,
-    PromptConversationName {
+    BeginConversationRename {
         profile: Profile,
         id: faith_client::Id,
     },
@@ -177,10 +181,10 @@ enum Action {
         sender: faith_client::Id,
         name: String,
     },
+    CancelConversationRename,
     RenameConversation {
         profile: Profile,
         id: faith_client::Id,
-        title: String,
     },
     RemoveChatPartner(usize),
     CancelConversation,
@@ -810,11 +814,13 @@ impl App {
 
         // Apply the action after the current frame has finished.
         let previous = self.location();
+        let begin_rename = matches!(action, Action::BeginConversationRename { .. });
         let focus_requested = matches!(
             action,
             Action::New
                 | Action::AddContact
                 | Action::EditContact(_)
+                | Action::BeginConversationRename { .. }
                 | Action::ProfileUsername(_)
                 | Action::NewConversation(_)
                 | Action::OpenSettings {
@@ -833,6 +839,7 @@ impl App {
                 | Action::ProfileUsername(_)
                 | Action::OpenProfile(_)
                 | Action::OpenConversation { .. }
+                | Action::BeginConversationRename { .. }
                 | Action::MessageRequests(_)
                 | Action::PendingInvites(_)
                 | Action::NewConversation(_)
@@ -852,7 +859,6 @@ impl App {
             | Action::OpenQuickshell
             | Action::OpenContactPicker
             | Action::Quit
-            | Action::PromptConversationName { .. }
             | Action::PromptSenderName { .. } => {
                 return Ok(());
             }
@@ -1084,9 +1090,63 @@ impl App {
                 ui.focus_input(&self.chat.partner_id());
             }
 
-            Action::RenameConversation { profile, id, title } => {
-                self.ensure_profile(profile, cli, platform)?;
+            Action::BeginConversationRename { profile, id } => {
+                anyhow::ensure!(
+                    self.selected
+                        .as_ref()
+                        .is_some_and(|active| active.path == profile.path),
+                    "Conversation profile is unavailable"
+                );
+                let chat = self
+                    .chat
+                    .snapshot
+                    .conversations
+                    .iter()
+                    .find(|chat| chat.id == id)
+                    .ok_or_else(|| anyhow::anyhow!("Conversation is unavailable"))?;
+                let title: String = self
+                    .conversation_title(chat)
+                    .chars()
+                    .take(client::CONVERSATION_NAME_MAX)
+                    .collect();
+                if !self.page.is_chat() {
+                    self.page = Page::Conversations;
+                    self.conversation = None;
+                    self.list_offset = 0;
+                }
+
+                self.chat.renaming = Some(id);
+                self.error.clear();
+                ui.clear_input(chat_ui::RENAME_INPUT);
+                ui.set_input(chat_ui::RENAME_INPUT, &title);
+            }
+
+            Action::CancelConversationRename => {
+                self.chat.renaming = None;
+                ui.clear_input(chat_ui::RENAME_INPUT);
+            }
+
+            Action::RenameConversation { profile, id } => {
+                anyhow::ensure!(
+                    self.page.is_chat()
+                        && self.chat.renaming == Some(id)
+                        && self
+                            .selected
+                            .as_ref()
+                            .is_some_and(|active| active.path == profile.path),
+                    "Conversation is unavailable"
+                );
+                let title = ui
+                    .input_value(chat_ui::RENAME_INPUT)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned();
+                anyhow::ensure!(!title.is_empty(), "Enter a conversation name");
+
                 self.submit_chat(client::Command::Rename { id, title })?;
+                self.chat.renaming = None;
+                self.error.clear();
+                ui.clear_input(chat_ui::RENAME_INPUT);
             }
 
             Action::NameSender {
@@ -1397,6 +1457,11 @@ impl App {
             },
         }
 
+        if self.chat.renaming.is_some() && !begin_rename && self.location() != previous {
+            self.chat.renaming = None;
+            ui.clear_input(chat_ui::RENAME_INPUT);
+        }
+
         if (self.location() != previous || record_history) && !focus_requested {
             if self.page == Page::Create {
                 ui.focus_control("new-profile-handle", true);
@@ -1530,6 +1595,119 @@ fn icon(
     ui.pop_sizing();
     ui.pop_style();
     result
+}
+
+fn header_icon(
+    ui: &mut Framework,
+    gpu: &mut Renderer,
+    id: &str,
+    glyph: &str,
+    tooltip: &'static str,
+    size: f32,
+) -> anyhow::Result<bool> {
+    ui.push_style(Style {
+        tooltip: Some(tooltip),
+        font_size: ((size * 0.5) as u32).max(14),
+        padding: 4.0,
+        radius: ui.corner_radii().icon,
+        color: ui.theme().text,
+        background: None,
+        ..ui.style()
+    });
+    ui.push_sizing(Some(size), Some(size));
+    let clicked = ui.icon_button(gpu, id, glyph);
+    ui.pop_sizing();
+    ui.pop_style();
+    clicked
+}
+
+enum TitleEdit {
+    None,
+    Cancel,
+    Submit(String),
+}
+
+const INLINE_TITLE_MIN_HEIGHT: f32 = 26.0;
+
+fn inline_title_editor(
+    ui: &mut Framework,
+    gpu: &mut Renderer,
+    id: &str,
+    hint: &str,
+    typography: (Font, u32),
+    max_chars: usize,
+    allow_empty: bool,
+) -> anyhow::Result<TitleEdit> {
+    let (font, font_size) = typography;
+    let button = (font_size as f32 * 1.5 + 1.0).max(INLINE_TITLE_MIN_HEIGHT);
+    let width = ui.div_width();
+    let y = ui.position().1;
+    ui.push_style(Style {
+        font_size,
+        padding: 0.0,
+        color: ui.theme().text,
+        background: None,
+        border_color: None,
+        ..ui.style()
+    });
+    ui.push_sizing(Some((width - button * 2.0 - 16.0).max(1.0)), Some(button));
+    let name = ui.input_with_font(
+        gpu,
+        id,
+        InputOptions {
+            max_chars: Some(max_chars),
+            filter: Some(|c| !c.is_control()),
+        },
+        hint,
+        font,
+    );
+    ui.pop_sizing();
+    ui.pop_style();
+    let name = name?;
+
+    ui.set_position((width - button * 2.0 - 8.0).max(0.0), y);
+    let cancel = header_icon(
+        ui,
+        gpu,
+        "cancel-inline-title",
+        "\u{ea76}",
+        "Cancel edit",
+        button,
+    )?;
+    ui.set_position((width - button).max(0.0), y);
+    let can_save = allow_empty || !name.trim().is_empty();
+    ui.push_style(Style {
+        enabled: can_save,
+        ..ui.style()
+    });
+    let save = header_icon(
+        ui,
+        gpu,
+        "save-inline-title",
+        "\u{eab2}",
+        "Save name",
+        button,
+    );
+    ui.pop_style();
+    let save = save?;
+
+    if cancel
+        || ui.events().iter().any(|event| {
+            matches!(
+                event,
+                WindowEvent::KeyPressed {
+                    key: Key::Escape,
+                    ..
+                }
+            )
+        })
+    {
+        Ok(TitleEdit::Cancel)
+    } else if can_save && (save || ui.input_submitted(id)) {
+        Ok(TitleEdit::Submit(name))
+    } else {
+        Ok(TitleEdit::None)
+    }
 }
 
 // Full-width button with an icon and an optional selected badge.
@@ -1908,9 +2086,17 @@ fn item_list(
 
     // Fit as many rows as the current window height allows.
     let per_page = ((height - list_top - 156.0) / 58.0).floor().max(1.0) as usize;
-    let offset = app
+    let mut offset = app
         .list_offset
         .min(count.saturating_sub(1) / per_page * per_page);
+    if chats
+        && let Some(id) = app.chat.renaming
+        && let Some(index) = snapshot.conversations.iter().position(|chat| chat.id == id)
+        && !(offset..offset + per_page).contains(&index)
+    {
+        offset = index / per_page * per_page;
+    }
+
     panel_named(
         ui,
         Some(if chats {
@@ -1973,47 +2159,69 @@ fn item_list(
             if chats {
                 let chat = &snapshot.conversations[index];
                 let id = chat.id;
-                let row_y = ui.position().1;
-                let row_width = ui.div_width();
-                if chat.needs_name {
-                    ui.push_sizing(Some((row_width - 40.0).max(1.0)), None);
-                }
-
-                if let Some(profile) = &app.selected
-                    && ui
-                        .action_row(
-                            gpu,
-                            &format!("conversation-{id}"),
-                            ui::framework::ActionRow {
-                                title: &app.conversation_title(chat),
-                                detail: &chat.last,
-                                icon: GROUP,
-                                selected: app.conversation == Some(id)
-                                    && app.page == Page::Conversations,
-                                badge: None,
-                            },
-                        )?
-                        .clicked
-                {
-                    action = Action::OpenConversation {
-                        profile: profile.clone(),
-                        id,
+                let (x, y) = ui.position();
+                if let Some(profile) = &app.selected {
+                    let editing = app.chat.renaming == Some(id);
+                    let title = if editing {
+                        std::borrow::Cow::Borrowed("")
+                    } else {
+                        app.conversation_title(chat)
                     };
-                }
-                if chat.needs_name {
-                    ui.pop_sizing();
-                    ui.set_position((row_width - 40.0).max(0.0), row_y + 8.0);
-                    if let Some(profile) = &app.selected
-                        && icon(
+                    ui.push_style(Style {
+                        enabled: !editing,
+                        ..ui.style()
+                    });
+                    let row = ui.action_row(
+                        gpu,
+                        &format!("conversation-{id}"),
+                        ui::framework::ActionRow {
+                            title: &title,
+                            detail: &chat.last,
+                            icon: GROUP,
+                            selected: app.conversation == Some(id)
+                                && app.page == Page::Conversations,
+                            badge: None,
+                        },
+                    );
+                    ui.pop_style();
+                    let clicked = row?.clicked;
+
+                    if editing {
+                        let width = (ui.div_width() - 48.0).max(1.0);
+                        ui.set_position(44.0, y + 3.0);
+                        ui.div_begin(DivOptions {
+                            width: Some(width),
+                            height: Some(INLINE_TITLE_MIN_HEIGHT),
+                            ..Default::default()
+                        })?;
+                        let result = inline_title_editor(
                             ui,
                             gpu,
-                            &format!("name-chat-{id}"),
-                            ADD,
+                            chat_ui::RENAME_INPUT,
+                            "Name",
+                            (Font::Regular, 14),
+                            client::CONVERSATION_NAME_MAX,
                             false,
-                            "Name conversation",
-                        )?
-                    {
-                        action = Action::PromptConversationName {
+                        );
+                        ui.div_end();
+                        action = match result? {
+                            TitleEdit::Cancel => Action::CancelConversationRename,
+                            TitleEdit::Submit(_) => Action::RenameConversation {
+                                profile: profile.clone(),
+                                id,
+                            },
+                            TitleEdit::None => action,
+                        };
+                    } else if let Some(at) = ui.context_press([x, y, ui.div_width(), 56.0]) {
+                        action = Action::OpenRowMenu(
+                            RowMenu::Conversation {
+                                profile: profile.clone(),
+                                id,
+                            },
+                            at,
+                        );
+                    } else if clicked {
+                        action = Action::OpenConversation {
                             profile: profile.clone(),
                             id,
                         };
@@ -3585,24 +3793,32 @@ fn main() -> anyhow::Result<()> {
                 }
 
                 PopupMenu::Row(target) => {
-                    let (label, delete) = match target {
+                    let (glyph, label, command) = match target {
                         RowMenu::Profile(profile) => (
+                            contacts::DELETE,
                             "Delete profile",
                             Action::ConfirmDeleteProfile(profile.clone()),
                         ),
-                        RowMenu::Contact(id) => {
-                            ("Delete contact", Action::ConfirmDeleteContact(*id))
-                        }
+                        RowMenu::Contact(id) => (
+                            contacts::DELETE,
+                            "Delete contact",
+                            Action::ConfirmDeleteContact(*id),
+                        ),
+                        RowMenu::Conversation { profile, id } => (
+                            contacts::EDIT,
+                            "Rename conversation",
+                            Action::BeginConversationRename {
+                                profile: profile.clone(),
+                                id: *id,
+                            },
+                        ),
                     };
-                    let items = [Item {
-                        icon: contacts::DELETE,
-                        label,
-                    }];
+                    let items = [Item { icon: glyph, label }];
                     if ui
                         .popup(&mut renderer, "row-menu", &mut popup, &items)?
                         .is_some()
                     {
-                        action = delete;
+                        action = command;
                     }
                 }
 
@@ -3672,12 +3888,6 @@ fn main() -> anyhow::Result<()> {
                     quickshell.open(&app, ui.zoom_percent(), &mut ui);
                 }
 
-                platform.request_redraw()?;
-                continue;
-            }
-            Action::PromptConversationName { profile, id } => {
-                ui.set_modal_input(false);
-                quickshell.open_conversation_name(&app, ui.zoom_percent(), &mut ui, profile, id);
                 platform.request_redraw()?;
                 continue;
             }

@@ -296,7 +296,11 @@ impl InputField {
                 ui.quad([x - self.scroll_x, y, caret, height], selection_color)?;
             }
 
-            text.render(x - self.scroll_x, y, &self.text, font, gpu, ui)?;
+            if !self.text.is_empty() {
+                let text_height = text.measure(&self.text, font)?.height;
+                let text_y = y + (height - text_height).max(0.0) * 0.5;
+                text.render(x - self.scroll_x, text_y, &self.text, font, gpu, ui)?;
+            }
 
             if self.caret_visible {
                 ui.quad(

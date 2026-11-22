@@ -134,7 +134,7 @@ struct Level {
 #[derive(Default)]
 pub struct Shell {
     contact_picker: bool,
-    name_target: Option<(Profile, faith_client::Id, Option<faith_client::Id>)>,
+    name_target: Option<(Profile, faith_client::Id, faith_client::Id)>,
     open: bool,
     presence: crate::ui::animation::Presence,
     entries: Vec<Entry>,
@@ -192,37 +192,6 @@ impl Shell {
         ui.clear_input(QUERY);
     }
 
-    pub fn open_conversation_name(
-        &mut self,
-        app: &App,
-        zoom: u32,
-        ui: &mut Framework,
-        profile: Profile,
-        id: faith_client::Id,
-    ) {
-        self.open(app, zoom, ui);
-        if let Some(index) = self
-            .entries
-            .iter()
-            .position(|entry| entry.id == "name-conversation")
-        {
-            self.enter(index, ui);
-        }
-
-        self.prompt_conversation_name(ui, profile, id);
-    }
-
-    fn prompt_conversation_name(
-        &mut self,
-        ui: &mut Framework,
-        profile: Profile,
-        id: faith_client::Id,
-    ) {
-        self.name_target = Some((profile, id, None));
-        ui.clear_input(NAME);
-        ui.animate_until(std::time::Instant::now());
-    }
-
     pub fn open_sender_name(
         &mut self,
         ui: &mut Framework,
@@ -233,7 +202,7 @@ impl Shell {
         self.levels.clear();
         self.open = true;
         self.contact_picker = false;
-        self.name_target = Some((profile, id, Some(sender)));
+        self.name_target = Some((profile, id, sender));
         ui.clear_input(NAME);
         ui.animate_until(std::time::Instant::now());
     }
@@ -388,11 +357,6 @@ impl Shell {
             }
             return None;
         }
-        if let Action::PromptConversationName { profile, id } = &entry.command {
-            self.prompt_conversation_name(ui, profile.clone(), *id);
-            return None;
-        }
-
         if matches!(entry.command, Action::ToggleContactPartner(_)) {
             return Some(entry.command.clone());
         }
@@ -414,12 +378,6 @@ impl Shell {
         let Some((profile, id, sender)) = &self.name_target else {
             return Ok(None);
         };
-        let (title, hint, max_chars) = if sender.is_some() {
-            ("Add to contacts", "Nickname", 20)
-        } else {
-            ("Name conversation", "Conversation name", 256)
-        };
-
         ui.set_position(x, y);
         ui.push_style(Style {
             padding: 16.0,
@@ -436,7 +394,7 @@ impl Shell {
                 ..Default::default()
             },
         )?;
-        crate::label(ui, gpu, title, 15, true, false, false)?;
+        crate::label(ui, gpu, "Add to contacts", 15, true, false, false)?;
         ui.space(12.0);
 
         let width = ui.div_width();
@@ -461,10 +419,10 @@ impl Shell {
             gpu,
             NAME,
             InputOptions {
-                max_chars: Some(max_chars),
+                max_chars: Some(crate::contacts::NAME_MAX),
                 filter: None,
             },
-            hint,
+            "Nickname",
         )?;
         ui.pop_sizing();
         ui.pop_style();
@@ -498,21 +456,11 @@ impl Shell {
 
         if enabled && (done || ui.input_submitted(NAME)) {
             self.open = false;
-            let profile = profile.clone();
-            let id = *id;
-            let name = name.to_owned();
-            return Ok(Some(match sender {
-                Some(sender) => Action::NameSender {
-                    profile,
-                    id,
-                    sender: *sender,
-                    name,
-                },
-                None => Action::RenameConversation {
-                    profile,
-                    id,
-                    title: name,
-                },
+            return Ok(Some(Action::NameSender {
+                profile: profile.clone(),
+                id: *id,
+                sender: *sender,
+                name: name.to_owned(),
             }));
         }
 
@@ -534,10 +482,6 @@ impl Shell {
         let mut presence = ui.presence(&mut self.presence, self.open);
         ui.overlay_opacity(presence);
         let naming = self.name_target.is_some();
-        let naming_sender = self
-            .name_target
-            .as_ref()
-            .is_some_and(|(_, _, sender)| sender.is_some());
 
         if !naming
             && !self.levels.is_empty()
@@ -630,14 +574,6 @@ impl Shell {
                     }
                 )
             });
-            if naming && !naming_sender && escape {
-                self.name_target = None;
-                ui.set_input(QUERY, &self.query);
-                ui.animate_until(std::time::Instant::now());
-                ui.end_overlay()?;
-                return Ok(None);
-            }
-
             if !escape || self.contact_picker || !self.back(ui) {
                 self.open = false;
                 ui.ignore_overlay_input();

@@ -23,6 +23,8 @@ use store::Store;
 pub use store::{legacy_aliases, profile_conversations, profile_usernames};
 
 // These values are defined by the Faith wire protocol.
+pub const CONVERSATION_NAME_MAX: usize = 20;
+
 const REQUEST_EVENT: u32 = 2;
 const RESPONSE_EVENT: u32 = 3;
 const USERNAMES_EVENT: u32 = 4;
@@ -63,7 +65,6 @@ struct Metadata {
 pub struct Chat {
     pub id: Id,
     pub title: String,
-    pub needs_name: bool,
     pub last: String,
     pub members: Vec<Id>,
     pub own_auth: Option<Id>,
@@ -554,8 +555,7 @@ impl Worker {
             }
 
             Command::Rename { id, title } => {
-                anyhow::ensure!(!title.trim().is_empty(), "Enter a conversation name");
-                self.store.rename(id, title)?;
+                self.store.rename(id, &title)?;
             }
 
             Command::Send { id, body } => {

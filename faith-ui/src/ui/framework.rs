@@ -3309,9 +3309,12 @@ impl Framework {
         );
         if field.text().is_empty() && !hint.is_empty() {
             self.text_renderer.color = self.theme.muted;
+            let hint_height = self.text_renderer.measure(hint, font)?.height;
+            let hint_y =
+                b.y + s.padding + (b.height - 2.0 * s.padding - hint_height).max(0.0) * 0.5;
             let hint_result = self.text_renderer.render(
                 b.x + s.padding,
-                b.y + s.padding,
+                hint_y,
                 hint,
                 font,
                 gpu,

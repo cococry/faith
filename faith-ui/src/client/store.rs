@@ -250,9 +250,6 @@ pub fn profile_conversations(profile: &Path) -> anyhow::Result<Vec<Chat>> {
         Ok(Chat {
             id,
             title,
-            needs_name: metadata
-                .as_ref()
-                .is_none_or(|m| m.title.is_empty() && !m.automatic_title),
             name_members: title_members(metadata.as_ref(), &members, own_auth),
             members,
             own_auth,
@@ -405,9 +402,6 @@ impl Store {
                 metadata.as_deref().map(serde_json::from_str).transpose()?;
             chats.push(Chat {
                 id,
-                needs_name: metadata
-                    .as_ref()
-                    .is_none_or(|m| m.title.is_empty() && !m.automatic_title),
                 title: chat_title(&db, id, metadata.as_ref(), &members, Some(auth))?,
                 last: last.map_or_else(
                     || "No messages yet".into(),
@@ -435,7 +429,14 @@ impl Store {
         Ok(chats)
     }
 
-    pub fn rename(&self, id: Id, title: String) -> anyhow::Result<()> {
+    pub fn rename(&self, id: Id, title: &str) -> anyhow::Result<()> {
+        let title = title.trim();
+        anyhow::ensure!(
+            (1..=super::CONVERSATION_NAME_MAX).contains(&title.chars().count())
+                && !title.chars().any(char::is_control),
+            "Use 1–{} characters for the conversation name",
+            super::CONVERSATION_NAME_MAX,
+        );
         let db = self.db()?;
         anyhow::ensure!(
             conversation(&db, id)?.is_some_and(|chat| chat.active),
@@ -457,7 +458,7 @@ impl Store {
                 partners: Vec::new(),
             },
         };
-        metadata.title = title;
+        metadata.title = title.to_owned();
         metadata.title_from = None;
         metadata.automatic_title = false;
         metadata.partners.clear();
@@ -1056,6 +1057,17 @@ mod tests {
             let metadata: Metadata = serde_json::from_str(&metadata)?;
             assert_eq!(metadata.title, "Faith_1");
             assert!(metadata.title_from.is_none());
+
+            store.accept_request(incoming, partner, auth)?;
+            let title = "é".repeat(super::super::CONVERSATION_NAME_MAX);
+            store.rename(incoming, &title)?;
+            assert!(store.rename(incoming, &format!("{title}x")).is_err());
+            assert!(store.rename(incoming, "   ").is_err());
+            let chats = store.chats(auth)?;
+            assert_eq!(
+                chats.iter().find(|chat| chat.id == incoming).unwrap().title,
+                title
+            );
             Ok(())
         };
 

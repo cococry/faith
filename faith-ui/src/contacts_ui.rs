@@ -1,11 +1,9 @@
 use faith_client::Id;
 
 use crate::{
-    ACCOUNTS, ADD, Action, App, Font, Framework, GROUP, Profile, Renderer, Style,
+    ACCOUNTS, ADD, Action, App, Font, Framework, GROUP, Profile, Renderer, Style, TitleEdit,
     contacts::{DELETE, EDIT, NAME_MAX},
-    label, list_header,
-    platform::{WindowEvent, event::Key},
-    row_button,
+    header_icon, inline_title_editor, label, list_header, row_button,
     ui::{
         framework::{ActionRow, DivOptions},
         widgets::input::InputOptions,
@@ -139,7 +137,7 @@ pub fn page(
                 ),
             ] {
                 ui.set_position((width - offset).max(0.0), header_y);
-                if header_icon(ui, gpu, id, glyph, tooltip)? {
+                if header_icon(ui, gpu, id, glyph, tooltip, 40.0)? {
                     action = command;
                 }
             }
@@ -147,7 +145,19 @@ pub fn page(
 
         ui.space(10.0);
         if app.contact_mode == Mode::Edit {
-            action = edit_title(ui, gpu, contact.id)?;
+            action = match inline_title_editor(
+                ui,
+                gpu,
+                "contact-name",
+                "Nickname",
+                (Font::Bold, 26),
+                NAME_MAX,
+                true,
+            )? {
+                TitleEdit::Cancel => Action::CancelContactEdit,
+                TitleEdit::Submit(name) => Action::SaveContact(contact.id, name),
+                TitleEdit::None => Action::None,
+            };
         } else {
             label(ui, gpu, &contact.display, 26, true, false, false)?;
         }
@@ -299,83 +309,4 @@ pub fn page(
 
     ui.div_end();
     Ok(action)
-}
-
-fn header_icon(
-    ui: &mut Framework,
-    gpu: &mut Renderer,
-    id: &str,
-    glyph: &str,
-    tooltip: &'static str,
-) -> anyhow::Result<bool> {
-    ui.push_style(Style {
-        tooltip: Some(tooltip),
-        font_size: 20,
-        padding: 4.0,
-        radius: ui.corner_radii().icon,
-        color: ui.theme().text,
-        background: None,
-        ..ui.style()
-    });
-    ui.push_sizing(Some(40.0), Some(40.0));
-    let clicked = ui.icon_button(gpu, id, glyph);
-    ui.pop_sizing();
-    ui.pop_style();
-    clicked
-}
-
-fn edit_title(ui: &mut Framework, gpu: &mut Renderer, id: Id) -> anyhow::Result<Action> {
-    let width = ui.div_width();
-    let y = ui.position().1;
-    ui.push_style(Style {
-        font_size: 26,
-        padding: 0.0,
-        color: ui.theme().text,
-        background: None,
-        border_color: None,
-        ..ui.style()
-    });
-    ui.push_sizing(Some((width - 96.0).max(1.0)), Some(40.0));
-    let name = ui.input_with_font(
-        gpu,
-        "contact-name",
-        InputOptions {
-            max_chars: Some(NAME_MAX),
-            filter: Some(|c| !c.is_control()),
-        },
-        "Nickname",
-        Font::Bold,
-    );
-    ui.pop_sizing();
-    ui.pop_style();
-    let name = name?;
-
-    ui.set_position((width - 88.0).max(0.0), y);
-    let cancel = header_icon(
-        ui,
-        gpu,
-        "cancel-nickname",
-        "\u{ea76}",
-        "Cancel nickname edit",
-    )?;
-    ui.set_position((width - 40.0).max(0.0), y);
-    let save = header_icon(ui, gpu, "save-nickname", "\u{eab2}", "Save nickname")?;
-
-    if cancel
-        || ui.events().iter().any(|event| {
-            matches!(
-                event,
-                WindowEvent::KeyPressed {
-                    key: Key::Escape,
-                    ..
-                }
-            )
-        })
-    {
-        Ok(Action::CancelContactEdit)
-    } else if save || ui.input_submitted("contact-name") {
-        Ok(Action::SaveContact(id, name))
-    } else {
-        Ok(Action::None)
-    }
 }

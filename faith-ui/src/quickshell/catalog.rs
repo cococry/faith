@@ -917,13 +917,41 @@ pub fn build(app: &App, zoom: u32) -> Vec<Entry> {
             }
         }
 
+        if app.page.is_chat()
+            && let Some(id) = app.chat.renaming
+        {
+            entries.push(
+                Entry::new(
+                    "save-conversation-name",
+                    "Save conversation name",
+                    Kind::Conversation,
+                    Action::RenameConversation {
+                        profile: profile.clone(),
+                        id,
+                    },
+                )
+                .search("save conversation name", &["submit chat title"])
+                .owner(profile),
+            );
+            entries.push(
+                Entry::new(
+                    "cancel-conversation-rename",
+                    "Cancel conversation rename",
+                    Kind::Conversation,
+                    Action::CancelConversationRename,
+                )
+                .search("cancel conversation rename", &["discard chat title"])
+                .owner(profile),
+            );
+        }
+
         if !snapshot.conversations.is_empty() {
             let children = snapshot.conversations.iter().map(|chat| {
                 let mut entry = Entry::new(
                     &format!("name-conversation:{}:{}", profile.path.display(), chat.id),
                     &app.conversation_title(chat),
                     Kind::Conversation,
-                    Action::PromptConversationName {
+                    Action::BeginConversationRename {
                         profile: profile.clone(),
                         id: chat.id,
                     },
@@ -936,11 +964,11 @@ pub fn build(app: &App, zoom: u32) -> Vec<Entry> {
             entries.push(
                 Entry::new(
                     "name-conversation",
-                    "Name a conversation",
+                    "Rename a conversation",
                     Kind::Conversation,
                     Action::None,
                 )
-                .search("name a conversation", &["rename chat title group"])
+                .search("rename a conversation", &["name chat title group"])
                 .detail(&profile.alias)
                 .list(children),
             );
