@@ -494,7 +494,11 @@ pub fn build(app: &App, zoom: u32) -> Vec<Entry> {
                     &format!("delete-contact:{}", contact.auth),
                     &contact.display,
                     Kind::Contact,
-                    Action::ConfirmDeleteContact(contact.id),
+                    if matches!(app.page, Page::Contacts(_)) {
+                        Action::ConfirmDeleteContactInList(contact.id)
+                    } else {
+                        Action::ConfirmDeleteContact(contact.id)
+                    },
                 )
                 .search(&contact.display, &[&contact.auth])
                 .detail(&contact.auth)
@@ -503,6 +507,27 @@ pub fn build(app: &App, zoom: u32) -> Vec<Entry> {
     }
 
     if let Page::Contacts(selected) = app.page {
+        if let Some(id) = app.contact_delete_in_list {
+            entries.push(
+                Entry::new(
+                    "confirm-delete-contact-row",
+                    "Confirm delete contact",
+                    Kind::Contact,
+                    Action::DeleteContact(id),
+                )
+                .search("confirm delete contact", &["remove local alias"]),
+            );
+            entries.push(
+                Entry::new(
+                    "cancel-delete-contact-row",
+                    "Cancel contact deletion",
+                    Kind::Contact,
+                    Action::CancelContactListDelete,
+                )
+                .search("cancel contact deletion", &["keep contact"]),
+            );
+        }
+
         use crate::contacts_ui::Mode;
         if let Some(id) = selected.filter(|&id| app.contacts.get(id).is_some()) {
             if app.contact_mode == Mode::View {

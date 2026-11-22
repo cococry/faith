@@ -2775,7 +2775,7 @@ impl Framework {
         id: &str,
         row: ActionRow<'_>,
     ) -> anyhow::Result<button::Response> {
-        self.action_row_with_checkbox(gpu, id, row, None)
+        self.action_row_with_space(gpu, id, row, 0.0)
     }
 
     pub fn action_row_with_checkbox<G: GraphicsDevice>(
@@ -2784,6 +2784,27 @@ impl Framework {
         id: &str,
         row: ActionRow<'_>,
         checked: Option<bool>,
+    ) -> anyhow::Result<button::Response> {
+        self.action_row_content(gpu, id, row, checked, 0.0)
+    }
+
+    pub fn action_row_with_space<G: GraphicsDevice>(
+        &mut self,
+        gpu: &mut G,
+        id: &str,
+        row: ActionRow<'_>,
+        trailing_space: f32,
+    ) -> anyhow::Result<button::Response> {
+        self.action_row_content(gpu, id, row, None, trailing_space)
+    }
+
+    fn action_row_content<G: GraphicsDevice>(
+        &mut self,
+        gpu: &mut G,
+        id: &str,
+        row: ActionRow<'_>,
+        checked: Option<bool>,
+        trailing_space: f32,
     ) -> anyhow::Result<button::Response> {
         let bounds = self.place_named(self.div_width(), 56.0, Some(id));
         let key = (id.to_owned(), 0);
@@ -2855,7 +2876,7 @@ impl Framework {
             self.ui_renderer.push_clip([
                 bounds.x + 44.0,
                 bounds.y,
-                (bounds.width - 56.0 - reserved - 8.0).max(0.0),
+                (bounds.width - 56.0 - reserved - 8.0 - trailing_space).max(0.0),
                 bounds.height,
             ]);
             let result = (|| -> anyhow::Result<()> {

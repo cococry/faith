@@ -111,6 +111,8 @@ enum Action {
     AddContact,
     EditContact(faith_client::Id),
     ConfirmDeleteContact(faith_client::Id),
+    ConfirmDeleteContactInList(faith_client::Id),
+    CancelContactListDelete,
     CancelContactEdit,
     SaveContact(faith_client::Id, String),
     SaveContactDraft,
@@ -243,6 +245,7 @@ struct App {
     root: std::path::PathBuf,
     contacts: contacts::Book,
     contact_mode: contacts_ui::Mode,
+    contact_delete_in_list: Option<faith_client::Id>,
     contact_usernames: std::collections::HashMap<faith_client::Id, String>,
     contact_conversations: Vec<(Profile, Vec<client::Chat>)>,
     contact_links: Vec<contacts_ui::ConversationLink>,
@@ -882,6 +885,7 @@ impl App {
             }
 
             Action::AddContact => {
+                self.contact_delete_in_list = None;
                 if !matches!(self.page, Page::Contacts(_)) {
                     self.refresh_contact_conversations();
                 }
@@ -895,6 +899,7 @@ impl App {
             }
 
             Action::EditContact(id) => {
+                self.contact_delete_in_list = None;
                 let contact = self
                     .contacts
                     .get(id)
@@ -907,6 +912,7 @@ impl App {
             }
 
             Action::ConfirmDeleteContact(id) => {
+                self.contact_delete_in_list = None;
                 anyhow::ensure!(self.contacts.get(id).is_some(), "Contact is unavailable");
                 if !matches!(self.page, Page::Contacts(_)) {
                     self.refresh_contact_conversations();
@@ -915,6 +921,20 @@ impl App {
                 self.page = Page::Contacts(Some(id));
                 self.refresh_contact_links();
                 self.contact_mode = contacts_ui::Mode::Delete;
+                self.error.clear();
+            }
+
+            Action::ConfirmDeleteContactInList(id) => {
+                anyhow::ensure!(
+                    matches!(self.page, Page::Contacts(_)) && self.contacts.get(id).is_some(),
+                    "Contact is unavailable"
+                );
+                self.contact_delete_in_list = Some(id);
+                self.error.clear();
+            }
+
+            Action::CancelContactListDelete => {
+                self.contact_delete_in_list = None;
                 self.error.clear();
             }
 
@@ -939,13 +959,19 @@ impl App {
             }
 
             Action::DeleteContact(id) => {
-                if self.page == Page::Contacts(Some(id))
-                    && self.contact_mode == contacts_ui::Mode::Delete
+                if let Page::Contacts(selected) = self.page
+                    && (self.contact_delete_in_list == Some(id)
+                        || selected == Some(id) && self.contact_mode == contacts_ui::Mode::Delete)
                 {
                     self.contacts.delete(id)?;
+                    self.contact_delete_in_list = None;
+                    if selected == Some(id) {
+                        self.page = Page::Contacts(None);
+                        self.contact_mode = contacts_ui::Mode::View;
+                        ui.clear_input("contact-name");
+                    }
+
                     self.sync_contact_names();
-                    self.page = Page::Contacts(None);
-                    self.contact_mode = contacts_ui::Mode::View;
                     self.error.clear();
                 }
             }
@@ -1457,6 +1483,10 @@ impl App {
             },
         }
 
+        if self.location() != previous {
+            self.contact_delete_in_list = None;
+        }
+
         if self.chat.renaming.is_some() && !begin_rename && self.location() != previous {
             self.chat.renaming = None;
             ui.clear_input(chat_ui::RENAME_INPUT);
@@ -1526,6 +1556,35 @@ fn end_panel(ui: &mut Framework) {
 }
 
 // Text using the current theme and the requested weight.
+fn empty_state(
+    ui: &mut Framework,
+    gpu: &mut Renderer,
+    id: &str,
+    icon: &str,
+    message: &str,
+) -> anyhow::Result<()> {
+    let top = (ui.div_height() * 0.42 - 36.0).max(ui.position().1 + 24.0);
+    ui.set_position(0.0, top);
+    ui.div_begin_id(
+        id,
+        DivOptions {
+            width: Some(ui.div_width()),
+            ..Default::default()
+        },
+    )?;
+    ui.push_style(Style {
+        font_size: 36,
+        color: ui.theme().muted,
+        ..ui.style()
+    });
+    ui.text_centered(gpu, icon, Some(Font::Icons))?;
+    ui.pop_style();
+    ui.space(16.0);
+    label(ui, gpu, message, 14, false, true, true)?;
+    ui.div_end();
+    Ok(())
+}
+
 fn label(
     ui: &mut Framework,
     gpu: &mut Renderer,
@@ -3270,32 +3329,15 @@ fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyh
         72.0
     };
 
-    // Reserve enough room for the full heading and its controls.
-    let title = match app.page {
-        Page::Settings => "Settings",
-        Page::Contacts(_) => "Contacts",
-        Page::Conversations | Page::Requests | Page::PendingInvites | Page::CreateConversation => {
-            "Conversations"
-        }
-        Page::Accounts | Page::Create | Page::CreateUsername => "Profiles",
-    };
+    // Keep all lists aligned using the widest heading and its controls.
     ui.push_style(Style {
-        font_size: if app.page.is_chat() {
-            16
-        } else {
-            20
-        },
+        font_size: 16,
         ..ui.style()
     });
-
-    let title_size = ui.text_size(title, Some(Font::Bold));
+    let title_size = ui.text_size("Conversations", Some(Font::Bold));
     ui.pop_style();
     let header_width = title_size?.0.ceil()
-        + if app.page.is_chat() {
-            44.0
-        } else {
-            0.0
-        }
+        + 44.0
         + if app.collapsed {
             118.0
         } else {
@@ -3303,13 +3345,8 @@ fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyh
         };
 
     let remaining = (width - rail).max(1.0);
-    let minimum_list = if matches!(app.page, Page::Contacts(_)) {
-        350.0_f32
-    } else {
-        220.0_f32
-    };
     let list = (remaining / 4.0)
-        .clamp(minimum_list.max(header_width), 400.0_f32.max(header_width))
+        .clamp(220.0_f32.max(header_width), 400.0_f32.max(header_width))
         .min((remaining - 200.0).max(100.0));
     let content = (remaining - list).max(1.0);
 
@@ -3601,6 +3638,7 @@ fn main() -> anyhow::Result<()> {
     let mut app = App {
         contacts: contacts::Book::open(&root)?,
         contact_mode: contacts_ui::Mode::View,
+        contact_delete_in_list: None,
         contact_usernames: Default::default(),
         contact_conversations: Vec::new(),
         contact_links: Vec::new(),
@@ -3802,7 +3840,7 @@ fn main() -> anyhow::Result<()> {
                         RowMenu::Contact(id) => (
                             contacts::DELETE,
                             "Delete contact",
-                            Action::ConfirmDeleteContact(*id),
+                            Action::ConfirmDeleteContactInList(*id),
                         ),
                         RowMenu::Conversation { profile, id } => (
                             contacts::EDIT,

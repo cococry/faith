@@ -290,7 +290,10 @@ pub fn creation(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Re
             "Conversation name",
             &title_id,
             "Name your group",
-            Some(256),
+            InputOptions {
+                max_chars: Some(256),
+                ..Default::default()
+            },
             editing,
         )?;
         if editing && form.snapshot.username.is_some() {
@@ -359,7 +362,10 @@ pub fn creation(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Re
             "Auth ID",
             &auth_id,
             "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
-            Some(32),
+            InputOptions {
+                max_chars: Some(32),
+                ..Default::default()
+            },
             true,
         )?;
         ui.space(8.0);
@@ -380,7 +386,10 @@ pub fn creation(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Re
             "Local contact name (optional)",
             &name_id,
             "Enter a local name",
-            Some(20),
+            InputOptions {
+                max_chars: Some(20),
+                ..Default::default()
+            },
             true,
         )?;
         ui.space(8.0);
@@ -562,13 +571,13 @@ pub fn creation(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Re
     Ok(action)
 }
 
-fn form_input(
+pub fn form_input(
     ui: &mut Framework,
     gpu: &mut Renderer,
     title: &str,
     id: &str,
     hint: &str,
-    max_chars: Option<usize>,
+    options: InputOptions,
     enabled: bool,
 ) -> anyhow::Result<String> {
     label(ui, gpu, title, 13, true, true, false)?;
@@ -577,20 +586,12 @@ fn form_input(
         enabled,
         ..crate::profile_input_style(ui)
     });
-    let result = ui.input_with_hint(
-        gpu,
-        id,
-        InputOptions {
-            max_chars,
-            ..Default::default()
-        },
-        hint,
-    );
+    let result = ui.input_with_hint(gpu, id, options, hint);
     ui.pop_style();
     result
 }
 
-fn command_button(
+pub fn command_button(
     ui: &mut Framework,
     gpu: &mut Renderer,
     id: &str,
@@ -659,33 +660,13 @@ pub fn requests(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Re
     }
 
     if snapshot.requests.is_empty() {
-        let top = (ui.div_height() * 0.42 - 36.0).max(ui.position().1 + 24.0);
-        ui.set_position(0.0, top);
-        ui.div_begin_id(
-            "requests-empty",
-            DivOptions {
-                width: Some(ui.div_width()),
-                ..Default::default()
-            },
-        )?;
-        ui.push_style(Style {
-            font_size: 36,
-            color: ui.theme().muted,
-            ..ui.style()
-        });
-        ui.text_centered(gpu, crate::REQUESTS, Some(Font::Icons))?;
-        ui.pop_style();
-        ui.space(16.0);
-        label(
+        crate::empty_state(
             ui,
             gpu,
+            "requests-empty",
+            crate::REQUESTS,
             "No pending message requests",
-            14,
-            false,
-            true,
-            true,
         )?;
-        ui.div_end();
     }
 
     let mut action = Action::None;
