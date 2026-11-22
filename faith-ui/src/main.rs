@@ -3,6 +3,8 @@ mod assets;
 mod chat_ui;
 mod cli;
 mod client;
+mod contacts;
+mod contacts_ui;
 mod graphics;
 mod platform;
 mod profiles;
@@ -44,6 +46,7 @@ const REFRESH: &str = "\u{eb37}";
 #[derive(Clone, Copy, PartialEq)]
 enum Page {
     Accounts,
+    Contacts(Option<faith_client::Id>),
     Create,
     CreateUsername,
     Conversations,
@@ -83,6 +86,17 @@ enum Action {
     None,
     OpenMenu,
     OpenQuickshell,
+    OpenContactPicker,
+    Contacts,
+    OpenContact(faith_client::Id),
+    AddContact,
+    EditContact(faith_client::Id),
+    ConfirmDeleteContact(faith_client::Id),
+    CancelContactEdit,
+    SaveContact(faith_client::Id, String),
+    SaveContactDraft,
+    DeleteContact(faith_client::Id),
+    ToggleContactPartner(faith_client::Id),
     Quit,
     Select(usize),
     OpenProfile(Profile),
@@ -159,7 +173,7 @@ enum Action {
         title: String,
         partners: Vec<(faith_client::Id, String)>,
         policy: client::InvitationPolicy,
-        use_disclosed_title: bool,
+        automatic_title: bool,
     },
     SendMessage {
         id: faith_client::Id,
@@ -208,6 +222,11 @@ impl Default for ProfileForm {
 // State shared by the pages.
 struct App {
     root: std::path::PathBuf,
+    contacts: contacts::Book,
+    contact_mode: contacts_ui::Mode,
+    contact_usernames: std::collections::HashMap<faith_client::Id, String>,
+    contact_conversations: Vec<(Profile, Vec<client::Chat>)>,
+    contact_links: Vec<contacts_ui::ConversationLink>,
     profiles: Vec<Profile>,
     profile_form: ProfileForm,
     selected: Option<Profile>,
@@ -261,6 +280,13 @@ impl App {
         } else {
             location.page
         };
+        if let Page::Contacts(id) = self.page {
+            self.page = Page::Contacts(id.filter(|&id| self.contacts.get(id).is_some()));
+            self.refresh_contact_conversations();
+            self.refresh_contact_links();
+        }
+
+        self.contact_mode = contacts_ui::Mode::View;
         self.settings_item = location.settings_item;
         self.conversation = location.conversation.filter(|id| {
             location.chat_session == self.chat.session
@@ -361,6 +387,151 @@ impl App {
             .submit(command)
     }
 
+    fn sync_contact_names(&mut self) {
+        self.contacts.apply_usernames(&self.contact_usernames);
+        self.chat.invalidate_history_layout();
+        self.refresh_contact_links();
+    }
+
+    fn refresh_contact_conversations(&mut self) {
+        self.contact_conversations.clear();
+        for profile in self
+            .profiles
+            .iter()
+            .chain(self.selected.iter().filter(|active| {
+                !self
+                    .profiles
+                    .iter()
+                    .any(|profile| profile.path == active.path)
+            }))
+        {
+            if self
+                .selected
+                .as_ref()
+                .is_some_and(|active| active.path == profile.path)
+                && self.chat.snapshot.auth.is_some()
+            {
+                continue;
+            }
+
+            match client::profile_conversations(&profile.path) {
+                Ok(chats) => self.contact_conversations.push((profile.clone(), chats)),
+                Err(error) => tracing::warn!(
+                    "Could not list conversations for {}: {error}",
+                    profile.alias
+                ),
+            }
+        }
+    }
+
+    fn refresh_contact_links(&mut self) {
+        let app = &*self;
+        self.contact_links = if let Page::Contacts(Some(id)) = self.page {
+            let active = self
+                .selected
+                .iter()
+                .filter(|_| self.chat.snapshot.auth.is_some())
+                .map(|profile| (profile, self.chat.snapshot.conversations.as_ref()));
+            self.contact_conversations
+                .iter()
+                .filter(|(profile, _)| {
+                    self.chat.snapshot.auth.is_none()
+                        || self
+                            .selected
+                            .as_ref()
+                            .is_none_or(|active| active.path != profile.path)
+                })
+                .map(|(profile, chats)| (profile, chats.as_slice()))
+                .chain(active)
+                .flat_map(|(profile, chats)| {
+                    chats
+                        .iter()
+                        .filter(move |chat| chat.members.contains(&id))
+                        .map(move |chat| contacts_ui::ConversationLink {
+                            key: format!("contact-chat:{}:{}", profile.path.display(), chat.id),
+                            profile: profile.clone(),
+                            id: chat.id,
+                            title: app.conversation_title(chat).into_owned(),
+                            detail: format!("[On profile {}]", profile.alias),
+                        })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+    }
+
+    fn contact_name<'a>(&'a self, id: faith_client::Id, fallback: &'a str) -> &'a str {
+        self.contacts.display(id, fallback)
+    }
+
+    fn partner_label(&self, id: &faith_client::Id, draft_name: &str) -> String {
+        if !draft_name.is_empty() {
+            return self.contact_usernames.get(id).map_or_else(
+                || draft_name.to_owned(),
+                |username| format!("{draft_name} ({username})"),
+            );
+        }
+
+        let name = self.contact_name(
+            *id,
+            self.contact_usernames.get(id).map_or("", String::as_str),
+        );
+        chat_ui::partner_label(id, name)
+    }
+
+    fn default_conversation_title(&self) -> String {
+        self.chat
+            .default_title(|id, name| self.partner_label(id, name))
+    }
+
+    fn conversation_title<'a>(&'a self, chat: &'a client::Chat) -> std::borrow::Cow<'a, str> {
+        if !chat.name_members {
+            return (&chat.title).into();
+        }
+
+        self.member_title(&chat.members, chat.own_auth, &chat.title)
+    }
+
+    fn member_title<'a>(
+        &'a self,
+        members: &[faith_client::Id],
+        own_auth: Option<faith_client::Id>,
+        fallback: &'a str,
+    ) -> std::borrow::Cow<'a, str> {
+        let mut peers = members
+            .iter()
+            .copied()
+            .filter(|&id| Some(id) != own_auth)
+            .filter_map(|id| {
+                let name = self.contact_name(
+                    id,
+                    self.contact_usernames.get(&id).map_or("", String::as_str),
+                );
+                (!name.is_empty()).then_some(name)
+            });
+        let Some(first) = peers.next() else {
+            return fallback.into();
+        };
+
+        let Some(second) = peers.next() else {
+            return first.into();
+        };
+
+        let mut title = format!("{first}, {second}");
+        if let Some(third) = peers.next() {
+            title.push_str(", ");
+            title.push_str(third);
+        }
+
+        let remaining = peers.count();
+        if remaining != 0 {
+            title.push_str(&format!(" & {remaining} more"));
+        }
+
+        title.into()
+    }
+
     fn refresh_chat(&mut self, ui: &mut Framework) {
         if let Some((_, session)) = &self.profile_form.pending
             && let Some(snapshot) = session.snapshot_since(0)
@@ -448,7 +619,28 @@ impl App {
                 .iter()
                 .any(|request| request.conversation == *id)
         });
+        if !std::sync::Arc::ptr_eq(&self.chat.snapshot.disclosed, &snapshot.disclosed) {
+            let mut changed = false;
+            for (id, username) in snapshot
+                .disclosed
+                .iter()
+                .filter(|(_, username)| !username.is_empty())
+            {
+                if self.contact_usernames.get(id) != Some(username) {
+                    self.contact_usernames.insert(*id, username.clone());
+                    changed = true;
+                }
+            }
+
+            if changed {
+                self.sync_contact_names();
+            }
+        }
+
         self.chat.snapshot = snapshot;
+        if matches!(self.page, Page::Contacts(Some(_))) {
+            self.refresh_contact_links();
+        }
         if self.page == Page::PendingInvites && self.chat.snapshot.pending_invites.is_empty() {
             self.page = Page::Conversations;
             ui.navigation_changed();
@@ -482,11 +674,39 @@ impl App {
             );
         }
 
+        let action = if matches!(action, Action::SaveContactDraft) {
+            let id = match (self.contact_mode, self.page) {
+                (contacts_ui::Mode::Add, Page::Contacts(None)) => {
+                    let id = ui
+                        .input_value("contact-auth")
+                        .unwrap_or_default()
+                        .parse::<faith_client::Id>()?;
+                    anyhow::ensure!(
+                        self.contacts.get(id).is_none(),
+                        "This Auth ID already has a contact"
+                    );
+                    id
+                }
+                (contacts_ui::Mode::Edit, Page::Contacts(Some(id))) => id,
+                _ => return Ok(()),
+            };
+            Action::SaveContact(
+                id,
+                ui.input_value("contact-name")
+                    .unwrap_or_default()
+                    .to_owned(),
+            )
+        } else {
+            action
+        };
+
         // Apply the action after the current frame has finished.
         let previous = self.location();
         let focus_requested = matches!(
             action,
             Action::New
+                | Action::AddContact
+                | Action::EditContact(_)
                 | Action::ProfileUsername(_)
                 | Action::NewConversation(_)
                 | Action::OpenSettings {
@@ -497,6 +717,9 @@ impl App {
         let record_history = matches!(
             action,
             Action::Select(_)
+                | Action::AddContact
+                | Action::Contacts
+                | Action::OpenContact(_)
                 | Action::Create(_)
                 | Action::ProfileUsername(_)
                 | Action::OpenProfile(_)
@@ -512,15 +735,103 @@ impl App {
                 | Action::SettingsItem(_)
         );
         match action {
-            Action::FocusSetting { .. } => unreachable!(),
+            Action::FocusSetting { .. } | Action::SaveContactDraft => unreachable!(),
             Action::None
             | Action::OpenMenu
             | Action::OpenQuickshell
+            | Action::OpenContactPicker
             | Action::Quit
             | Action::PromptConversationName { .. }
             | Action::PromptSenderName { .. } => {
                 return Ok(());
             }
+            Action::Contacts | Action::OpenContact(_) => {
+                let id = match action {
+                    Action::OpenContact(id) => {
+                        anyhow::ensure!(self.contacts.get(id).is_some(), "Contact is unavailable");
+                        Some(id)
+                    }
+                    _ => None,
+                };
+                if !matches!(self.page, Page::Contacts(_)) {
+                    self.refresh_contact_conversations();
+                    self.list_offset = 0;
+                }
+
+                self.page = Page::Contacts(id);
+                self.refresh_contact_links();
+                self.contact_mode = contacts_ui::Mode::View;
+                self.error.clear();
+            }
+
+            Action::AddContact => {
+                if !matches!(self.page, Page::Contacts(_)) {
+                    self.refresh_contact_conversations();
+                }
+
+                self.page = Page::Contacts(None);
+                self.contact_mode = contacts_ui::Mode::Add;
+                self.error.clear();
+                ui.clear_input("contact-auth");
+                ui.clear_input("contact-name");
+                ui.focus_input("contact-auth");
+            }
+
+            Action::EditContact(id) => {
+                let contact = self
+                    .contacts
+                    .get(id)
+                    .ok_or_else(|| anyhow::anyhow!("Contact is unavailable"))?;
+                self.page = Page::Contacts(Some(id));
+                self.contact_mode = contacts_ui::Mode::Edit;
+                self.error.clear();
+                ui.set_input("contact-name", &contact.name);
+                ui.focus_input("contact-name");
+            }
+
+            Action::ConfirmDeleteContact(id) => {
+                anyhow::ensure!(self.contacts.get(id).is_some(), "Contact is unavailable");
+                self.page = Page::Contacts(Some(id));
+                self.contact_mode = contacts_ui::Mode::Delete;
+                self.error.clear();
+            }
+
+            Action::CancelContactEdit => {
+                self.contact_mode = contacts_ui::Mode::View;
+                self.error.clear();
+            }
+
+            Action::SaveContact(id, name) => {
+                self.contacts.save(&[(id, name)])?;
+                self.page = Page::Contacts(Some(id));
+                self.sync_contact_names();
+                self.contact_mode = contacts_ui::Mode::View;
+                self.error.clear();
+            }
+
+            Action::DeleteContact(id) => {
+                if self.page == Page::Contacts(Some(id))
+                    && self.contact_mode == contacts_ui::Mode::Delete
+                {
+                    self.contacts.delete(id)?;
+                    self.sync_contact_names();
+                    self.page = Page::Contacts(None);
+                    self.contact_mode = contacts_ui::Mode::View;
+                    self.error.clear();
+                }
+            }
+
+            Action::ToggleContactPartner(id) => {
+                if self.page == Page::CreateConversation
+                    && self.chat.editing_creation()
+                    && !self.chat.naming
+                {
+                    if self.contacts.get(id).is_some() {
+                        self.chat.toggle_contact(id);
+                    }
+                }
+            }
+
             Action::Back => {
                 let destination = self.back_history.pop().or_else(|| {
                     (self.page != Page::Accounts).then_some(Location {
@@ -574,7 +885,7 @@ impl App {
 
             Action::RequireConversationUsername(value) => {
                 let id = self.chat.title_id();
-                let default = self.chat.default_title();
+                let default = self.default_conversation_title();
                 let title = ui.input_value(&id).unwrap_or_default();
                 if value && title == default {
                     ui.set_input(&id, "");
@@ -649,7 +960,7 @@ impl App {
                 let title = if self.chat.require_username {
                     String::new()
                 } else {
-                    self.chat.default_title()
+                    self.default_conversation_title()
                 };
                 ui.set_input(&self.chat.title_id(), &title);
             }
@@ -670,8 +981,22 @@ impl App {
                 sender,
                 name,
             } => {
-                self.ensure_profile(profile, cli, platform)?;
-                self.submit_chat(client::Command::NameSender { id, sender, name })?;
+                anyhow::ensure!(
+                    self.selected
+                        .as_ref()
+                        .is_some_and(|active| active.path == profile.path)
+                        && self.chat.snapshot.selected == Some(id)
+                        && self.chat.snapshot.auth != Some(sender)
+                        && self
+                            .chat
+                            .snapshot
+                            .messages
+                            .iter()
+                            .any(|message| message.sender == sender),
+                    "Sender is unavailable"
+                );
+                self.contacts.save(&[(sender, name)])?;
+                self.sync_contact_names();
             }
 
             Action::CancelConversation => {
@@ -684,13 +1009,23 @@ impl App {
                 title,
                 partners,
                 policy,
-                use_disclosed_title,
+                automatic_title,
             } => {
+                let aliases: Vec<_> = partners
+                    .iter()
+                    .filter(|(_, name)| !name.is_empty())
+                    .cloned()
+                    .collect();
+                if !aliases.is_empty() {
+                    self.contacts.save(&aliases)?;
+                    self.sync_contact_names();
+                }
+
                 let id = self.submit_chat(client::Command::Create {
                     title,
-                    partners,
+                    partners: partners.into_iter().map(|(id, _)| id).collect(),
                     policy,
-                    use_disclosed_title,
+                    automatic_title,
                 })?;
                 self.chat.submission = Some((id, chat_ui::Submission::Create));
                 self.error.clear();
@@ -1199,10 +1534,28 @@ fn navigation(
     )? {
         action = Action::Chats;
     }
+    ui.set_position(16.0, 200.0);
+    let contacts_selected = matches!(app.page, Page::Contacts(_));
+
+    if icon(
+        ui,
+        gpu,
+        "nav-contacts",
+        if contacts_selected {
+            contacts::ICON
+        } else {
+            "󰖸"
+        },
+        contacts_selected,
+        "Contacts",
+    )? {
+        action = Action::Contacts;
+    }
+
     ui.pop_style();
 
     // Keep settings at the bottom of the rail.
-    ui.set_position(16.0, (height - 64.0).max(200.0));
+    ui.set_position(16.0, (height - 64.0).max(256.0));
 
     if icon(
         ui,
@@ -1518,7 +1871,7 @@ fn item_list(
                             gpu,
                             &format!("conversation-{id}"),
                             ui::framework::ActionRow {
-                                title: &chat.title,
+                                title: &app.conversation_title(chat),
                                 detail: &chat.last,
                                 icon: GROUP,
                                 selected: app.conversation == Some(id)
@@ -2594,6 +2947,7 @@ fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyh
     // Reserve enough room for the full heading and its controls.
     let title = match app.page {
         Page::Settings => "Settings",
+        Page::Contacts(_) => "Contacts",
         Page::Conversations | Page::Requests | Page::PendingInvites | Page::CreateConversation => {
             "Conversations"
         }
@@ -2623,8 +2977,13 @@ fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyh
         };
 
     let remaining = (width - rail).max(1.0);
+    let minimum_list = if matches!(app.page, Page::Contacts(_)) {
+        350.0_f32
+    } else {
+        220.0_f32
+    };
     let list = (remaining / 4.0)
-        .clamp(220.0f32.max(header_width), 400.0f32.max(header_width))
+        .clamp(minimum_list.max(header_width), 400.0_f32.max(header_width))
         .min((remaining - 200.0).max(100.0));
     let content = (remaining - list).max(1.0);
 
@@ -2649,6 +3008,8 @@ fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyh
     // Settings has its own list beside profiles and conversations.
     let list_action = if app.page == Page::Settings {
         settings_list(ui, gpu, app, height)?
+    } else if let Page::Contacts(selected) = app.page {
+        contacts_ui::list(ui, gpu, app, height, selected)?
     } else {
         item_list(ui, gpu, app, snapshot, height)?
     };
@@ -2735,6 +3096,7 @@ fn shell(ui: &mut Framework, gpu: &mut Renderer, app: &App, logo: Image) -> anyh
         Page::PendingInvites => chat_ui::pending_invites(ui, gpu, app)?,
         Page::CreateConversation => chat_ui::creation(ui, gpu, app)?,
         Page::Settings => settings_page(ui, gpu, app)?,
+        Page::Contacts(selected) => contacts_ui::page(ui, gpu, app, selected)?,
     };
 
     if let Some(position) = clipboard_position {
@@ -2911,6 +3273,11 @@ fn main() -> anyhow::Result<()> {
     // Discover the accounts stored on this machine.
     let profiles = profiles::discover(&root)?;
     let mut app = App {
+        contacts: contacts::Book::open(&root)?,
+        contact_mode: contacts_ui::Mode::View,
+        contact_usernames: Default::default(),
+        contact_conversations: Vec::new(),
+        contact_links: Vec::new(),
         root,
         profiles,
         profile_form: ProfileForm::default(),
@@ -2943,6 +3310,31 @@ fn main() -> anyhow::Result<()> {
         copied_at: None,
         settings_error,
     };
+
+    for path in app
+        .profiles
+        .iter()
+        .map(|profile| &profile.path)
+        .chain(cli.profile.iter())
+    {
+        if let Err(error) = app.contacts.import(path) {
+            tracing::warn!("Could not import contacts from {}: {error}", path.display());
+        }
+
+        match client::profile_usernames(path) {
+            Ok(usernames) => app.contact_usernames.extend(
+                usernames
+                    .into_iter()
+                    .filter(|(_, username)| !username.is_empty()),
+            ),
+            Err(error) => tracing::warn!(
+                "Could not read disclosed names from {}: {error}",
+                path.display()
+            ),
+        }
+    }
+
+    app.sync_contact_names();
 
     // Use an explicit profile, or automatically select the only account.
     if let Some(path) = &cli.profile {
@@ -3044,7 +3436,7 @@ fn main() -> anyhow::Result<()> {
         // Draw the shell, then apply any action returned by the widgets.
         let mut action = shell(&mut ui, &mut renderer, &app, logo)?;
         if quickshell.is_visible() {
-            let shell_action = quickshell.render(&mut ui, &mut renderer)?;
+            let shell_action = quickshell.render(&mut ui, &mut renderer, &app)?;
 
             if modal_frame {
                 action = shell_action.unwrap_or(Action::None);
@@ -3108,9 +3500,14 @@ fn main() -> anyhow::Result<()> {
                 platform.request_redraw()?;
                 continue;
             }
-            Action::OpenQuickshell => {
+            Action::OpenQuickshell | Action::OpenContactPicker => {
                 ui.set_modal_input(false);
-                quickshell.open(&app, ui.zoom_percent(), &mut ui);
+                if matches!(action, Action::OpenContactPicker) {
+                    quickshell.open_contact_picker(&app, &mut ui);
+                } else {
+                    quickshell.open(&app, ui.zoom_percent(), &mut ui);
+                }
+
                 platform.request_redraw()?;
                 continue;
             }

@@ -36,7 +36,7 @@ struct Match<'a> {
 fn destination_rank(entry: &Entry, context: &Context) -> u8 {
     match &entry.command {
         Action::OpenConversation { .. } => 2 + u8::from(entry.owner == context.profile),
-        Action::OpenProfile(_) => 0,
+        Action::OpenProfile(_) | Action::OpenContact(_) => 0,
         _ if entry.id == "profile-conversations" => 2,
         _ => 1,
     }
@@ -133,6 +133,7 @@ struct Level {
 
 #[derive(Default)]
 pub struct Shell {
+    contact_picker: bool,
     name_target: Option<(Profile, faith_client::Id, Option<faith_client::Id>)>,
     open: bool,
     presence: crate::ui::animation::Presence,
@@ -158,10 +159,30 @@ impl Shell {
     }
 
     pub fn open(&mut self, app: &App, zoom: u32, ui: &mut Framework) {
+        self.contact_picker = false;
         self.name_target = None;
         self.levels.clear();
         self.placeholder = "Run an action directly".into();
         self.entries = catalog::build(app, zoom);
+        self.context = Some(Context::from_app(app));
+        self.query.clear();
+        self.selected = 0;
+        self.reveal = true;
+        self.open = true;
+        self.search("");
+        ui.clear_input(QUERY);
+    }
+
+    pub fn open_contact_picker(&mut self, app: &App, ui: &mut Framework) {
+        let Some(picker) = catalog::contact_picker(app) else {
+            return;
+        };
+
+        self.contact_picker = true;
+        self.name_target = None;
+        self.levels.clear();
+        self.placeholder = picker.label;
+        self.entries = picker.children.unwrap_or_default();
         self.context = Some(Context::from_app(app));
         self.query.clear();
         self.selected = 0;
@@ -211,6 +232,7 @@ impl Shell {
     ) {
         self.levels.clear();
         self.open = true;
+        self.contact_picker = false;
         self.name_target = Some((profile, id, Some(sender)));
         ui.clear_input(NAME);
         ui.animate_until(std::time::Instant::now());
@@ -223,6 +245,7 @@ impl Shell {
                 let scope = match prefix.trim().to_lowercase().as_str() {
                     "profile" | "profiles" | "account" => Some(Kind::Profile),
                     "chat" | "conversation" => Some(Kind::Conversation),
+                    "contact" | "contacts" => Some(Kind::Contact),
                     "settings" | "setting" => Some(Kind::Settings),
                     "theme" => Some(Kind::Theme),
                     _ => None,
@@ -317,6 +340,7 @@ impl Shell {
         let children = std::mem::replace(&mut self.entries, level.entries);
         self.entries[level.parent].children = Some(children);
         self.placeholder = level.placeholder;
+        self.contact_picker = false;
         self.search(&level.query);
         self.selected = level.selected.min(self.results.len().saturating_sub(1));
         ui.set_input(QUERY, &self.query);
@@ -325,6 +349,7 @@ impl Shell {
     }
 
     fn enter(&mut self, index: usize, ui: &mut Framework) {
+        self.contact_picker = self.entries[index].id == "add-contact-to-conversation";
         let children = self.entries[index].children.take().unwrap();
         let placeholder = format!(
             "Search {}",
@@ -368,6 +393,10 @@ impl Shell {
             return None;
         }
 
+        if matches!(entry.command, Action::ToggleContactPartner(_)) {
+            return Some(entry.command.clone());
+        }
+
         self.clock += 1;
         let usage = self.usage.entry(entry.id.clone()).or_default();
         usage.count = usage.count.saturating_add(1);
@@ -386,7 +415,7 @@ impl Shell {
             return Ok(None);
         };
         let (title, hint, max_chars) = if sender.is_some() {
-            ("Name sender locally", "Display name", 20)
+            ("Add to contacts", "Nickname", 20)
         } else {
             ("Name conversation", "Conversation name", 256)
         };
@@ -494,6 +523,7 @@ impl Shell {
         &mut self,
         ui: &mut Framework,
         gpu: &mut Renderer,
+        app: &App,
     ) -> anyhow::Result<Option<Action>> {
         if self.open {
             ui.begin_overlay()?;
@@ -608,7 +638,7 @@ impl Shell {
                 return Ok(None);
             }
 
-            if !escape || !self.back(ui) {
+            if !escape || self.contact_picker || !self.back(ui) {
                 self.open = false;
                 ui.ignore_overlay_input();
                 presence = ui.presence(&mut self.presence, false);
@@ -781,16 +811,26 @@ impl Shell {
         for rank in visible {
             let result = &self.results[rank];
             let entry = descendant(&self.entries[result.index], &result.path);
-            let response = ui.action_row(
+            let checked = match entry.command {
+                Action::ToggleContactPartner(id) => Some(app.chat.contact_selected(id)),
+                _ => None,
+            };
+            let detail = if checked == Some(false) && !app.chat.contact_capacity() {
+                "Conversation is full"
+            } else {
+                &entry.detail
+            };
+            let response = ui.action_row_with_checkbox(
                 gpu,
                 &format!("quickshell:{}", entry.id),
                 ActionRow {
                     title: &result.title,
-                    detail: &entry.detail,
+                    detail,
                     icon: entry.icon(),
                     selected: rank == self.selected,
                     badge: None,
                 },
+                checked,
             )?;
             if response.hovered && mouse_moved && self.selected != rank {
                 self.selected = rank;

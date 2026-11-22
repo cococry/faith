@@ -1474,7 +1474,16 @@ impl Framework {
 
     /* fixed-height lists can skip hidden rows without measuring their text */
     pub fn visible_rows(&self, row_height: f32, count: usize) -> std::ops::Range<usize> {
-        let origin = self.layouts.last().unwrap().bounds.y;
+        self.visible_rows_from(0.0, row_height, count)
+    }
+
+    pub fn visible_rows_from(
+        &self,
+        offset: f32,
+        row_height: f32,
+        count: usize,
+    ) -> std::ops::Range<usize> {
+        let origin = self.layouts.last().unwrap().bounds.y + offset;
         let clip = self.clip_bounds();
         let height = row_height.max(1.0);
         let first = (((clip.y - origin) / height).floor().max(0.0) as usize).min(count);
@@ -2748,6 +2757,16 @@ impl Framework {
         id: &str,
         row: ActionRow<'_>,
     ) -> anyhow::Result<button::Response> {
+        self.action_row_with_checkbox(gpu, id, row, None)
+    }
+
+    pub fn action_row_with_checkbox<G: GraphicsDevice>(
+        &mut self,
+        gpu: &mut G,
+        id: &str,
+        row: ActionRow<'_>,
+        checked: Option<bool>,
+    ) -> anyhow::Result<button::Response> {
         let bounds = self.place_named(self.div_width(), 56.0, Some(id));
         let key = (id.to_owned(), 0);
         self.button_occurrences.insert(id.to_owned(), 1);
@@ -2810,10 +2829,15 @@ impl Framework {
                 &mut self.ui_renderer,
             )?;
             let badge_width = badge.as_ref().map_or(0.0, |layout| layout.width + 16.0);
+            let reserved = if checked.is_some() {
+                26.0
+            } else {
+                badge_width
+            };
             self.ui_renderer.push_clip([
                 bounds.x + 44.0,
                 bounds.y,
-                (bounds.width - 56.0 - badge_width - 8.0).max(0.0),
+                (bounds.width - 56.0 - reserved - 8.0).max(0.0),
                 bounds.height,
             ]);
             let result = (|| -> anyhow::Result<()> {
@@ -2836,7 +2860,38 @@ impl Framework {
                 )
             })();
             self.ui_renderer.pop_clip();
-            if let (Some(value), Some(layout)) = (row.badge, badge) {
+            if let Some(checked) = checked {
+                let x = bounds.x + bounds.width - 30.0;
+                let y = bounds.y + (bounds.height - 18.0) * 0.5;
+                self.ui_renderer.rounded_box(
+                    [x, y, 18.0, 18.0],
+                    if self.rounded_corners {
+                        4.0
+                    } else {
+                        0.0
+                    },
+                    checked.then_some(self.theme.primary),
+                    Some(if checked {
+                        self.theme.primary
+                    } else {
+                        self.theme.muted
+                    }),
+                )?;
+                if checked {
+                    let glyph = "\u{eab2}";
+                    let font = self.font_at(Font::Icons, 14)?;
+                    let metrics = self.text_renderer.measure(glyph, font)?;
+                    self.text_renderer.color = self.theme.primary_text;
+                    self.text_renderer.render(
+                        x + (18.0 - metrics.width) * 0.5,
+                        y + (18.0 - metrics.height) * 0.5,
+                        glyph,
+                        font,
+                        gpu,
+                        &mut self.ui_renderer,
+                    )?;
+                }
+            } else if let (Some(value), Some(layout)) = (row.badge, badge) {
                 let height = (layout.height + 6.0).min(bounds.height - 12.0);
                 let badge_x = bounds.x + bounds.width - badge_width - 10.0;
                 let badge_y = bounds.y + (bounds.height - height) * 0.5;

@@ -8,6 +8,7 @@ pub enum Kind {
     Navigation,
     Profile,
     Conversation,
+    Contact,
     Settings,
     Theme,
 }
@@ -27,6 +28,7 @@ impl Context {
                 | Page::PendingInvites
                 | Page::CreateConversation => Kind::Conversation,
                 Page::Settings => Kind::Settings,
+                Page::Contacts(_) => Kind::Contact,
             },
             profile: app.selected.as_ref().map(|profile| profile.path.clone()),
         }
@@ -167,11 +169,49 @@ impl Entry {
         match self.kind {
             Kind::Profile => crate::ACCOUNTS,
             Kind::Conversation => crate::CHATS,
+            Kind::Contact => crate::contacts::ICON,
             Kind::Settings => crate::SETTINGS,
             Kind::Theme => crate::THEME,
             Kind::Navigation => crate::NEXT,
         }
     }
+}
+
+pub fn contact_picker(app: &App) -> Option<Entry> {
+    if app.page != Page::CreateConversation || app.chat.naming || !app.chat.editing_creation() {
+        return None;
+    }
+
+    let children = app
+        .contacts
+        .entries
+        .iter()
+        .filter(|contact| app.chat.snapshot.auth != Some(contact.id))
+        .map(|contact| {
+            Entry::new(
+                &format!("pick-contact:{}", contact.auth),
+                &contact.display,
+                Kind::Contact,
+                Action::ToggleContactPartner(contact.id),
+            )
+            .search(&contact.display, &[&contact.auth])
+            .detail(&contact.auth)
+        });
+
+    Some(
+        Entry::new(
+            "add-contact-to-conversation",
+            "Add contact to conversation",
+            Kind::Conversation,
+            Action::None,
+        )
+        .search(
+            "add contact to conversation",
+            &["add from contacts invite partner"],
+        )
+        .list(children)
+        .priority(210),
+    )
 }
 
 pub fn build(app: &App, zoom: u32) -> Vec<Entry> {
@@ -388,6 +428,99 @@ pub fn build(app: &App, zoom: u32) -> Vec<Entry> {
         );
     }
 
+    entries.push(
+        Entry::new(
+            "contacts",
+            "Go to contacts",
+            Kind::Contact,
+            Action::Contacts,
+        )
+        .search("contacts", &["address book local aliases"])
+        .priority(180),
+    );
+    entries.push(
+        Entry::new(
+            "add-contact",
+            "Add contact",
+            Kind::Contact,
+            Action::AddContact,
+        )
+        .search("add contact", &["create local alias auth id"]),
+    );
+    entries.extend(app.contacts.entries.iter().map(|contact| {
+        Entry::new(
+            &format!("contact:{}", contact.auth),
+            &contact.display,
+            Kind::Contact,
+            Action::OpenContact(contact.id),
+        )
+        .search(&contact.display, &[&contact.auth])
+        .detail(&format!("Contact · {}", contact.auth))
+        .priority(200)
+    }));
+
+    if let Page::Contacts(selected) = app.page {
+        use crate::contacts_ui::Mode;
+        if let Some(id) = selected.filter(|&id| app.contacts.get(id).is_some()) {
+            if app.contact_mode == Mode::View {
+                entries.push(
+                    Entry::new(
+                        "edit-contact",
+                        "Edit local name",
+                        Kind::Contact,
+                        Action::EditContact(id),
+                    )
+                    .search("edit contact", &["rename local alias"]),
+                );
+                entries.push(
+                    Entry::new(
+                        "delete-contact",
+                        "Delete contact",
+                        Kind::Contact,
+                        Action::ConfirmDeleteContact(id),
+                    )
+                    .search("delete contact", &["remove local alias"]),
+                );
+            } else if app.contact_mode == Mode::Delete {
+                entries.push(
+                    Entry::new(
+                        "confirm-delete-contact",
+                        "Confirm delete contact",
+                        Kind::Contact,
+                        Action::DeleteContact(id),
+                    )
+                    .search("confirm delete contact", &["remove local alias"]),
+                );
+            }
+        }
+
+        if matches!(app.contact_mode, Mode::Add | Mode::Edit) {
+            entries.push(
+                Entry::new(
+                    "save-contact",
+                    "Save contact",
+                    Kind::Contact,
+                    Action::SaveContactDraft,
+                )
+                .search("save contact", &["save local alias"]),
+            );
+        }
+
+        if app.contact_mode != Mode::View {
+            entries.push(
+                Entry::new(
+                    "cancel-contact-edit",
+                    "Cancel contact changes",
+                    Kind::Contact,
+                    Action::CancelContactEdit,
+                )
+                .search("cancel contact changes", &["discard local edits"]),
+            );
+        }
+    }
+
+    entries.extend(contact_picker(app));
+
     let mut chats = Vec::new();
     for profile in app.profiles.iter().filter(|profile| {
         app.selected
@@ -395,12 +528,12 @@ pub fn build(app: &App, zoom: u32) -> Vec<Entry> {
             .is_none_or(|active| active.path != profile.path)
     }) {
         entries.push(Entry::profile(profile));
-        match crate::client::conversation_titles(&profile.path) {
-            Ok(titles) => chats.extend(
-                titles
-                    .into_iter()
-                    .map(|(id, title)| Entry::conversation(profile, id, &title)),
-            ),
+        match crate::client::profile_conversations(&profile.path) {
+            Ok(titles) => {
+                chats.extend(titles.into_iter().map(|chat| {
+                    Entry::conversation(profile, chat.id, &app.conversation_title(&chat))
+                }))
+            }
             Err(error) => tracing::warn!(
                 "Could not list conversations for {}: {error}",
                 profile.alias
@@ -530,11 +663,12 @@ pub fn build(app: &App, zoom: u32) -> Vec<Entry> {
 
         if snapshot.authorized && snapshot.responding.is_none() {
             for request in &*snapshot.requests {
-                let name = if request.username.is_empty() {
+                let fallback = if request.username.is_empty() {
                     request.requester.to_string()
                 } else {
                     request.username.clone()
                 };
+                let name = app.contact_name(request.requester, &fallback);
                 for (id, verb, accept, disclose) in [
                     (
                         "accept",
@@ -583,16 +717,15 @@ pub fn build(app: &App, zoom: u32) -> Vec<Entry> {
         let snapshot = &app.chat.snapshot;
         if snapshot.auth.is_some() {
             chats.extend(
-                snapshot
-                    .conversations
-                    .iter()
-                    .map(|chat| Entry::conversation(profile, chat.id, &chat.title)),
+                snapshot.conversations.iter().map(|chat| {
+                    Entry::conversation(profile, chat.id, &app.conversation_title(chat))
+                }),
             );
-        } else if let Ok(titles) = crate::client::conversation_titles(&profile.path) {
+        } else if let Ok(titles) = crate::client::profile_conversations(&profile.path) {
             chats.extend(
-                titles
-                    .into_iter()
-                    .map(|(id, title)| Entry::conversation(profile, id, &title)),
+                titles.into_iter().map(|chat| {
+                    Entry::conversation(profile, chat.id, &app.conversation_title(&chat))
+                }),
             );
         }
 
@@ -713,14 +846,13 @@ pub fn build(app: &App, zoom: u32) -> Vec<Entry> {
                 .messages
                 .iter()
                 .filter(|message| {
-                    crate::chat_ui::can_name_sender(snapshot, message)
-                        && seen.insert(message.sender)
+                    crate::chat_ui::can_name_sender(app, message) && seen.insert(message.sender)
                 })
                 .map(|message| {
                     let sender = message.sender;
                     Entry::new(
                         &format!("name-sender:{}:{id}:{sender}", profile.path.display()),
-                        &message.author,
+                        app.contact_name(sender, &message.author),
                         Kind::Conversation,
                         Action::PromptSenderName {
                             profile: profile.clone(),
@@ -755,14 +887,14 @@ pub fn build(app: &App, zoom: u32) -> Vec<Entry> {
             let children = snapshot.conversations.iter().map(|chat| {
                 let mut entry = Entry::new(
                     &format!("name-conversation:{}:{}", profile.path.display(), chat.id),
-                    &chat.title,
+                    &app.conversation_title(chat),
                     Kind::Conversation,
                     Action::PromptConversationName {
                         profile: profile.clone(),
                         id: chat.id,
                     },
                 )
-                .search(&chat.title, &["name rename title"])
+                .search(&app.conversation_title(chat), &["name rename title"])
                 .detail(&profile.alias);
                 entry.owner = Some(profile.path.clone());
                 entry

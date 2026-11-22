@@ -55,6 +55,26 @@ impl State {
         };
     }
 
+    pub fn invalidate_history_layout(&mut self) {
+        self.history_layout.get_mut().take();
+    }
+
+    pub fn contact_capacity(&self) -> bool {
+        self.partners.len() < faith_client::MAX_MEMBERS - 1
+    }
+
+    pub fn contact_selected(&self, id: Id) -> bool {
+        self.partners.iter().any(|(partner, _)| *partner == id)
+    }
+
+    pub fn toggle_contact(&mut self, id: Id) {
+        if let Some(index) = self.partners.iter().position(|(partner, _)| *partner == id) {
+            self.partners.remove(index);
+        } else if let Some(partner) = self.valid_partner(id, "") {
+            self.partners.push(partner);
+        }
+    }
+
     pub fn title_id(&self) -> String {
         format!("chat-title-{}-{}", self.session, self.form)
     }
@@ -106,8 +126,9 @@ impl State {
     }
 
     fn valid_partner(&self, id: Id, name: &str) -> Option<(Id, String)> {
-        (self.partners.len() < faith_client::MAX_MEMBERS - 1
+        (self.contact_capacity()
             && self.snapshot.auth != Some(id)
+            && !name.chars().any(char::is_control)
             && !self.partners.iter().any(|(existing, _)| *existing == id))
         .then(|| (id, name.trim().to_owned()))
     }
@@ -118,12 +139,12 @@ impl State {
         ui.focus_input(&self.partner_id());
     }
 
-    pub fn default_title(&self) -> String {
+    pub fn default_title(&self, name_for: impl Fn(&Id, &str) -> String) -> String {
         let mut title = self
             .partners
             .iter()
             .take(3)
-            .map(|(id, name)| partner_label(id, name))
+            .map(|(id, name)| name_for(id, name))
             .collect::<Vec<_>>()
             .join(", ");
         if self.partners.len() > 3 {
@@ -134,7 +155,7 @@ impl State {
     }
 }
 
-fn partner_label(id: &Id, name: &str) -> String {
+pub fn partner_label(id: &Id, name: &str) -> String {
     if name.is_empty() {
         format!("{}…", &id.to_string()[..4])
     } else {
@@ -352,9 +373,9 @@ pub fn creation(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Re
         let name = form_input(
             ui,
             gpu,
-            "Display name (optional)",
+            "Local contact name (optional)",
             &name_id,
-            "Enter a display name",
+            "Enter a local name",
             Some(20),
             true,
         )?;
@@ -362,7 +383,7 @@ pub fn creation(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Re
         label(
             ui,
             gpu,
-            "The name displayed locally when texting your partner.",
+            "A local name saves this Auth ID to Contacts when you create the conversation.",
             12,
             false,
             true,
@@ -375,6 +396,12 @@ pub fn creation(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Re
         let draft_empty = entered_auth.is_empty() && name.trim().is_empty();
         can_continue = partner.is_some() || draft_empty && !form.partners.is_empty();
         ui.space(12.0);
+        let button_y = ui.position().1;
+        let inline = ui.div_width() >= 300.0;
+        if inline {
+            ui.push_sizing(Some(118.0), None);
+        }
+
         let add = command_button(
             ui,
             gpu,
@@ -384,10 +411,32 @@ pub fn creation(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Re
             partner.is_some(),
             false,
         )?;
+        if inline {
+            ui.pop_sizing();
+        }
+
         if let Some((id, name)) = partner.as_ref()
             && (add || ui.input_submitted(&auth_id) || ui.input_submitted(&name_id))
         {
             action = Action::AddChatPartner(*id, name.clone());
+        }
+
+        if inline {
+            ui.set_position(128.0, button_y);
+        } else {
+            ui.space(8.0);
+        }
+
+        if command_button(
+            ui,
+            gpu,
+            "add-from-contacts",
+            crate::contacts::ICON,
+            "Add from contacts",
+            editing,
+            false,
+        )? {
+            action = Action::OpenContactPicker;
         }
 
         if !entered_auth.is_empty() && parsed_auth.is_none() {
@@ -410,7 +459,7 @@ pub fn creation(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Re
             let mut x = 0.0;
             let mut y = ui.position().1;
             for (index, (id, name)) in form.partners.iter().enumerate() {
-                let title = partner_label(id, name);
+                let title = app.partner_label(id, name);
                 ui.push_style(Style {
                     font_size: 13,
                     ..ui.style()
@@ -499,8 +548,7 @@ pub fn creation(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Re
                     required: form.require_username,
                     disclose: form.snapshot.username.is_some() && form.discloses_username(),
                 },
-                use_disclosed_title: matches!(form.partners.as_slice(), [(_, name)] if name.is_empty())
-                    && title.trim() == form.default_title(),
+                automatic_title: title.trim() == app.default_conversation_title(),
             }
         } else {
             Action::NameNewConversation(partner)
@@ -672,7 +720,15 @@ pub fn requests(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Re
         } else {
             &request.username
         };
-        label(ui, gpu, name, 14, true, false, false)?;
+        label(
+            ui,
+            gpu,
+            app.contact_name(request.requester, name),
+            14,
+            true,
+            false,
+            false,
+        )?;
 
         let mut share = has_username && app.chat.shares_on_request(id);
         if request.required {
@@ -833,12 +889,19 @@ pub fn pending_invites(
                 ..Default::default()
             },
         )?;
-        label(ui, gpu, &invite.title, 14, true, false, false)?;
+        let title = invite.title_members.as_ref().map_or_else(
+            || std::borrow::Cow::Borrowed(invite.title.as_str()),
+            |members| app.member_title(members, None, &invite.title),
+        );
+        label(ui, gpu, &title, 14, true, false, false)?;
         ui.space(4.0);
         label(
             ui,
             gpu,
-            &format!("Invite to {}", invite.recipient_name),
+            &format!(
+                "Invite to {}",
+                app.contact_name(invite.recipient, &invite.recipient_name)
+            ),
             12,
             false,
             true,
@@ -1054,7 +1117,15 @@ pub fn conversation(
         width: Some(inner_width),
         ..Default::default()
     })?;
-    label(ui, gpu, &chat.title, 20, true, false, false)?;
+    label(
+        ui,
+        gpu,
+        &app.conversation_title(chat),
+        20,
+        true,
+        false,
+        false,
+    )?;
 
     if !snapshot.status.is_empty()
         && (!snapshot.authorized || snapshot.pending || snapshot.delivering)
@@ -1143,17 +1214,14 @@ struct HistoryLayout {
 }
 
 impl HistoryLayout {
-    fn measure(
-        ui: &mut Framework,
-        snapshot: &client::Snapshot,
-        limit: f32,
-    ) -> anyhow::Result<Self> {
+    fn measure(ui: &mut Framework, app: &App, limit: f32) -> anyhow::Result<Self> {
+        let snapshot = &app.chat.snapshot;
         let padding = limit.min(20.0) * 0.5;
         let content = (limit - padding * 2.0).max(1.0);
         let mut extent = 0.0;
         let mut bubbles = Vec::with_capacity(snapshot.messages.len());
         for message in snapshot.messages.iter() {
-            let author = author(snapshot, message);
+            let author = author(app, message);
             ui.push_style(Style {
                 font_size: 14,
                 ..ui.style()
@@ -1169,7 +1237,7 @@ impl HistoryLayout {
             let (body, name) = (body?, name?);
             let width = (body.0.max(name.0).ceil() + 2.0 * padding + 1.0).min(limit);
             let height = body.1 + name.1 + 2.0 * padding;
-            let actions = if can_name_sender(snapshot, message) {
+            let actions = if can_name_sender(app, message) {
                 MESSAGE_ACTION_SIZE + MESSAGE_ACTION_GAP
             } else {
                 0.0
@@ -1193,16 +1261,16 @@ impl HistoryLayout {
     }
 }
 
-fn author<'a>(snapshot: &client::Snapshot, message: &'a client::Message) -> &'a str {
-    if snapshot.auth == Some(message.sender) {
+fn author<'a>(app: &'a App, message: &'a client::Message) -> &'a str {
+    if app.chat.snapshot.auth == Some(message.sender) {
         "You"
     } else {
-        &message.author
+        app.contact_name(message.sender, &message.author)
     }
 }
 
-pub fn can_name_sender(snapshot: &client::Snapshot, message: &client::Message) -> bool {
-    snapshot.auth != Some(message.sender) && !message.has_name
+pub fn can_name_sender(app: &App, message: &client::Message) -> bool {
+    app.chat.snapshot.auth != Some(message.sender) && app.contacts.get(message.sender).is_none()
 }
 
 fn messages(
@@ -1238,7 +1306,7 @@ fn messages(
                 || layout.scale != ui.layout_scale()
                 || !Arc::ptr_eq(&layout.messages, &snapshot.messages)
         }) {
-            *cache = Some(HistoryLayout::measure(ui, snapshot, limit)?);
+            *cache = Some(HistoryLayout::measure(ui, app, limit)?);
         }
 
         let layout = cache.as_ref().unwrap();
@@ -1293,7 +1361,7 @@ fn messages(
                     color: ui.theme().primary_text,
                     ..ui.style()
                 });
-                ui.text(gpu, author(snapshot, message), Some(Font::Bold))?;
+                ui.text(gpu, author(app, message), Some(Font::Bold))?;
                 ui.pop_style();
                 ui.push_style(Style {
                     font_size: 14,
@@ -1303,7 +1371,7 @@ fn messages(
                 ui.text(gpu, &message.body, None)?;
                 ui.pop_style();
             } else {
-                label(ui, gpu, author(snapshot, message), 12, true, true, false)?;
+                label(ui, gpu, author(app, message), 12, true, true, false)?;
                 label(ui, gpu, &message.body, 14, false, false, false)?;
             }
 
@@ -1352,6 +1420,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn contact_picker_toggles_recipients_and_keeps_membership_valid() {
+        let mut state = State::default();
+        let own = Id([0; 16]);
+        state.snapshot.auth = Some(own);
+        state.toggle_contact(own);
+        assert!(state.partners.is_empty());
+
+        for i in 1..faith_client::MAX_MEMBERS {
+            state.toggle_contact(Id([i as u8; 16]));
+        }
+
+        let first = Id([1; 16]);
+        let extra = Id([250; 16]);
+        assert!(state.contact_selected(first));
+        assert!(!state.contact_capacity());
+        state.toggle_contact(extra);
+        assert!(!state.contact_selected(extra));
+
+        state.toggle_contact(first);
+        assert!(!state.contact_selected(first));
+        state.toggle_contact(extra);
+        assert!(state.contact_selected(extra));
+        assert!(!state.contact_capacity());
+    }
+
+    #[test]
     fn group_title_uses_three_partners_and_shortens_unnamed_ids() {
         let state = State {
             partners: vec![
@@ -1363,6 +1457,9 @@ mod tests {
             ..State::default()
         };
 
-        assert_eq!(state.default_title(), "Alice, 0202…, Caren & more");
+        assert_eq!(
+            state.default_title(partner_label),
+            "Alice, 0202…, Caren & more"
+        );
     }
 }

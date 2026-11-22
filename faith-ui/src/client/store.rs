@@ -78,7 +78,7 @@ fn chat_title(
     chat_members: &[Id],
     own_auth: Option<Id>,
 ) -> anyhow::Result<String> {
-    if let Some(metadata) = metadata.filter(|metadata| !metadata.title.is_empty()) {
+    if let Some(metadata) = metadata.filter(|m| !title_members(Some(m), chat_members, own_auth)) {
         return Ok(metadata.title.clone());
     }
 
@@ -93,6 +93,25 @@ fn chat_title(
         .filter_map(|member| names.get(member).map(String::as_str));
     let first: Vec<_> = disclosed.by_ref().take(3).collect();
     if first.is_empty() {
+        if metadata.is_some_and(|m| m.automatic_title) {
+            let mut partners = chat_members
+                .iter()
+                .filter(|&&member| Some(member) != own_auth);
+            let mut title = partners
+                .by_ref()
+                .take(3)
+                .map(|id| format!("{}…", &id.to_string()[..4]))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if partners.next().is_some() {
+                title.push_str(" & more");
+            }
+
+            if !title.is_empty() {
+                return Ok(title);
+            }
+        }
+
         return Ok(format!("Chat · {}", &id.to_string()[..8]));
     }
 
@@ -105,12 +124,12 @@ fn chat_title(
     Ok(title)
 }
 
-pub fn conversation_titles(profile: &Path) -> anyhow::Result<Vec<(Id, String)>> {
+fn open_reader(profile: &Path) -> anyhow::Result<Option<Connection>> {
     let directory = fs::symlink_metadata(profile)?;
     let database = profile.join("conversations.sqlite");
     let metadata = match fs::symlink_metadata(&database) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
     let uid = unsafe { nix::libc::geteuid() };
@@ -128,16 +147,79 @@ pub fn conversation_titles(profile: &Path) -> anyhow::Result<Vec<(Id, String)>> 
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
     db.busy_timeout(std::time::Duration::ZERO)?;
+    Ok(Some(db))
+}
+
+fn has_table(db: &Connection, name: &str) -> rusqlite::Result<bool> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?)",
+        [name],
+        |row| row.get(0),
+    )
+}
+
+pub fn legacy_aliases(profile: &Path) -> anyhow::Result<Option<Vec<(Id, String)>>> {
+    let Some(db) = open_reader(profile)? else {
+        return Ok(None);
+    };
+
+    if !has_table(&db, "chat_metadata")? {
+        return Ok(Some(Vec::new()));
+    }
+
+    let mut stmt = db.prepare("SELECT data FROM chat_metadata ORDER BY rowid DESC")?;
+    let mut aliases = Vec::new();
+    for row in stmt.query_map([], |row| row.get::<_, String>(0))? {
+        let metadata: Metadata = serde_json::from_str(&row?)?;
+        aliases.extend(
+            metadata
+                .partners
+                .into_iter()
+                .map(|(auth, name)| (Id(auth), name)),
+        );
+    }
+
+    Ok(Some(aliases))
+}
+
+fn usernames(db: &Connection) -> anyhow::Result<Vec<(Id, String)>> {
+    let mut stmt = db.prepare_cached(if has_table(db, "incoming_requests")? {
+        "SELECT member,username FROM (
+            SELECT requester AS member, username, 0 AS source, rowid FROM incoming_requests WHERE username != ''
+            UNION ALL
+            SELECT member, username, 1 AS source, rowid FROM disclosed_usernames
+        ) ORDER BY source, rowid"
+    } else {
+        "SELECT member,username FROM disclosed_usernames ORDER BY rowid"
+    })?;
+    Ok(stmt
+        .query_map([], |row| Ok((id(row.get(0)?)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+pub fn profile_usernames(profile: &Path) -> anyhow::Result<Vec<(Id, String)>> {
+    let Some(db) = open_reader(profile)? else {
+        return Ok(Vec::new());
+    };
+
+    if has_table(&db, "disclosed_usernames")? {
+        usernames(&db)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+pub fn profile_conversations(profile: &Path) -> anyhow::Result<Vec<Chat>> {
+    let Some(db) = open_reader(profile)? else {
+        return Ok(Vec::new());
+    };
+
     let own_auth = db
         .query_row("SELECT value FROM settings WHERE key='auth'", [], |row| {
             id(row.get(0)?)
         })
         .optional()?;
-    let has_usernames = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='disclosed_usernames' AND type='table')",
-        [],
-        |row| row.get::<_, bool>(0),
-    )?;
+    let has_usernames = has_table(&db, "disclosed_usernames")?;
     let mut stmt = db.prepare(
         "SELECT c.id, m.data, c.members FROM conversations c
          LEFT JOIN chat_metadata m ON m.conversation=c.id
@@ -158,15 +240,38 @@ pub fn conversation_titles(profile: &Path) -> anyhow::Result<Vec<(Id, String)>> 
             chat_title(&db, id, metadata.as_ref(), &members, own_auth)?
         } else {
             metadata
-                .filter(|metadata| !metadata.title.is_empty())
+                .as_ref()
+                .filter(|m| !title_members(Some(m), &members, own_auth))
                 .map_or_else(
                     || format!("Chat · {}", &id.to_string()[..8]),
-                    |metadata| metadata.title,
+                    |metadata| metadata.title.clone(),
                 )
         };
-        Ok((id, title))
+        Ok(Chat {
+            id,
+            title,
+            needs_name: metadata
+                .as_ref()
+                .is_none_or(|m| m.title.is_empty() && !m.automatic_title),
+            name_members: title_members(metadata.as_ref(), &members, own_auth),
+            members,
+            own_auth,
+            last: String::new(),
+        })
     })
     .collect()
+}
+
+fn title_members(metadata: Option<&Metadata>, members: &[Id], auth: Option<Id>) -> bool {
+    metadata.is_none_or(|m| {
+        m.automatic_title
+            || m.title.is_empty()
+            || m.title_from.is_some()
+            || (members.len() == 2
+                && m.partners
+                    .iter()
+                    .any(|(id, alias)| Some(Id(*id)) != auth && *alias == m.title))
+    })
 }
 
 impl Store {
@@ -302,7 +407,7 @@ impl Store {
                 id,
                 needs_name: metadata
                     .as_ref()
-                    .is_none_or(|metadata| metadata.title.is_empty()),
+                    .is_none_or(|m| m.title.is_empty() && !m.automatic_title),
                 title: chat_title(&db, id, metadata.as_ref(), &members, Some(auth))?,
                 last: last.map_or_else(
                     || "No messages yet".into(),
@@ -321,18 +426,21 @@ impl Store {
                         preview
                     },
                 ),
-                metadata,
+                name_members: title_members(metadata.as_ref(), &members, Some(auth)),
+                members,
+                own_auth: Some(auth),
             });
         }
 
         Ok(chats)
     }
 
-    pub fn rename(&self, id: Id, auth: Id, title: String) -> anyhow::Result<()> {
+    pub fn rename(&self, id: Id, title: String) -> anyhow::Result<()> {
         let db = self.db()?;
-        let chat = conversation(&db, id)?
-            .filter(|chat| chat.active)
-            .ok_or_else(|| anyhow::anyhow!("Conversation is unavailable"))?;
+        anyhow::ensure!(
+            conversation(&db, id)?.is_some_and(|chat| chat.active),
+            "Conversation is unavailable"
+        );
         let existing: Option<String> = db
             .query_row(
                 "SELECT data FROM chat_metadata WHERE conversation=?",
@@ -345,19 +453,14 @@ impl Store {
             None => Metadata {
                 title: String::new(),
                 title_from: None,
+                automatic_title: false,
                 partners: Vec::new(),
             },
         };
-        // in a direct chat the other member can use the same name as the conversation
-        if chat.members.len() == 2
-            && let Some(partner) = chat.members.iter().find(|id| **id != auth)
-            && metadata.partners.is_empty()
-        {
-            metadata.partners = vec![(partner.0, title.clone())];
-        }
-
         metadata.title = title;
         metadata.title_from = None;
+        metadata.automatic_title = false;
+        metadata.partners.clear();
         db.execute(
             "INSERT INTO chat_metadata(conversation,data) VALUES(?,?) ON CONFLICT(conversation) DO UPDATE SET data=excluded.data",
             params![id.0.as_slice(), serde_json::to_string(&metadata)?],
@@ -365,44 +468,8 @@ impl Store {
         Ok(())
     }
 
-    pub fn name_sender(&self, id: Id, sender: Id, name: &str) -> anyhow::Result<()> {
-        let db = self.db()?;
-        anyhow::ensure!(
-            conversation(&db, id)?
-                .is_some_and(|chat| chat.active && chat.members.contains(&sender)),
-            "Sender is unavailable"
-        );
-        let has_username: bool = db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM disclosed_usernames WHERE conversation=? AND member=?)",
-            params![id.0, sender.0],
-            |row| row.get(0),
-        )?;
-        anyhow::ensure!(!has_username, "This sender has already shared a username");
-        let existing: Option<String> = db
-            .query_row(
-                "SELECT data FROM chat_metadata WHERE conversation=?",
-                [id.0],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let mut metadata = match existing {
-            Some(data) => serde_json::from_str::<Metadata>(&data)?,
-            None => Metadata {
-                title: String::new(),
-                title_from: None,
-                partners: Vec::new(),
-            },
-        };
-        anyhow::ensure!(
-            !metadata.partners.iter().any(|(id, _)| *id == sender.0),
-            "This sender already has a local name"
-        );
-        metadata.partners.push((sender.0, name.to_owned()));
-        db.execute(
-            "INSERT INTO chat_metadata(conversation,data) VALUES(?,?) ON CONFLICT(conversation) DO UPDATE SET data=excluded.data",
-            params![id.0, serde_json::to_string(&metadata)?],
-        )?;
-        Ok(())
+    pub fn usernames(&self) -> anyhow::Result<Vec<(Id, String)>> {
+        usernames(&*self.db()?)
     }
 
     pub fn history(&self, chat: &Chat) -> anyhow::Result<Vec<Message>> {
@@ -417,17 +484,10 @@ impl Store {
                 let sender = id(row.get(0)?)?;
                 let body: String = row.get(1)?;
                 let disclosed: Option<String> = row.get(3)?;
-                let author = chat
-                    .metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.partners.iter().find(|(id, _)| *id == sender.0))
-                    .map(|(_, name)| name.clone())
-                    .or(disclosed);
                 Ok(Message {
                     row_id: row.get(2)?,
                     sender,
-                    has_name: author.is_some(),
-                    author: author.unwrap_or_else(|| sender.to_string()),
+                    author: disclosed.unwrap_or_else(|| sender.to_string()),
                     body: body
                         .chars()
                         .filter(|c| !c.is_control() || *c == '\n')
@@ -544,6 +604,15 @@ impl Store {
                 &packet.members,
                 Some(auth),
             )?;
+            let title_members =
+                title_members(metadata.as_ref(), &packet.members, Some(auth)).then(|| {
+                    packet
+                        .members
+                        .iter()
+                        .copied()
+                        .filter(|&id| id != auth)
+                        .collect::<std::sync::Arc<[_]>>()
+                });
             for recipient in targets.into_iter().filter(|target| *target != auth) {
                 let accepted = db
                     .query_row(
@@ -552,17 +621,11 @@ impl Store {
                         |row| row.get::<_, bool>(0),
                     )
                     .optional()?;
-                let recipient_name = metadata
-                    .as_ref()
-                    .and_then(|metadata| {
-                        metadata.partners.iter().find(|(id, _)| *id == recipient.0)
-                    })
-                    .map(|(_, name)| name.clone())
-                    .filter(|name| !name.is_empty())
-                    .unwrap_or_else(|| format!("{}…", &recipient.to_string()[..8]));
+                let recipient_name = format!("{}…", &recipient.to_string()[..8]);
                 invites.push(super::PendingInvite {
                     conversation,
                     title: title.clone(),
+                    title_members: title_members.clone(),
                     recipient,
                     recipient_name,
                     accepted,
@@ -779,6 +842,12 @@ impl Store {
                         "INSERT OR IGNORE INTO incoming_requests VALUES(?,?,?,?)",
                         params![conversation, &event.data[16..32], required, username],
                     )?;
+                    if !username.is_empty() {
+                        tx.execute(
+                            "INSERT OR IGNORE INTO disclosed_usernames VALUES(?,?,?)",
+                            params![conversation, &event.data[16..32], username],
+                        )?;
+                    }
                 }
 
                 super::RESPONSE_EVENT => {
@@ -823,6 +892,7 @@ impl Store {
                         {
                             metadata.title = username.to_owned();
                             metadata.title_from = None;
+                            metadata.automatic_title = true;
                             tx.execute(
                                 "UPDATE chat_metadata SET data=? WHERE conversation=?",
                                 params![serde_json::to_string(metadata)?, conversation],
@@ -938,6 +1008,7 @@ mod tests {
                 Some(&Metadata {
                     title: partner.to_string(),
                     title_from: Some(partner.0),
+                    automatic_title: false,
                     partners: Vec::new(),
                 }),
                 Some(InvitationPolicy {
