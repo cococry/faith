@@ -1005,15 +1005,6 @@ impl App {
             }
 
             Action::RequireConversationUsername(value) => {
-                let id = self.chat.title_id();
-                let default = self.default_conversation_title();
-                let title = ui.input_value(&id).unwrap_or_default();
-                if value && title == default {
-                    ui.set_input(&id, "");
-                } else if !value && title.is_empty() {
-                    ui.set_input(&id, &default);
-                }
-
                 self.chat.require_username = value;
             }
 
@@ -1078,12 +1069,7 @@ impl App {
                 }
 
                 self.chat.naming = true;
-                let title = if self.chat.require_username {
-                    String::new()
-                } else {
-                    self.default_conversation_title()
-                };
-                ui.set_input(&self.chat.title_id(), &title);
+                ui.set_input(&self.chat.title_id(), &self.default_conversation_title());
             }
 
             Action::EditChatPartners => {
