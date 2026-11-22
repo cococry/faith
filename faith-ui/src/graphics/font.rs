@@ -447,6 +447,15 @@ impl FontManager {
             .map_err(|error| anyhow::anyhow!(error.clone()))
     }
 
+    pub fn validate_ui_font(&self, handle: FontHandle) -> anyhow::Result<()> {
+        let font = self.get_font(handle)?;
+        anyhow::ensure!(
+            font.face.is_scalable(),
+            "Font does not support scalable UI text"
+        );
+        Ok(())
+    }
+
     pub fn requested_size(&self, handle: FontHandle) -> anyhow::Result<u32> {
         Ok(self
             .fonts

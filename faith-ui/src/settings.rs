@@ -23,6 +23,7 @@ const FADE: Duration = Duration::from_millis(250);
 #[serde(default)]
 pub struct Settings {
     pub theme: String,
+    pub font: Option<crate::system_fonts::Family>,
     pub rounded_corners: bool,
     #[serde(default = "animations_default")]
     pub animations: bool,
@@ -189,6 +190,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: DEFAULT_ID.to_owned(),
+            font: None,
             rounded_corners: true,
             animations: true,
             layout_morphing: true,

@@ -284,14 +284,24 @@ pub fn page(
         let name = form_input(
             ui,
             gpu,
-            "Local name",
+            "Nickname",
             "contact-name",
-            "Enter a local name",
+            "Enter a nickname",
             InputOptions {
                 max_chars: Some(NAME_MAX),
                 filter: Some(|c| !c.is_control()),
             },
             true,
+        )?;
+        ui.space(8.0);
+        label(
+            ui,
+            gpu,
+            "Nicknames are only visible to you. You can change them at any time.",
+            12,
+            false,
+            true,
+            false,
         )?;
         let id = auth
             .parse::<Id>()

@@ -1014,19 +1014,11 @@ fn conversation_overview(
 
     ui.text_centered(gpu, CHATS, Some(Font::Icons))?;
     ui.pop_style();
+    ui.space(8.0);
     label(
         ui,
         gpu,
-        "A space for your conversations",
-        23,
-        true,
-        false,
-        true,
-    )?;
-    label(
-        ui,
-        gpu,
-        "Choose a conversation from the list to get started.",
+        "Open a conversation to get started.",
         14,
         false,
         true,
@@ -1096,7 +1088,7 @@ pub fn conversation(
     let contact = partner.filter(|&member| app.contacts.get(member).is_some());
     let contact_action = match partner {
         Some(member) if app.can_save_partner(member) => Some((
-            "Save contact",
+            "Save a contact",
             Action::PromptSaveConversationContact {
                 profile: profile.clone(),
                 id: chat.id,
@@ -1108,7 +1100,7 @@ pub fn conversation(
             .iter()
             .any(|&member| app.can_save_partner(member)) =>
         {
-            Some(("Save contact", Action::OpenConversationContacts))
+            Some(("Save a contact", Action::OpenConversationContacts))
         }
         _ => None,
     };
@@ -1448,7 +1440,7 @@ fn messages(
             {
                 ui.set_position(0.0, bubble.y + bubble.height + MESSAGE_ACTION_GAP);
                 ui.push_style(Style {
-                    tooltip: Some("Save contact"),
+                    tooltip: Some("Save a contact"),
                     font_size: 14,
                     radius: MESSAGE_ACTION_SIZE * 0.5,
                     color: ui.theme().text,

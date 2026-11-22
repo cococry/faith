@@ -5,6 +5,7 @@ pub mod quad;
 pub mod renderer;
 mod scale;
 pub mod scroll;
+pub(crate) mod search;
 pub mod text;
 pub mod theme;
 pub mod widgets;

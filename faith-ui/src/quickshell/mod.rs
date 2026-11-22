@@ -1,5 +1,5 @@
 pub mod catalog;
-mod rank;
+use crate::ui::search as rank;
 
 use std::collections::HashMap;
 
@@ -146,6 +146,7 @@ struct Level {
 #[derive(Default)]
 pub struct Shell {
     contact_picker: bool,
+    loading_fonts: bool,
     save_contact_target: Option<(Profile, faith_client::Id, faith_client::Id)>,
     open: bool,
     presence: crate::ui::animation::Presence,
@@ -172,6 +173,7 @@ impl Shell {
 
     pub fn open(&mut self, app: &App, zoom: u32, ui: &mut Framework) {
         self.contact_picker = false;
+        self.loading_fonts = false;
         self.save_contact_target = None;
         self.levels.clear();
         self.placeholder = "Run an action directly".into();
@@ -183,6 +185,34 @@ impl Shell {
         self.open = true;
         self.search("");
         ui.clear_input(QUERY);
+    }
+
+    pub fn open_font_picker(&mut self, app: &App, ui: &mut Framework) {
+        let Some(index) = self
+            .entries
+            .iter()
+            .position(|entry| matches!(entry.command, Action::OpenFontPicker))
+        else {
+            return;
+        };
+
+        self.loading_fonts = app.system_fonts.loading();
+        self.entries[index].children = Some(if self.loading_fonts {
+            Vec::new()
+        } else {
+            catalog::font_choices(app)
+        });
+        self.open = true;
+        self.enter(index, ui);
+    }
+
+    pub fn finish_font_picker(&mut self, app: &App) {
+        if self.open && self.loading_fonts {
+            self.entries = catalog::font_choices(app);
+            self.loading_fonts = false;
+            let query = self.query.clone();
+            self.search(&query);
+        }
     }
 
     pub fn open_contact_picker(&mut self, app: &App, ui: &mut Framework) {
@@ -201,6 +231,7 @@ impl Shell {
 
     fn open_collection(&mut self, app: &App, ui: &mut Framework, collection: Entry) {
         self.contact_picker = collection.id == "add-contact-to-conversation";
+        self.loading_fonts = false;
         self.save_contact_target = None;
         self.levels.clear();
         self.placeholder = collection.label;
@@ -342,7 +373,12 @@ impl Shell {
             return false;
         };
         let children = std::mem::replace(&mut self.entries, level.entries);
-        self.entries[level.parent].children = Some(children);
+        if matches!(self.entries[level.parent].command, Action::OpenFontPicker) {
+            self.loading_fonts = false;
+        } else {
+            self.entries[level.parent].children = Some(children);
+        }
+
         self.placeholder = level.placeholder;
         self.contact_picker = false;
         self.search(&level.query);
@@ -429,7 +465,7 @@ impl Shell {
                 ..Default::default()
             },
         )?;
-        crate::label(ui, gpu, "Save contact", 15, true, false, false)?;
+        crate::label(ui, gpu, "Save a contact", 15, true, false, false)?;
         ui.space(12.0);
 
         let width = ui.div_width();
@@ -547,6 +583,12 @@ impl Shell {
             .min(8)
             .min(count);
         let empty = self.results.is_empty();
+        let empty_label = if self.loading_fonts {
+            "Finding system fonts…"
+        } else {
+            "No matching actions"
+        };
+
         let list_height = if naming {
             0.0
         } else if empty {
@@ -554,8 +596,7 @@ impl Shell {
                 font_size: 13,
                 ..ui.style()
             });
-            let measured =
-                ui.wrapped_text_size("No matching actions", None, (width - 24.0).max(1.0));
+            let measured = ui.wrapped_text_size(empty_label, None, (width - 24.0).max(1.0));
             ui.pop_style();
             measured?.1 + 16.0
         } else {
@@ -825,7 +866,7 @@ impl Shell {
                 ..ui.style()
             });
             ui.push_sizing(Some((ui.div_width() - 24.0).max(1.0)), None);
-            let result = ui.text(gpu, "No matching actions", None);
+            let result = ui.text(gpu, empty_label, None);
             ui.pop_sizing();
             ui.pop_style();
             result?;
