@@ -1241,5 +1241,20 @@ pub fn build(app: &App, zoom: u32) -> Vec<Entry> {
         );
     }
 
+    #[cfg(debug_assertions)]
+    entries.push(
+        Entry::new(
+            "toggle-frame-stats",
+            "Toggle frame timing overlay",
+            Kind::Navigation,
+            Action::ToggleFrameStats,
+        )
+        .search(
+            "frame timing overlay",
+            &["debug performance average ms slow frames fps"],
+        )
+        .detail("Development builds only"),
+    );
+
     entries
 }

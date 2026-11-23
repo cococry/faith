@@ -171,6 +171,8 @@ enum Action {
         control: &'static str,
     },
     ResetZoom,
+    #[cfg(debug_assertions)]
+    ToggleFrameStats,
     Create(String),
     ClaimUsername(bool),
     ToggleUsernameHelp,
@@ -1388,6 +1390,8 @@ impl App {
                 }
             }
             Action::ResetZoom => ui.reset_zoom(),
+            #[cfg(debug_assertions)]
+            Action::ToggleFrameStats => ui.toggle_frame_stats(),
             Action::ClaimUsername(claim) => self.profile_form.claim = claim,
             Action::ToggleUsernameHelp => self.profile_form.help = !self.profile_form.help,
             Action::ToggleUsernameAdvanced => {
@@ -3890,6 +3894,8 @@ fn main() -> anyhow::Result<()> {
     // Wait for input or a client notification before drawing again.
     loop {
         let mut events = platform.poll_events()?;
+        #[cfg(debug_assertions)]
+        let frame_started = std::time::Instant::now();
         app.refresh_chat(&mut ui);
         if app.system_fonts.poll(app.font.as_ref()) {
             quickshell.finish_font_picker(&app);
@@ -4059,6 +4065,8 @@ fn main() -> anyhow::Result<()> {
         ui.end(&mut renderer)?;
         platform.set_cursor(ui.cursor_icon())?;
         renderer.end_frame()?;
+        #[cfg(debug_assertions)]
+        ui.record_frame(frame_started.elapsed(), platform.waker().frame_interval());
 
         if first_frame {
             if let Some(path) = &cli.ready_file {
