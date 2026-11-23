@@ -427,6 +427,8 @@ pub struct Framework {
     overlay_opacity: f32,
     scheduler: Scheduler,
     frame_time: Instant,
+    #[cfg(debug_assertions)]
+    frame_stats: super::frame_stats::FrameStats,
     has_rendered: bool,
     window_focused: bool,
     deadline: Option<Instant>,
@@ -515,6 +517,8 @@ impl Framework {
             overlay_opacity: 1.0,
             scheduler: Scheduler::new(platform.waker())?,
             frame_time: Instant::now(),
+            #[cfg(debug_assertions)]
+            frame_stats: super::frame_stats::FrameStats::default(),
             has_rendered: false,
             window_focused: true,
             deadline: None,
@@ -1223,6 +1227,11 @@ impl Framework {
         self.hovered_tooltip = None;
         self.text_cursor = false;
         self.frame_time = Instant::now();
+        #[cfg(debug_assertions)]
+        {
+            self.frame_stats.interval = platform.waker().frame_interval();
+        }
+
         self.layout_resized = events
             .iter()
             .any(|event| matches!(event, WindowEvent::Resized { .. }));
@@ -1629,6 +1638,8 @@ impl Framework {
 
         self.has_rendered = true;
         self.render_zoom_indicator(gpu)?;
+        #[cfg(debug_assertions)]
+        self.render_frame_stats(gpu)?;
         if !self.modal_input && self.navigation.finish(&mut self.focused) {
             self.reveal_focus = true;
             self.animate_until(self.frame_time);
@@ -2958,6 +2969,67 @@ impl Framework {
         self.ui_renderer.pop_clip();
         result?;
         Ok(choice)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn toggle_frame_stats(&mut self) {
+        self.frame_stats.visible = !self.frame_stats.visible;
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn record_frame(&mut self, elapsed: Duration, interval: Duration) {
+        self.frame_stats.record(elapsed, interval);
+    }
+
+    #[cfg(debug_assertions)]
+    fn render_frame_stats<G: GraphicsDevice>(&mut self, gpu: &mut G) -> anyhow::Result<()> {
+        if !self.frame_stats.visible {
+            return Ok(());
+        }
+
+        let font = self.font_at(Font::Regular, 12)?;
+        let label = format!(
+            "Frame avg: {:.2} ms / {:.2} ms",
+            self.frame_stats.average_ms(),
+            self.frame_stats.interval.as_secs_f64() * 1000.0,
+        );
+        let metrics = self.text_renderer.measure(&label, font)?;
+        let row_height = metrics.height.max(16.0) + 4.0;
+        let width = (metrics.width + 24.0).max(260.0);
+        let x = (self.layouts[0].bounds.width - width - 8.0).max(0.0);
+        self.ui_renderer.rounded_box(
+            [
+                x,
+                8.0,
+                width,
+                16.0 + row_height * (1 + self.frame_stats.slow.len()) as f32,
+            ],
+            self.corner_radii().control,
+            Some(self.theme.background),
+            None,
+        )?;
+        self.text_renderer.color = self.theme.text;
+        self.text_renderer
+            .render(x + 8.0, 16.0, &label, font, gpu, &mut self.ui_renderer)?;
+        self.text_renderer.color = Color {
+            r: 1.0,
+            g: 0.2,
+            b: 0.2,
+            a: 1.0,
+        };
+        for (index, (frame, elapsed)) in self.frame_stats.slow.iter().rev().enumerate() {
+            let label = format!("Frame #{frame}: {:.2} ms", elapsed.as_secs_f64() * 1000.0);
+            self.text_renderer.render(
+                x + 8.0,
+                16.0 + row_height * (index + 1) as f32,
+                &label,
+                font,
+                gpu,
+                &mut self.ui_renderer,
+            )?;
+        }
+
+        Ok(())
     }
 
     fn render_zoom_indicator<G: GraphicsDevice>(&mut self, gpu: &mut G) -> anyhow::Result<()> {

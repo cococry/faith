@@ -1,5 +1,7 @@
 pub mod animation;
 mod focus;
+#[cfg(debug_assertions)]
+mod frame_stats;
 pub mod framework;
 pub mod quad;
 pub mod renderer;
