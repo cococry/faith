@@ -30,12 +30,12 @@ supports concurrent networking, implements a custom binary protocol and uses TLS
 ## Current features 
 
 **UI (high level) related:**
-- All persistent storage is stored locally, never on servers
-- Create unlimited profiles, each with their own identity
-- Create disposable profiles with no public identifier
+- All persistent storage is **stored locally and never persistently kept on server DBs**
+- Create unlimited profiles, **each with their own new identity**
+- Create **disposable profiles** with no public identifier
 - Store contacts locally 
-- Create conversations with many partners
-- Fully customize the application including the font, theme, corner rounding & much more
+- Create conversations with **many partners**
+- **Fully customize the application** including the font, theme, corner rounding & much more
 - Zoom the UI dynamically with high performance
 - Use the *Quickshell* for fuzzy finding and running actions
     
@@ -54,14 +54,17 @@ supports concurrent networking, implements a custom binary protocol and uses TLS
 - Optimized rounded corners
 
 **Network/Server related:**
-- Concurrent server written in C
+- Concurrent server **written in C**
 - Scalable to many clients with `epoll()` mechanics
-- TCP transport secured with TLS via OpenSSL
-- Basic binary protocol over wire
-- In-memory table of online clients
+- TCP transport **secured with TLS** via OpenSSL
+- Fully **custom binary protocol** over wire
 - Support for multiple devices per client
 - Secure device-linking system
-- Client-to-client message routing
+- Secure conversation request approval
+- Server is built around **minimal metadata**
+- Offline delivery
+- Server acts only as an event router
+- All event **storage is deleted immediately** after the client receives it
 
 ## Build & Run
 
