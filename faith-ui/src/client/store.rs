@@ -254,6 +254,7 @@ pub fn profile_conversations(profile: &Path) -> anyhow::Result<Vec<Chat>> {
             members,
             own_auth,
             last: String::new(),
+            unread: 0,
         })
     })
     .collect()
@@ -328,6 +329,15 @@ impl Store {
             CREATE TABLE IF NOT EXISTS disclosed_usernames(conversation BLOB NOT NULL, member BLOB NOT NULL, username TEXT NOT NULL, PRIMARY KEY(conversation,member));
             CREATE TABLE IF NOT EXISTS chat_metadata(conversation BLOB PRIMARY KEY,data TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS messages_by_conversation ON messages(conversation);")?;
+        if !has_table(&db, "conversation_reads")? {
+            let tx = db.unchecked_transaction()?;
+            tx.execute_batch(
+                "CREATE TABLE conversation_reads(conversation BLOB PRIMARY KEY, through_row INTEGER NOT NULL);
+                 INSERT INTO conversation_reads SELECT conversation, MAX(rowid) FROM messages GROUP BY conversation;",
+            )?;
+            tx.commit()?;
+        }
+
         let has_disclosure = db.query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('invitation_batches') WHERE name='disclose')",
             [],
@@ -382,22 +392,27 @@ impl Store {
     pub fn chats(&self, auth: Id) -> anyhow::Result<Vec<Chat>> {
         let db = self.db()?;
         let mut stmt = db.prepare_cached(
-            "SELECT c.id, m.data, c.members, (SELECT body FROM messages WHERE conversation=c.id ORDER BY rowid DESC LIMIT 1)
+            "SELECT c.id, m.data, c.members,
+                (SELECT body FROM messages WHERE conversation=c.id ORDER BY rowid DESC LIMIT 1),
+                (SELECT COUNT(*) FROM messages
+                 WHERE conversation=c.id AND rowid>COALESCE(r.through_row,0) AND sender!=?1)
              FROM conversations c LEFT JOIN chat_metadata m ON m.conversation=c.id
+             LEFT JOIN conversation_reads r ON r.conversation=c.id
              WHERE c.active ORDER BY c.rowid DESC",
         )?;
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map([auth.0], |row| {
             Ok((
                 id(row.get(0)?)?,
                 row.get::<_, Option<String>>(1)?,
                 members(row.get(2)?)?,
                 row.get::<_, Option<String>>(3)?,
+                row.get::<_, usize>(4)?,
             ))
         })?;
         let mut chats = Vec::new();
 
         for row in rows {
-            let (id, metadata, members, last) = row?;
+            let (id, metadata, members, last, unread) = row?;
             let metadata: Option<Metadata> =
                 metadata.as_deref().map(serde_json::from_str).transpose()?;
             chats.push(Chat {
@@ -423,10 +438,21 @@ impl Store {
                 name_members: title_members(metadata.as_ref(), &members, Some(auth)),
                 members,
                 own_auth: Some(auth),
+                unread,
             });
         }
 
         Ok(chats)
+    }
+
+    pub fn mark_read(&self, conversation: Id, through: i64) -> anyhow::Result<()> {
+        self.db()?.execute(
+            "INSERT INTO conversation_reads VALUES(?1,?2)
+             ON CONFLICT(conversation) DO UPDATE SET through_row=excluded.through_row
+             WHERE excluded.through_row>conversation_reads.through_row",
+            params![conversation.0, through],
+        )?;
+        Ok(())
     }
 
     pub fn rename(&self, id: Id, title: &str) -> anyhow::Result<()> {
@@ -1072,7 +1098,37 @@ mod tests {
                 "INSERT INTO messages(conversation,sender,id,body) VALUES(?,?,?,?)",
                 params![incoming.0, partner.0, [7_u8; 16], body],
             )?;
-            assert_eq!(store.history(chat)?[0].body, body);
+            let history = store.history(chat)?;
+            assert_eq!(history[0].body, body);
+            store.db()?.execute(
+                "INSERT INTO messages(conversation,sender,id,body) VALUES(?,?,?,?),(?,?,?,?)",
+                params![
+                    incoming.0,
+                    auth.0,
+                    [8_u8; 16],
+                    "Outgoing",
+                    incoming.0,
+                    partner.0,
+                    [9_u8; 16],
+                    "New incoming",
+                ],
+            )?;
+            let unread = |store: &Store| -> anyhow::Result<usize> {
+                Ok(store
+                    .chats(auth)?
+                    .into_iter()
+                    .find(|chat| chat.id == incoming)
+                    .unwrap()
+                    .unread)
+            };
+            assert_eq!(unread(&store)?, 2);
+            store.mark_read(incoming, history[0].row_id)?;
+            store.mark_read(incoming, history[0].row_id - 1)?;
+            drop(store);
+            let store = Store::open(&profile.path)?;
+            assert_eq!(unread(&store)?, 1);
+            store.mark_read(incoming, store.history(chat)?.last().unwrap().row_id)?;
+            assert_eq!(unread(&store)?, 0);
             Ok(())
         };
 

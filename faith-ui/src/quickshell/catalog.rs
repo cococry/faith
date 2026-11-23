@@ -118,7 +118,10 @@ impl Entry {
             Kind::Profile,
             Action::OpenProfile(profile.clone()),
         )
-        .search(&profile.alias, &["profile account switch login sign in"])
+        .search(
+            &profile.alias,
+            &["profile account select switch login sign in"],
+        )
         .detail(&format!("Profile · {}", profile.alias))
         .priority(160);
         entry.owner = Some(profile.path.clone());
@@ -136,7 +139,7 @@ impl Entry {
                 id,
             },
         )
-        .search(name, &["chat conversation message talk open"])
+        .search(name, &["chat conversation message talk open select"])
         .detail(&format!("Conversation · {}", profile.alias))
         .priority(200);
         entry.terms.push(Text::new(&profile.alias));
@@ -940,11 +943,14 @@ pub fn build(app: &App, zoom: u32) -> Vec<Entry> {
         entries.push(Entry::profile(profile));
         let snapshot = &app.chat.snapshot;
         if snapshot.auth.is_some() {
-            chats.extend(
-                snapshot.conversations.iter().map(|chat| {
-                    Entry::conversation(profile, chat.id, &app.conversation_title(chat))
-                }),
-            );
+            chats.extend(snapshot.conversations.iter().map(|chat| {
+                let entry = Entry::conversation(profile, chat.id, &app.conversation_title(chat));
+                if chat.unread > 0 {
+                    entry.detail(&format!("{} unread · {}", chat.unread, profile.alias))
+                } else {
+                    entry
+                }
+            }));
         } else if let Ok(titles) = crate::client::profile_conversations(&profile.path) {
             chats.extend(
                 titles.into_iter().map(|chat| {

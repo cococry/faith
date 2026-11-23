@@ -35,6 +35,7 @@ pub struct Settings {
     pub smooth_scrolling: bool,
     pub zoom_step: u32,
     pub default_zoom: u32,
+    pub last_profile: Option<String>,
 }
 
 impl Settings {
@@ -99,6 +100,7 @@ pub struct Store {
     results: Receiver<Saved>,
     worker: Option<JoinHandle<()>>,
     revision: u64,
+    confirm: bool,
 }
 
 impl Store {
@@ -137,11 +139,13 @@ impl Store {
             results: updates,
             worker: Some(worker),
             revision: 0,
+            confirm: false,
         })
     }
 
-    pub fn save(&mut self, settings: Settings) {
+    pub fn save(&mut self, settings: Settings, confirm: bool) {
         self.revision += 1;
+        self.confirm |= confirm;
         let _ = self
             .sender
             .as_ref()
@@ -149,12 +153,14 @@ impl Store {
             .send((self.revision, settings));
     }
 
-    pub fn poll(&self) -> Option<Result<Instant, String>> {
-        self.results
+    pub fn poll(&mut self) -> Option<Result<Option<Instant>, String>> {
+        let saved = self
+            .results
             .try_iter()
             .filter(|saved| saved.revision == self.revision)
-            .last()
-            .map(|saved| saved.result)
+            .last()?;
+        let confirm = std::mem::take(&mut self.confirm);
+        Some(saved.result.map(|time| confirm.then_some(time)))
     }
 }
 
@@ -201,6 +207,7 @@ impl Default for Settings {
             smooth_scrolling: false,
             zoom_step: 10,
             default_zoom: 110,
+            last_profile: None,
         }
     }
 }

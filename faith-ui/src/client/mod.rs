@@ -66,6 +66,7 @@ pub struct Chat {
     pub id: Id,
     pub title: String,
     pub last: String,
+    pub unread: usize,
     pub members: Vec<Id>,
     pub own_auth: Option<Id>,
     pub name_members: bool,
@@ -98,6 +99,10 @@ pub struct InvitationPolicy {
 
 pub enum Command {
     Select(Id),
+    MarkRead {
+        id: Id,
+        through: i64,
+    },
     Rename {
         id: Id,
         title: String,
@@ -132,6 +137,7 @@ pub struct Snapshot {
     pub claim_completed: bool,
     pub status: String,
     pub selected: Option<Id>,
+    pub restored_conversation: Option<Id>,
     pub conversations: Arc<[Chat]>,
     pub messages: Arc<[Message]>,
     pub disclosed: Arc<[(Id, String)]>,
@@ -230,6 +236,7 @@ impl Session {
                     let (auth, _) = client.identity()?;
                     store.remember_auth(auth)?;
                     let disclosed = store.usernames()?.into();
+                    let restored_conversation = store.selected()?;
                     let mut state = Worker {
                         disclosed,
                         client,
@@ -247,6 +254,7 @@ impl Session {
                         claim_completed: false,
                         claim_deadline: None,
                         selected: None,
+                        restored_conversation,
                         inflight: None,
                         status: "Connecting…".into(),
                         notices: VecDeque::new(),
@@ -254,7 +262,7 @@ impl Session {
                         submission: None,
                     };
 
-                    state.selected = state.store.selected()?.or(state
+                    state.selected = state.restored_conversation.or(state
                         .store
                         .chats(auth)?
                         .first()
@@ -368,6 +376,7 @@ struct Worker {
     claim_completed: bool,
     claim_deadline: Option<std::time::Instant>,
     selected: Option<Id>,
+    restored_conversation: Option<Id>,
     inflight: Option<Inflight>,
     status: String,
     notices: VecDeque<String>,
@@ -403,6 +412,7 @@ impl Worker {
             claim_completed: self.claim_completed,
             status: self.status.clone(),
             selected: self.selected,
+            restored_conversation: self.restored_conversation,
             conversations: conversations.into(),
             messages: messages.into(),
             disclosed: self.disclosed.clone(),
@@ -468,7 +478,7 @@ impl Worker {
             echo: false,
         });
 
-        self.status = "Delivery queued; waiting for server commit and local echo".into();
+        self.status.clear();
         Ok(())
     }
 
@@ -501,6 +511,8 @@ impl Worker {
                 self.store.select(id)?;
                 self.selected = Some(id);
             }
+
+            Command::MarkRead { id, through } => self.store.mark_read(id, through)?,
 
             Command::Create {
                 title,
