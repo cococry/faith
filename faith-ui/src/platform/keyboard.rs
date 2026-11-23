@@ -36,6 +36,11 @@ impl Keyboard {
             .mod_name_is_active(xkb::MOD_NAME_CTRL, xkb::STATE_MODS_EFFECTIVE)
     }
 
+    pub fn shift(&self) -> bool {
+        self.state
+            .mod_name_is_active(xkb::MOD_NAME_SHIFT, xkb::STATE_MODS_EFFECTIVE)
+    }
+
     pub fn reset(&mut self) {
         if let Some(compose) = &mut self.compose {
             compose.reset();
@@ -51,6 +56,8 @@ impl Keyboard {
         let alt = self
             .state
             .mod_name_is_active(xkb::MOD_NAME_ALT, xkb::STATE_MODS_EFFECTIVE);
+
+        let shift = self.shift();
 
         if control && !alt && matches!(sym, 0x0020 | 0xff80) {
             self.reset();
@@ -70,17 +77,21 @@ impl Keyboard {
         }
 
         if matches!(sym, 0xff09 | 0xfe20) {
-            let backwards = self
-                .state
-                .mod_name_is_active(xkb::MOD_NAME_SHIFT, xkb::STATE_MODS_EFFECTIVE);
             self.reset();
-            return vec![WindowEvent::FocusNext { backwards }];
+            return vec![WindowEvent::FocusNext { backwards: shift }];
         }
 
         let key = match sym {
             0x0041 | 0x0061 if control && !alt => Some(Key::SelectAll),
             0x0043 | 0x0063 if control && !alt => Some(Key::Copy),
             0x0056 | 0x0076 if control && !alt => Some(Key::Paste),
+            0x0058 | 0x0078 if control && !alt => Some(Key::Cut),
+            0x005a | 0x007a if control && !alt && shift => Some(Key::Redo),
+            0x005a | 0x007a if control && !alt => Some(Key::Undo),
+            0x0059 | 0x0079 if control && !alt => Some(Key::Redo),
+            0xff63 | 0xff9e if shift && !control && !alt => Some(Key::Paste),
+            0xff63 | 0xff9e if control && !shift && !alt => Some(Key::Copy),
+            0xffff | 0xff9f if shift && !control && !alt => Some(Key::Cut),
             0xff0d | 0xff8d => Some(Key::Enter),
             0xff08 => Some(Key::Backspace),
             0xffff | 0xff9f => Some(Key::Delete),
@@ -98,7 +109,11 @@ impl Keyboard {
 
         if let Some(key) = key {
             self.reset();
-            return vec![WindowEvent::KeyPressed { key, control }];
+            return vec![WindowEvent::KeyPressed {
+                key,
+                control,
+                shift,
+            }];
         }
 
         if control || alt {
@@ -201,5 +216,65 @@ impl KeyRepeat {
             Instant::now() + Duration::from_micros(1_000_000 / self.rate as u64),
         ));
         Some(key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn editing_shortcuts_translate_with_control_and_shift() {
+        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+        let keymap = xkb::Keymap::new_from_names(
+            &context,
+            "evdev",
+            "pc105",
+            "us",
+            "",
+            Some(String::new()),
+            xkb::KEYMAP_COMPILE_NO_FLAGS,
+        )
+        .unwrap();
+        let state = xkb::State::new(&keymap);
+        let mut keyboard = Keyboard::new(&context, keymap, state);
+        let control = keyboard.keymap.key_by_name("LCTL").unwrap();
+        let shift = keyboard.keymap.key_by_name("LFSH").unwrap();
+
+        for (name, key, ctrl, shifted) in [
+            ("AB02", Key::Cut, true, false),
+            ("AB01", Key::Undo, true, false),
+            ("AB01", Key::Redo, true, true),
+            ("AD06", Key::Redo, true, false),
+            ("LEFT", Key::Left, true, true),
+            ("INS", Key::Paste, false, true),
+            ("DELE", Key::Cut, false, true),
+        ] {
+            if ctrl {
+                keyboard.state.update_key(control, xkb::KeyDirection::Down);
+            }
+
+            if shifted {
+                keyboard.state.update_key(shift, xkb::KeyDirection::Down);
+            }
+
+            let code = keyboard.keymap.key_by_name(name).unwrap();
+            assert_eq!(
+                keyboard.press(code.raw()),
+                vec![WindowEvent::KeyPressed {
+                    key,
+                    control: ctrl,
+                    shift: shifted,
+                }],
+                "{name}",
+            );
+            if shifted {
+                keyboard.state.update_key(shift, xkb::KeyDirection::Up);
+            }
+
+            if ctrl {
+                keyboard.state.update_key(control, xkb::KeyDirection::Up);
+            }
+        }
     }
 }

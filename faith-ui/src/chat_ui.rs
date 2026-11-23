@@ -1164,7 +1164,20 @@ pub fn conversation(
     let header = ui.position().1 + 10.0;
 
     let bottom = (height - bottom_inset(ui, app, 18.0)).max(0.0);
-    let composer = (bottom - 47.0).max(header);
+    let send_width = 44.0_f32.min(inner_width);
+    let input_width = (inner_width - send_width - 8.0).max(1.0);
+    let composer_id = app.chat.composer_id(chat.id);
+    let composer_style = Style {
+        radius: 22.0,
+        padding: 12.0,
+        margin: 0.0,
+        ..input_style(ui, app.chat.submission.is_none())
+    };
+    ui.push_style(composer_style);
+    let composer_height = ui.composer_height(&composer_id, input_width, (bottom - header) * 0.45);
+    ui.pop_style();
+    let composer_height = composer_height?;
+    let composer = (bottom - 3.0 - composer_height).max(header);
     let clipboard_position = show_clipboard.then_some([20.0, (composer - 24.0).max(0.0)]);
     let history_bottom = clipboard_position.map_or(composer, |position| position[1]);
     let history = (history_bottom - header - 9.0).max(0.0);
@@ -1182,21 +1195,15 @@ pub fn conversation(
         };
     }
 
-    let send_width = 44.0_f32.min(inner_width);
-    let input_width = (inner_width - send_width - 8.0).max(1.0);
-    let composer_id = app.chat.composer_id(chat.id);
-    panel(ui, 20.0, composer, input_width, 44.0, false)?;
-    ui.push_style(Style {
-        radius: 22.0,
-        padding: 12.0,
-        ..input_style(ui, app.chat.submission.is_none())
-    });
-    ui.push_sizing(None, Some(44.0));
-    let body = ui.input_with_hint(gpu, &composer_id, InputOptions::default(), "Message")?;
+    panel(ui, 20.0, composer, input_width, composer_height, false)?;
+    ui.push_style(composer_style);
+    ui.push_sizing(None, Some(composer_height));
+    let body = ui.composer(gpu, &composer_id);
     ui.pop_sizing();
     ui.pop_style();
     end_panel(ui);
-    ui.set_position(28.0 + input_width, composer);
+    let body = body?;
+    ui.set_position(28.0 + input_width, composer + composer_height - 44.0);
     ui.push_sizing(Some(send_width), Some(44.0));
     let can_send = ready(app) && !body.trim().is_empty();
     ui.push_style(Style {
@@ -1257,7 +1264,7 @@ impl HistoryLayout {
                 font_size: 14,
                 ..ui.style()
             });
-            let body = ui.wrapped_text_size(&message.body, None, content);
+            let body = ui.message_text_size(&message.body, content);
             ui.pop_style();
             let other = group && snapshot.auth.is_some_and(|auth| auth != message.sender);
             let view_contact = other && app.contacts.get(message.sender).is_some();
@@ -1327,6 +1334,17 @@ fn messages(
         },
     )?;
     ui.follow_scroll_end();
+    ui.message_selection(&app.chat.composer_id(chat.id), |row| {
+        (snapshot.selected == Some(chat.id))
+            .then(|| {
+                snapshot
+                    .messages
+                    .iter()
+                    .find(|message| message.row_id == row)
+            })
+            .flatten()
+            .map(|message| message.body.as_str())
+    })?;
 
     if snapshot.selected == Some(chat.id) {
         let available = (ui.div_width() - 12.0).max(1.0);
@@ -1345,6 +1363,7 @@ fn messages(
         }
 
         let layout = cache.as_ref().unwrap();
+        let body_wrap_width = (limit - limit.min(20.0)).max(1.0);
         let top = ui.scroll_offset()[1];
         let start = layout
             .bubbles
@@ -1403,7 +1422,7 @@ fn messages(
                     color: ui.theme().primary_text,
                     ..ui.style()
                 });
-                ui.text(gpu, &message.body, None)?;
+                ui.message_text(gpu, message.row_id, &message.body, body_wrap_width)?;
                 ui.pop_style();
             } else {
                 let name = author(app, message);
@@ -1423,7 +1442,12 @@ fn messages(
                     label(ui, gpu, name, 12, true, true, false)?;
                 }
 
-                label(ui, gpu, &message.body, 14, false, false, false)?;
+                ui.push_style(Style {
+                    font_size: 14,
+                    ..ui.style()
+                });
+                ui.message_text(gpu, message.row_id, &message.body, body_wrap_width)?;
+                ui.pop_style();
             }
 
             ui.pop_style();

@@ -129,6 +129,7 @@ impl State {
                 }
                 WindowEvent::MouseButtonPressed {
                     button: MouseButton::Left,
+                    ..
                 } => {
                     if inside(pointer) {
                         *input.focused = Some(id.into());

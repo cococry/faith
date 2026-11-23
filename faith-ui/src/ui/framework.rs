@@ -4,10 +4,12 @@ use super::scroll::{self, Areas, PrepareOptions, View};
 use super::theme::{CornerRadii, Theme};
 use super::{
     TextRenderer, UIRenderer,
-    text::TextLayoutOptions,
+    text::{PreservedLayout, TextLayoutOptions},
     widgets::{
         button, checkbox, dropdown,
-        input::{Bounds, InputField, InputOptions, InputPaint, InputResponse},
+        input::{
+            Bounds, InputField, InputHit, InputOptions, InputPaint, InputResponse, MouseSelection,
+        },
         slider,
     },
 };
@@ -18,6 +20,7 @@ use crate::{
     graphics::{Color, FontHandle, GraphicsDevice},
     platform::{
         Platform, WindowEvent,
+        event::Key,
         mouse::{CursorPosition, MouseButton},
     },
 };
@@ -25,6 +28,7 @@ use crate::{
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
+    sync::Arc,
 };
 
 pub const TEXT_LINK_INSET: f32 = 4.0;
@@ -212,7 +216,184 @@ struct Tooltip {
     text: &'static str,
 }
 
+#[derive(Default)]
+struct MessageSelection {
+    conversation: String,
+    active: Option<SelectedMessage>,
+    mouse: MouseSelection,
+    previous: Vec<MessageTextTarget>,
+    current: Vec<MessageTextTarget>,
+}
+
+impl MessageSelection {
+    fn clear(&mut self) {
+        self.active = None;
+        self.mouse = MouseSelection::default();
+    }
+
+    fn begin_frame(&mut self) {
+        std::mem::swap(&mut self.previous, &mut self.current);
+        self.current.clear();
+    }
+
+    fn update<'a>(
+        &mut self,
+        events: &[WindowEvent],
+        mut pointer: Option<CursorPosition>,
+        renderer: &mut TextRenderer,
+        focused: &mut Option<String>,
+        clipboard: &mut Vec<ClipboardAction>,
+        body: impl Fn(i64) -> Option<&'a str>,
+    ) -> anyhow::Result<()> {
+        for event in events {
+            match event {
+                WindowEvent::MouseEntered { position } => pointer = Some(*position),
+                WindowEvent::MouseLeft => pointer = None,
+                WindowEvent::MouseMoved { position } => {
+                    pointer = Some(*position);
+                    if let Some(anchor) = self.mouse.drag_anchor.clone()
+                        && let Some(selection) = &mut self.active
+                        && let Some(target) = self
+                            .previous
+                            .iter()
+                            .find(|target| target.row == selection.row)
+                        && let Some(value) = body(selection.row)
+                    {
+                        let cursor = target.cursor(renderer, *position, anchor.is_empty())?;
+                        (selection.anchor, selection.cursor) =
+                            MouseSelection::drag_to(value, anchor, cursor);
+                    }
+                }
+
+                WindowEvent::MouseButtonPressed {
+                    button: MouseButton::Left,
+                    shift,
+                } => {
+                    let Some((position, target)) = pointer.and_then(|position| {
+                        self.previous
+                            .iter()
+                            .find(|target| contains(target.clip, position))
+                            .map(|target| (position, target))
+                    }) else {
+                        self.clear();
+                        continue;
+                    };
+
+                    let Some(value) = body(target.row) else {
+                        continue;
+                    };
+
+                    let same = self.active.filter(|selection| selection.row == target.row);
+                    if same.is_none() {
+                        self.mouse = MouseSelection::default();
+                    }
+
+                    let count = self.mouse.click_count(position, *shift);
+                    let cursor = target.cursor(renderer, position, count != 2)?;
+                    let (anchor, cursor, drag) = if let Some(previous) = same.filter(|_| *shift) {
+                        (previous.anchor, cursor, previous.anchor..previous.anchor)
+                    } else {
+                        let range = MouseSelection::click_range(value, cursor, count);
+                        (range.start, range.end, range)
+                    };
+                    self.mouse.drag_anchor = Some(drag);
+                    self.active = Some(SelectedMessage {
+                        row: target.row,
+                        anchor,
+                        cursor,
+                    });
+                    *focused = None;
+                }
+
+                WindowEvent::MouseCancelled
+                | WindowEvent::FocusChanged(false)
+                | WindowEvent::MouseButtonReleased {
+                    button: MouseButton::Left,
+                } => {
+                    self.mouse.drag_anchor = None;
+                }
+
+                WindowEvent::KeyPressed { key, .. } if focused.is_none() => match key {
+                    Key::Copy => {
+                        if let Some(selection) = self.active
+                            && let Some(value) = body(selection.row)
+                            && let Some(selected) = value.get(selection.range())
+                            && !selected.is_empty()
+                        {
+                            clipboard.push(ClipboardAction::Copy(selected.to_owned()));
+                        }
+                    }
+
+                    Key::SelectAll => {
+                        if let Some(selection) = &mut self.active
+                            && let Some(value) = body(selection.row)
+                        {
+                            selection.anchor = 0;
+                            selection.cursor = value.len();
+                        }
+                    }
+
+                    Key::Escape => self.clear(),
+                    _ => {}
+                },
+
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SelectedMessage {
+    row: i64,
+    anchor: usize,
+    cursor: usize,
+}
+
+impl SelectedMessage {
+    fn range(self) -> std::ops::Range<usize> {
+        self.anchor.min(self.cursor)..self.anchor.max(self.cursor)
+    }
+}
+
+struct MessageTextTarget {
+    row: i64,
+    clip: Bounds,
+    origin: [f32; 2],
+    font: FontHandle,
+    layout: Arc<PreservedLayout>,
+}
+
+impl MessageTextTarget {
+    fn cursor(
+        &self,
+        renderer: &mut TextRenderer,
+        point: CursorPosition,
+        nearest: bool,
+    ) -> anyhow::Result<usize> {
+        let y = point.y as f32 - self.origin[1];
+        if y < 0.0 {
+            return Ok(0);
+        }
+
+        if y >= self.layout.height {
+            return Ok(self.layout.lines.last().unwrap().source.end);
+        }
+
+        let (cursor, _) = renderer.preserved_caret_at(
+            &self.layout,
+            self.font,
+            [point.x as f32 - self.origin[0], y],
+            nearest,
+        )?;
+        Ok(cursor)
+    }
+}
+
 pub struct Framework {
+    message_selection: MessageSelection,
     hovered_tooltip: Option<Tooltip>,
     tooltip_hover: Option<(u64, Instant)>,
     tooltip: Option<Tooltip>,
@@ -304,6 +485,7 @@ impl Framework {
             tooltip_hover: None,
             tooltip: None,
             tooltip_presence: Presence::default(),
+            message_selection: MessageSelection::default(),
             clipboard_actions: Vec::new(),
             submitted_input: None,
             zoom: 1.0,
@@ -400,6 +582,7 @@ impl Framework {
     }
 
     pub fn navigation_changed(&mut self) {
+        self.message_selection = MessageSelection::default();
         self.navigation.pending = true;
         self.clear_focus();
     }
@@ -468,7 +651,8 @@ impl Framework {
                 matches!(
                     event,
                     WindowEvent::MouseButtonPressed {
-                        button: MouseButton::Left
+                        button: MouseButton::Left,
+                        ..
                     }
                 )
             })
@@ -561,7 +745,8 @@ impl Framework {
                     matches!(
                         event,
                         WindowEvent::MouseButtonPressed {
-                            button: MouseButton::Right
+                            button: MouseButton::Right,
+                            ..
                         }
                     )
                 })
@@ -675,7 +860,7 @@ impl Framework {
                         state.cursor = None;
                     }
                     WindowEvent::MouseLeft => pointer = None,
-                    WindowEvent::MouseButtonPressed { button }
+                    WindowEvent::MouseButtonPressed { button, .. }
                         if state.dismisses_on_press(
                             *button,
                             pointer.is_some_and(|p| contains(bounds, p)),
@@ -1033,6 +1218,7 @@ impl Framework {
     }
 
     pub fn begin(&mut self, platform: &Platform, events: &[WindowEvent]) {
+        self.message_selection.begin_frame();
         self.submitted_input = None;
         self.hovered_tooltip = None;
         self.text_cursor = false;
@@ -1136,6 +1322,7 @@ impl Framework {
                     WindowEvent::Zoom(_) => return None,
                     WindowEvent::MouseButtonPressed {
                         button: MouseButton::Left,
+                        ..
                     }
                     | WindowEvent::MouseButtonReleased {
                         button: MouseButton::Left,
@@ -1187,6 +1374,7 @@ impl Framework {
                     key:
                         key @ (crate::platform::event::Key::Left | crate::platform::event::Key::Right),
                     control: true,
+                    shift: false,
                 } if !self.modal_input
                     && self.active_dropdown.is_none()
                     && !self.input_focused() =>
@@ -1977,6 +2165,109 @@ impl Framework {
         Ok((layout.width, layout.height))
     }
 
+    pub fn message_selection<'a>(
+        &mut self,
+        conversation: &str,
+        body: impl Fn(i64) -> Option<&'a str>,
+    ) -> anyhow::Result<()> {
+        let state = &mut self.message_selection;
+        if state.conversation != conversation {
+            state.conversation = conversation.to_owned();
+            state.previous.clear();
+            state.clear();
+        }
+
+        if state
+            .active
+            .is_some_and(|selection| body(selection.row).is_none())
+        {
+            state.clear();
+        }
+
+        if self.modal_input || self.active_dropdown.is_some() {
+            state.mouse.drag_anchor = None;
+            return Ok(());
+        }
+
+        state.update(
+            &self.events,
+            self.batch_pointer,
+            &mut self.text_renderer,
+            &mut self.focused,
+            &mut self.clipboard_actions,
+            body,
+        )
+    }
+
+    pub fn message_text_size(&mut self, value: &str, width: f32) -> anyhow::Result<(f32, f32)> {
+        let font = self.font(Font::Regular)?;
+        let layout = self.text_renderer.preserved_layout(value, font, width)?;
+        Ok((layout.width, layout.height))
+    }
+
+    pub fn message_text<G: GraphicsDevice>(
+        &mut self,
+        gpu: &mut G,
+        row: i64,
+        value: &str,
+        wrap_width: f32,
+    ) -> anyhow::Result<()> {
+        let font = self.font(Font::Regular)?;
+        let layout = self
+            .text_renderer
+            .preserved_layout(value, font, wrap_width)?;
+        let bounds = self.place(self.div_width(), layout.height);
+        if !self.visible(bounds) {
+            return Ok(());
+        }
+
+        let origin = [bounds.x, bounds.y];
+        let clip = scroll::intersect(bounds, self.clip_bounds());
+        self.message_selection.current.push(MessageTextTarget {
+            row,
+            clip,
+            origin,
+            font,
+            layout: Arc::clone(&layout),
+        });
+        if !self.modal_input
+            && self.active_dropdown.is_none()
+            && self.pointer.is_some_and(|p| contains(clip, p))
+        {
+            self.text_cursor = true;
+        }
+
+        let foreground = self.style().color;
+        self.text_renderer.color = foreground;
+        self.ui_renderer
+            .push_clip([clip.x, clip.y, clip.width, clip.height]);
+        let result = (|| -> anyhow::Result<()> {
+            if let Some(selection) = self
+                .message_selection
+                .active
+                .filter(|selection| selection.row == row)
+                && !selection.range().is_empty()
+            {
+                self.text_renderer.render_preserved_selection(
+                    origin,
+                    &layout,
+                    font,
+                    selection.range(),
+                    Color {
+                        a: foreground.a * 0.30,
+                        ..foreground
+                    },
+                    &mut self.ui_renderer,
+                )?;
+            }
+
+            self.text_renderer
+                .render_preserved(origin, &layout, gpu, &mut self.ui_renderer)
+        })();
+        self.ui_renderer.pop_clip();
+        result
+    }
+
     pub fn text<G: GraphicsDevice>(
         &mut self,
         gpu: &mut G,
@@ -2352,7 +2643,8 @@ impl Framework {
             if matches!(
                 event,
                 WindowEvent::MouseButtonPressed {
-                    button: MouseButton::Left
+                    button: MouseButton::Left,
+                    ..
                 }
             ) {
                 if response.hovered {
@@ -2504,7 +2796,8 @@ impl Framework {
             if matches!(
                 event,
                 WindowEvent::MouseButtonPressed {
-                    button: MouseButton::Left
+                    button: MouseButton::Left,
+                    ..
                 }
             ) {
                 if response.hovered {
@@ -2813,28 +3106,37 @@ impl Framework {
             )?;
 
             let search_bounds = self.place(self.div_width(), dropdown::SEARCH_HEIGHT);
-            let search_hovered = scroll::contains(self.hit_bounds(search_bounds), self.pointer);
+            let padding = 5.0;
+            let hit = InputHit {
+                bounds: self.hit_bounds(search_bounds),
+                origin_x: search_bounds.x + padding,
+                origin_y: search_bounds.y + padding,
+                viewport_height: (search_bounds.height - 2.0 * padding).max(0.0),
+                font: popup.font,
+            };
             if popup.interactive {
-                self.text_cursor = search_hovered;
+                self.text_cursor = scroll::contains(hit.bounds, self.pointer);
             }
 
             let search = &mut self.dropdowns.get_mut(&popup.id).unwrap().search;
-            if search_hovered
-                && popup.interactive
-                && self.events.iter().any(|event| {
-                    matches!(
-                        event,
-                        WindowEvent::MouseButtonPressed {
-                            button: MouseButton::Left
+            if popup.interactive {
+                let mut pointer = self.batch_pointer;
+                for event in &self.events {
+                    match event {
+                        WindowEvent::MouseEntered { position }
+                        | WindowEvent::MouseMoved { position } => {
+                            pointer = Some(*position);
                         }
-                    )
-                })
-            {
-                search.restart_caret();
+
+                        WindowEvent::MouseLeft | WindowEvent::MouseCancelled => pointer = None,
+                        _ => {}
+                    }
+
+                    search.pointer_event(event, pointer, &hit, &mut self.text_renderer)?;
+                }
             }
 
             let next_blink = search.update_caret(self.frame_time, self.window_focused);
-            let padding = 5.0;
             self.text_renderer.color = self.theme.text;
             search.render(
                 search_bounds,
@@ -3502,6 +3804,36 @@ impl Framework {
         self.input_with_font(gpu, id, options, hint, Font::Regular)
     }
 
+    pub fn composer_height(
+        &mut self,
+        id: &str,
+        width: f32,
+        max_height: f32,
+    ) -> anyhow::Result<f32> {
+        let font = self.font(Font::Regular)?;
+        let padding = self.style().padding;
+        let draft = self.inputs.get(id).map_or("", InputField::text);
+        let layout = self.text_renderer.preserved_layout(
+            draft,
+            font,
+            composer_wrap_width(width, padding),
+        )?;
+        Ok((layout.height + 2.0 * padding)
+            .ceil()
+            .clamp(44.0, max_height.max(44.0)))
+    }
+
+    pub fn composer<G: GraphicsDevice>(&mut self, gpu: &mut G, id: &str) -> anyhow::Result<String> {
+        self.input_widget(
+            gpu,
+            id,
+            InputOptions::default(),
+            "Message",
+            Font::Regular,
+            true,
+        )
+    }
+
     pub fn input_with_font<G: GraphicsDevice>(
         &mut self,
         gpu: &mut G,
@@ -3509,6 +3841,18 @@ impl Framework {
         options: InputOptions,
         hint: &str,
         font: Font,
+    ) -> anyhow::Result<String> {
+        self.input_widget(gpu, id, options, hint, font, false)
+    }
+
+    fn input_widget<G: GraphicsDevice>(
+        &mut self,
+        gpu: &mut G,
+        id: &str,
+        options: InputOptions,
+        hint: &str,
+        font: Font,
+        multiline: bool,
     ) -> anyhow::Result<String> {
         let font = self.font(font)?;
         let s = self.style();
@@ -3541,6 +3885,8 @@ impl Framework {
             .entry(id.into())
             .or_insert_with(|| InputField::new(4096));
         field.set_options(options);
+        field.set_wrap_width(multiline.then(|| composer_wrap_width(b.width, s.padding)));
+        let mut changed = false;
         if visible
             && s.enabled
             && (!self.modal_input || self.overlay)
@@ -3550,10 +3896,18 @@ impl Framework {
                 field,
                 &mut self.focused,
                 id,
-                hit,
+                InputHit {
+                    bounds: hit,
+                    origin_x: b.x + s.padding,
+                    origin_y: b.y + s.padding,
+                    viewport_height: (b.height - 2.0 * s.padding).max(0.0),
+                    font,
+                },
                 &self.events,
                 self.batch_pointer,
-            );
+                &mut self.text_renderer,
+            )?;
+            changed = response.changed;
             if response.submitted.is_some() {
                 self.submitted_input = Some(id.to_owned());
             }
@@ -3621,6 +3975,10 @@ impl Framework {
 
         result?;
         let value = field.text().to_owned();
+        if multiline && changed {
+            self.animate_until(self.frame_time);
+        }
+
         if let Some(next_blink) = next_blink {
             self.animate_until(next_blink);
         }
@@ -3676,14 +4034,19 @@ fn tooltip_position(anchor: Bounds, window: Bounds, width: f32, height: f32) -> 
     ]
 }
 
+fn composer_wrap_width(width: f32, padding: f32) -> f32 {
+    (width - 2.0 * padding - 1.5).max(1.0)
+}
+
 fn dispatch_input(
     field: &mut InputField,
     focused: &mut Option<String>,
     id: &str,
-    bounds: Bounds,
+    hit: InputHit,
     events: &[WindowEvent],
     mut pointer: Option<CursorPosition>,
-) -> super::widgets::input::InputResponse {
+    text: &mut TextRenderer,
+) -> anyhow::Result<InputResponse> {
     let mut result = super::widgets::input::InputResponse::default();
     field.set_focused(focused.as_deref() == Some(id));
 
@@ -3696,8 +4059,9 @@ fn dispatch_input(
             WindowEvent::MouseLeft | WindowEvent::MouseCancelled => pointer = None,
             WindowEvent::MouseButtonPressed {
                 button: MouseButton::Left,
+                ..
             } => {
-                if pointer.is_some_and(|p| contains(bounds, p)) {
+                if pointer.is_some_and(|p| contains(hit.bounds, p)) {
                     *focused = Some(id.into());
                     field.restart_caret();
                 } else if focused.as_deref() == Some(id) {
@@ -3710,11 +4074,15 @@ fn dispatch_input(
             _ => {}
         }
 
+        if focused.as_deref() == Some(id) || matches!(event, WindowEvent::MouseScrolled { .. }) {
+            field.pointer_event(event, pointer, &hit, text)?;
+        }
+
         let response = match event {
             WindowEvent::ClipboardText { target, text }
                 if target == id && focused.as_deref() == Some(id) =>
             {
-                field.handle(&WindowEvent::TextInput(text.clone()))
+                field.paste(text)
             }
 
             WindowEvent::FocusChanged(true) => {
@@ -3722,14 +4090,18 @@ fn dispatch_input(
                 continue;
             }
 
-            _ => field.handle(event),
+            _ => match field.visual_key(event, &hit, text)? {
+                Some(response) => response,
+                None => field.handle(event),
+            },
         };
+        result.changed |= response.changed;
         result.submitted = response.submitted.or(result.submitted);
         result.copied = response.copied.or(result.copied);
         result.paste |= response.paste;
     }
 
-    result
+    Ok(result)
 }
 
 fn content_clip(b: Bounds, style: Style) -> [f32; 4] {
@@ -3747,6 +4119,86 @@ fn contains(b: Bounds, p: CursorPosition) -> bool {
         && p.y >= b.y as f64
         && p.x < (b.x + b.width) as f64
         && p.y < (b.y + b.height) as f64
+}
+
+#[cfg(test)]
+mod message_selection_tests {
+    use super::*;
+
+    #[test]
+    fn dragging_a_message_copies_original_whitespace_and_releases_input_focus() -> anyhow::Result<()>
+    {
+        let mut renderer = TextRenderer::new()?;
+        let font = renderer.load_primary_font(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/NotoSans-Bold.ttf"),
+            14,
+            0,
+        )?;
+        let value = "one\r\n\r\n\tcafé";
+        let layout = renderer.preserved_layout(value, font, 100.0)?;
+        let mut selection = MessageSelection::default();
+        selection.current.push(MessageTextTarget {
+            row: 3,
+            clip: Bounds {
+                x: 10.0,
+                y: 20.0,
+                width: 100.0,
+                height: layout.height,
+            },
+            origin: [10.0, 20.0],
+            font,
+            layout: Arc::clone(&layout),
+        });
+        selection.begin_frame();
+        let mut focused = Some("composer".into());
+        let mut clipboard = Vec::new();
+        let press = WindowEvent::MouseButtonPressed {
+            button: MouseButton::Left,
+            shift: false,
+        };
+        let release = WindowEvent::MouseButtonReleased {
+            button: MouseButton::Left,
+        };
+        let copy = WindowEvent::KeyPressed {
+            key: Key::Copy,
+            control: true,
+            shift: false,
+        };
+        let body = |row| (row == 3).then_some(value);
+        selection.update(
+            &[
+                press.clone(),
+                WindowEvent::MouseMoved {
+                    position: CursorPosition {
+                        x: 10.0,
+                        y: 20.0 + f64::from(layout.height) + 1.0,
+                    },
+                },
+                release,
+                copy.clone(),
+            ],
+            Some(CursorPosition { x: 10.0, y: 21.0 }),
+            &mut renderer,
+            &mut focused,
+            &mut clipboard,
+            body,
+        )?;
+        assert!(focused.is_none());
+        assert!(matches!(clipboard.as_slice(), [ClipboardAction::Copy(text)] if text == value));
+
+        clipboard.clear();
+        selection.update(
+            &[press, copy],
+            Some(CursorPosition { x: 0.0, y: 0.0 }),
+            &mut renderer,
+            &mut focused,
+            &mut clipboard,
+            body,
+        )?;
+        assert!(selection.active.is_none());
+        assert!(clipboard.is_empty());
+        Ok(())
+    }
 }
 
 #[cfg(test)]

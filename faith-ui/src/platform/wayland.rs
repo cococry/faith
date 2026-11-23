@@ -553,7 +553,9 @@ impl Dispatch<wl_keyboard::WlKeyboard, WaylandHandler> for WaylandState {
                             matches!(
                                 event,
                                 WindowEvent::KeyPressed {
-                                    key: super::event::Key::Copy | super::event::Key::Paste,
+                                    key: super::event::Key::Copy
+                                        | super::event::Key::Cut
+                                        | super::event::Key::Paste,
                                     ..
                                 }
                             )
@@ -1304,7 +1306,10 @@ impl Dispatch<wl_pointer::WlPointer, WaylandHandler> for WaylandState {
                 state
                     .pending_events
                     .push(if button_state == wl_pointer::ButtonState::Pressed {
-                        WindowEvent::MouseButtonPressed { button }
+                        WindowEvent::MouseButtonPressed {
+                            button,
+                            shift: state.keyboard.as_ref().is_some_and(Keyboard::shift),
+                        }
                     } else {
                         WindowEvent::MouseButtonReleased { button }
                     });
