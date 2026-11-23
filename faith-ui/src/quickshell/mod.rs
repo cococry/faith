@@ -176,7 +176,7 @@ impl Shell {
         self.loading_fonts = false;
         self.save_contact_target = None;
         self.levels.clear();
-        self.placeholder = "Run an action directly".into();
+        self.placeholder = "Run...".into();
         self.entries = catalog::build(app, zoom);
         self.context = Some(Context::from_app(app));
         self.query.clear();
@@ -556,12 +556,14 @@ impl Shell {
 
         if !naming
             && !self.levels.is_empty()
+            && !ui.input_focused()
             && ui.events().iter().any(|event| {
                 matches!(
                     event,
                     WindowEvent::KeyPressed {
                         key: Key::Left,
-                        control: true
+                        control: true,
+                        shift: false,
                     }
                 )
             })
@@ -637,7 +639,8 @@ impl Shell {
                 && matches!(
                     event,
                     WindowEvent::MouseButtonPressed {
-                        button: MouseButton::Left
+                        button: MouseButton::Left,
+                        ..
                     }
                 ))
         }) {

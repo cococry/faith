@@ -491,7 +491,7 @@ impl Store {
                     author: disclosed.unwrap_or_else(|| sender.to_string()),
                     body: body
                         .chars()
-                        .filter(|c| !c.is_control() || *c == '\n')
+                        .filter(|c| !c.is_control() || matches!(c, '\n' | '\r' | '\t'))
                         .collect(),
                 })
             })?
@@ -1064,10 +1064,15 @@ mod tests {
             assert!(store.rename(incoming, &format!("{title}x")).is_err());
             assert!(store.rename(incoming, "   ").is_err());
             let chats = store.chats(auth)?;
-            assert_eq!(
-                chats.iter().find(|chat| chat.id == incoming).unwrap().title,
-                title
-            );
+            let chat = chats.iter().find(|chat| chat.id == incoming).unwrap();
+            assert_eq!(chat.title, title);
+
+            let body = "  first\r\n\r\n\tsecond\n";
+            store.db()?.execute(
+                "INSERT INTO messages(conversation,sender,id,body) VALUES(?,?,?,?)",
+                params![incoming.0, partner.0, [7_u8; 16], body],
+            )?;
+            assert_eq!(store.history(chat)?[0].body, body);
             Ok(())
         };
 

@@ -123,6 +123,54 @@ pub struct TextLayout {
     ascender: f32,
 }
 
+pub struct PreservedLayout {
+    pub lines: Vec<PreservedLine>,
+    pub width: f32,
+    pub height: f32,
+    pub line_height: f32,
+    ascent: f32,
+}
+
+pub struct PreservedLine {
+    pub source: std::ops::Range<usize>,
+    pub display: String,
+    tabs: Vec<usize>,
+    width: f32,
+    runs: Arc<[ShapedTextRun]>,
+}
+
+impl PreservedLine {
+    pub fn display_offset(&self, source: usize) -> usize {
+        let offset = source - self.source.start;
+        offset + 3 * self.tabs.partition_point(|&tab| tab < offset)
+    }
+
+    pub fn source_offset(&self, mut display: usize) -> usize {
+        for &tab in &self.tabs {
+            if display <= tab {
+                break;
+            }
+
+            if display < tab + 4 {
+                display = tab + usize::from(display >= tab + 2);
+                break;
+            }
+
+            display -= 3;
+        }
+
+        self.source.start + display
+    }
+}
+
+impl PreservedLayout {
+    pub fn row_at(&self, byte: usize) -> usize {
+        self.lines
+            .partition_point(|line| line.source.start <= byte)
+            .saturating_sub(1)
+    }
+}
+
 /// A byte range within the original paragraph string
 /// representing one word-wrap token.
 ///
@@ -169,6 +217,38 @@ struct ClusterGroup {
     byte_end_abs: usize,
     glyph_range: std::ops::Range<usize>,
     x_advance: f32,
+}
+
+fn cluster_caret(text: &str, group: &ClusterGroup, byte: usize, rtl: bool) -> f32 {
+    let cluster = &text[group.byte_start_abs..group.byte_end_abs];
+    if byte == group.byte_start_abs {
+        return if rtl {
+            group.x_advance
+        } else {
+            0.0
+        };
+    }
+
+    if byte == group.byte_end_abs {
+        return if rtl {
+            0.0
+        } else {
+            group.x_advance
+        };
+    }
+
+    // a ligature can contain multiple editable graphemes
+    let count = cluster.graphemes(true).count().max(1);
+    let before = cluster
+        .grapheme_indices(true)
+        .take_while(|(i, _)| group.byte_start_abs + i < byte)
+        .count();
+    let step = if rtl {
+        count - before
+    } else {
+        before
+    };
+    group.x_advance * step as f32 / count as f32
 }
 
 /// A renderable slice of one ShapedTextRun.
@@ -238,6 +318,7 @@ pub struct TextRenderer {
     font_run_cache: LruCache<ShapedRunKey, Arc<[ShapedTextRun]>>,
     token_range_cache: LruCache<ShapedRunKey, Arc<[TokenRange]>>,
     layout_cache: LruCache<TextLayoutKey, Arc<TextLayout>>,
+    preserved_cache: LruCache<TextLayoutKey, Arc<PreservedLayout>>,
 
     fallback_choice_cache: LruCache<FallbackChoiceKey, Option<FontHandle>>,
 }
@@ -254,6 +335,7 @@ impl TextRenderer {
             self.font_run_cache.clear();
             self.token_range_cache.clear();
             self.layout_cache.clear();
+            self.preserved_cache.clear();
         }
     }
 
@@ -280,6 +362,7 @@ impl TextRenderer {
             token_range_cache: LruCache::new(NonZeroUsize::new(2048).unwrap()),
             fallback_choice_cache: LruCache::new(NonZeroUsize::new(4096).unwrap()),
             layout_cache: LruCache::new(NonZeroUsize::new(1024).unwrap()),
+            preserved_cache: LruCache::new(NonZeroUsize::new(256).unwrap()),
         })
     }
 
@@ -891,6 +974,7 @@ impl TextRenderer {
         self.font_run_cache.clear();
         self.token_range_cache.clear();
         self.layout_cache.clear();
+        self.preserved_cache.clear();
     }
 
     pub fn load_primary_font(
@@ -924,6 +1008,7 @@ impl TextRenderer {
             self.fallback_fonts.push(font);
             self.fallback_choice_cache.clear();
             self.layout_cache.clear();
+            self.preserved_cache.clear();
             self.font_run_cache.clear();
             self.token_range_cache.clear();
         }
@@ -1183,23 +1268,7 @@ impl TextRenderer {
         for run in runs.iter() {
             for group in run.cluster_groups.iter() {
                 if byte >= group.byte_start_abs && byte <= group.byte_end_abs {
-                    let cluster = &text[group.byte_start_abs..group.byte_end_abs];
-                    let count = cluster.graphemes(true).count().max(1);
-                    let before = cluster
-                        .grapheme_indices(true)
-                        .filter(|(i, _)| group.byte_start_abs + i < byte)
-                        .count();
-                    // A ligature is one shaping cluster containing multiple
-                    // editable graphemes. Distribute its internal caret stops.
-                    let fraction = before as f32 / count as f32;
-
-                    let fraction = if run.bidi_lvl.is_rtl() {
-                        1.0 - fraction
-                    } else {
-                        fraction
-                    };
-
-                    return Ok(x + group.x_advance * fraction);
+                    return Ok(x + cluster_caret(text, group, byte, run.bidi_lvl.is_rtl()));
                 }
 
                 x += group.x_advance;
@@ -1207,6 +1276,87 @@ impl TextRenderer {
         }
 
         Ok(x)
+    }
+
+    pub fn selection_spans(
+        &mut self,
+        text: &str,
+        font: FontHandle,
+        selected: std::ops::Range<usize>,
+    ) -> anyhow::Result<Vec<[f32; 2]>> {
+        let runs = self.build_shaped_runs_cached(font, text)?;
+        let mut spans = Vec::<[f32; 2]>::new();
+        let mut x = 0.0;
+
+        for run in runs.iter() {
+            for group in run.cluster_groups.iter() {
+                let start = selected.start.max(group.byte_start_abs);
+                let end = selected.end.min(group.byte_end_abs);
+                if start < end {
+                    let rtl = run.bidi_lvl.is_rtl();
+                    let a = x + cluster_caret(text, group, start, rtl);
+                    let b = x + cluster_caret(text, group, end, rtl);
+                    let left = a.min(b);
+                    let right = a.max(b);
+                    if let Some(span) = spans.last_mut().filter(|span| span[1] >= left) {
+                        span[1] = span[1].max(right);
+                    } else {
+                        spans.push([left, right]);
+                    }
+                }
+
+                x += group.x_advance;
+            }
+        }
+
+        Ok(spans)
+    }
+
+    pub fn caret_at_x(
+        &mut self,
+        text: &str,
+        font: FontHandle,
+        target: f32,
+        nearest: bool,
+    ) -> anyhow::Result<usize> {
+        let runs = self.build_shaped_runs_cached(font, text)?;
+        let mut x = 0.0;
+        let mut end = 0;
+        for run in runs.iter() {
+            let rtl = run.bidi_lvl.is_rtl();
+            for group in run.cluster_groups.iter() {
+                end = if rtl {
+                    group.byte_start_abs
+                } else {
+                    group.byte_end_abs
+                };
+                if group.x_advance > 0.0 && target < x + group.x_advance {
+                    let cluster = &text[group.byte_start_abs..group.byte_end_abs];
+                    let count = cluster.graphemes(true).count();
+                    let fraction = ((target - x) / group.x_advance).clamp(0.0, 1.0);
+                    let visual = fraction * count as f32;
+                    let index = if nearest {
+                        visual.round() as usize
+                    } else {
+                        (visual as usize).min(count.saturating_sub(1))
+                    };
+                    let logical = if rtl {
+                        count.saturating_sub(index + usize::from(!nearest))
+                    } else {
+                        index
+                    };
+                    let offset = cluster
+                        .grapheme_indices(true)
+                        .nth(logical)
+                        .map_or(cluster.len(), |(offset, _)| offset);
+                    return Ok(group.byte_start_abs + offset);
+                }
+
+                x += group.x_advance;
+            }
+        }
+
+        Ok(end)
     }
 
     fn measure_byte_range_from_runs(
@@ -1659,6 +1809,219 @@ impl TextRenderer {
         Ok(layout)
     }
 
+    pub fn preserved_layout(
+        &mut self,
+        value: &str,
+        font: FontHandle,
+        width: f32,
+    ) -> anyhow::Result<Arc<PreservedLayout>> {
+        let key = TextLayoutKey {
+            font_handle: font,
+            text: value.to_owned(),
+            max_width_bits: width.to_bits(),
+        };
+        if let Some(layout) = self.preserved_cache.get(&key) {
+            return Ok(Arc::clone(layout));
+        }
+
+        let mut lines = Vec::new();
+        let (mut ascent, base_height) = self.line_metrics(font, &[])?;
+        let mut below_baseline = base_height - ascent;
+        let mut start = 0;
+        let breaks = value
+            .match_indices(['\r', '\n'])
+            .chain(std::iter::once((value.len(), "")));
+        for (end, newline) in breaks {
+            if end < start {
+                continue;
+            }
+
+            let paragraph = &value[start..end];
+            let display = paragraph.replace('\t', "    ");
+            let runs = self.build_shaped_runs_cached(font, &display)?;
+            let (row_ascent, row_height) = self.line_metrics(font, &runs)?;
+            ascent = ascent.max(row_ascent);
+            below_baseline = below_baseline.max(row_height - row_ascent);
+
+            let mut advances = vec![0.0; display.len() + 1];
+            for run in runs.iter() {
+                for group in run.cluster_groups.iter() {
+                    let cluster = &display[group.byte_start_abs..group.byte_end_abs];
+                    let step = group.x_advance / cluster.graphemes(true).count().max(1) as f32;
+                    for (offset, _) in cluster.grapheme_indices(true) {
+                        advances[group.byte_start_abs + offset] += step;
+                    }
+                }
+            }
+
+            let mut stops = vec![(0, 0.0)];
+            let mut offset = 0;
+            let mut x = 0.0;
+            for (byte, grapheme) in paragraph.grapheme_indices(true) {
+                let len = if grapheme == "\t" {
+                    4
+                } else {
+                    grapheme.len()
+                };
+                x += advances[offset..offset + len].iter().sum::<f32>();
+                offset += len;
+                stops.push((byte + grapheme.len(), x));
+            }
+
+            let breaks: Vec<_> = paragraph
+                .split_word_bound_indices()
+                .map(|(byte, _)| byte)
+                .collect();
+            let mut first = 0;
+            loop {
+                let mut last = first;
+                let mut word_break = first;
+                while last + 1 < stops.len() {
+                    if last > first && stops[last + 1].1 - stops[first].1 > width {
+                        if word_break > first {
+                            last = word_break;
+                        }
+
+                        break;
+                    }
+
+                    last += 1;
+                    if breaks.binary_search(&stops[last].0).is_ok() {
+                        word_break = last;
+                    }
+                }
+
+                loop {
+                    let range = stops[first].0..stops[last].0;
+                    let source = &paragraph[range.clone()];
+                    let display = source.replace('\t', "    ");
+                    let runs = self.build_shaped_runs_cached(font, &display)?;
+                    let advance = runs
+                        .iter()
+                        .flat_map(|run| run.cluster_groups.iter())
+                        .map(|group| group.x_advance)
+                        .sum::<f32>();
+
+                    // shaping the line on its own can change kerning at the wrap
+                    if advance > width && last > first + 1 {
+                        last -= 1;
+                        continue;
+                    }
+
+                    lines.push(PreservedLine {
+                        source: start + range.start..start + range.end,
+                        tabs: source.match_indices('\t').map(|(byte, _)| byte).collect(),
+                        width: advance,
+                        display,
+                        runs,
+                    });
+                    break;
+                }
+
+                if last + 1 == stops.len() {
+                    break;
+                }
+
+                first = last;
+            }
+
+            start = end + newline.len();
+            if newline == "\r" && value.as_bytes().get(start) == Some(&b'\n') {
+                start += 1;
+            }
+        }
+
+        let line_height = ascent + below_baseline;
+        let layout = Arc::new(PreservedLayout {
+            width: lines.iter().map(|line| line.width).fold(0.0, f32::max),
+            height: lines.len() as f32 * line_height,
+            lines,
+            line_height,
+            ascent,
+        });
+        self.preserved_cache.put(key, Arc::clone(&layout));
+        Ok(layout)
+    }
+
+    pub fn preserved_caret_at(
+        &mut self,
+        layout: &PreservedLayout,
+        font: FontHandle,
+        [x, y]: [f32; 2],
+        nearest: bool,
+    ) -> anyhow::Result<(usize, usize)> {
+        let row = ((y / layout.line_height).floor().max(0.0) as usize).min(layout.lines.len() - 1);
+        let line = &layout.lines[row];
+        let offset = self.caret_at_x(&line.display, font, x, nearest)?;
+        Ok((line.source_offset(offset), row))
+    }
+
+    pub fn render_preserved_selection(
+        &mut self,
+        [x, top]: [f32; 2],
+        layout: &PreservedLayout,
+        font: FontHandle,
+        selection: std::ops::Range<usize>,
+        color: crate::graphics::Color,
+        ui: &mut UIRenderer,
+    ) -> anyhow::Result<()> {
+        let clip = ui.clip();
+        let first = ((clip[1] - top) / layout.line_height).floor().max(0.0) as usize;
+        let last = ((clip[3] - top) / layout.line_height).ceil().max(0.0) as usize;
+        for (index, line) in layout.lines.iter().enumerate().take(last).skip(first) {
+            let start = selection.start.max(line.source.start);
+            let end = selection.end.min(line.source.end);
+            let y = top + index as f32 * layout.line_height;
+            if start < end {
+                let range = line.display_offset(start)..line.display_offset(end);
+                for [left, right] in self.selection_spans(&line.display, font, range)? {
+                    ui.quad([x + left, y, right - left, layout.line_height], color)?;
+                }
+            }
+
+            if selection.start <= line.source.end
+                && selection.end > line.source.end
+                && layout
+                    .lines
+                    .get(index + 1)
+                    .is_some_and(|next| next.source.start > line.source.end)
+            {
+                let eol = self.caret_x(&line.display, font, line.display.len())?;
+                ui.quad([x + eol, y, 3.0, layout.line_height], color)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn render_preserved<G: GraphicsDevice>(
+        &mut self,
+        origin: [f32; 2],
+        layout: &PreservedLayout,
+        gpu: &mut G,
+        ui: &mut UIRenderer,
+    ) -> anyhow::Result<()> {
+        let clip = ui.clip();
+        for (index, line) in layout.lines.iter().enumerate() {
+            let top = origin[1] + index as f32 * layout.line_height;
+            if top + layout.line_height <= clip[1] {
+                continue;
+            }
+
+            if top >= clip[3] {
+                break;
+            }
+
+            let mut x = origin[0];
+            for run in line.runs.iter() {
+                self.render_shaped_run(x, top + layout.ascent, run, gpu, ui)?;
+                x += run.x_adv * self.font_manager.scale(run.font_handle)?;
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn measure_with_options(
         &mut self,
         text: &str,
@@ -1876,6 +2239,36 @@ fn bordered_glyph(glyph: &Glyph) -> anyhow::Result<Vec<u8>> {
 mod system_font_tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn preserved_layout_keeps_blank_lines_indentation_and_grapheme_boundaries() -> anyhow::Result<()>
+    {
+        let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
+        let mut renderer = TextRenderer::new()?;
+        let font = renderer.load_primary_font(&assets.join("NotoSans-Bold.ttf"), 16, 0)?;
+        let value = "  first\r\n\r\n\tsecond\rthird\n";
+        let layout = renderer.preserved_layout(value, font, 500.0)?;
+        assert_eq!(
+            layout
+                .lines
+                .iter()
+                .map(|line| line.display.as_str())
+                .collect::<Vec<_>>(),
+            ["  first", "", "    second", "third", ""],
+        );
+        let indented = &layout.lines[2];
+        assert_eq!(&value[indented.source.clone()], "\tsecond");
+        assert_eq!(indented.display_offset(indented.source.start + 1), 4);
+        assert_eq!(indented.source_offset(1), indented.source.start);
+        assert_eq!(indented.source_offset(3), indented.source.start + 1);
+        assert_eq!(layout.height, 5.0 * layout.line_height);
+
+        let unbroken = "e\u{301}e\u{301}e\u{301}";
+        let layout = renderer.preserved_layout(unbroken, font, 1.0)?;
+        assert_eq!(layout.lines.len(), 3);
+        assert!(layout.lines.iter().all(|line| line.display == "e\u{301}"));
+        Ok(())
+    }
 
     #[test]
     fn alternate_text_face_keeps_emoji_and_script_fallbacks() -> anyhow::Result<()> {

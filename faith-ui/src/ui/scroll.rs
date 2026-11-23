@@ -428,6 +428,7 @@ impl Areas {
 
                         WindowEvent::MouseButtonPressed {
                             button: MouseButton::Left,
+                            ..
                         } => {
                             for axis in 0..2 {
                                 let (Some(track), Some(thumb)) =

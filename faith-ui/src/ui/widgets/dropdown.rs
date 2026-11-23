@@ -184,7 +184,7 @@ impl State {
                     self.reveal = true;
                 }
                 WindowEvent::ClipboardText { target, text } if self.open && target == id => {
-                    let response = self.search.handle(&WindowEvent::TextInput(text.clone()));
+                    let response = self.search.paste(text);
                     self.update_query(response.changed);
                 }
                 WindowEvent::TextInput(_) | WindowEvent::KeyPressed { .. } if self.open => {
@@ -303,6 +303,7 @@ impl State {
 
                 WindowEvent::MouseButtonPressed {
                     button: MouseButton::Left,
+                    ..
                 } if self.open && !contains(header, pointer) && !contains(popup, pointer) => {
                     self.close()
                 }
@@ -357,6 +358,7 @@ mod tests {
         WindowEvent::KeyPressed {
             key,
             control: false,
+            shift: false,
         }
     }
 
@@ -392,8 +394,8 @@ mod tests {
                 WindowEvent::TextInput("ord".into()),
                 key(Key::Home),
                 WindowEvent::TextInput("N".into()),
-                key(Key::Copy),
                 key(Key::SelectAll),
+                key(Key::Copy),
                 key(Key::Paste),
                 WindowEvent::ClipboardText {
                     target: "other".into(),

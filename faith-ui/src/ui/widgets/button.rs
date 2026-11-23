@@ -114,6 +114,7 @@ impl State {
                 WindowEvent::FocusChanged(false) => self.held = false,
                 WindowEvent::MouseButtonPressed {
                     button: MouseButton::Left,
+                    ..
                 } => self.held = inside(pointer),
                 WindowEvent::MouseButtonReleased {
                     button: MouseButton::Left,

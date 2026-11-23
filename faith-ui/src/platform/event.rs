@@ -5,6 +5,9 @@ pub enum Key {
     Enter,
     SelectAll,
     Copy,
+    Cut,
+    Undo,
+    Redo,
     Paste,
     Backspace,
     Delete,
@@ -39,6 +42,7 @@ pub enum WindowEvent {
     KeyPressed {
         key: Key,
         control: bool,
+        shift: bool,
     },
     FocusChanged(bool),
     FocusNext {
@@ -53,6 +57,7 @@ pub enum WindowEvent {
     },
     MouseButtonPressed {
         button: MouseButton,
+        shift: bool,
     },
     MouseButtonReleased {
         button: MouseButton,

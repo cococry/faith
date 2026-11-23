@@ -682,12 +682,17 @@ impl X11Platform {
                         -1.0
                     }));
                 } else {
-                    self.pending_input.push(x11_button_event(e.detail, true));
+                    self.pending_input.push(x11_button_event(
+                        e.detail,
+                        true,
+                        e.state.contains(x11rb::protocol::xproto::KeyButMask::SHIFT),
+                    ));
                 }
             }
 
             Event::ButtonRelease(e) if !(4..=7).contains(&e.detail) => {
-                self.pending_input.push(x11_button_event(e.detail, false));
+                self.pending_input
+                    .push(x11_button_event(e.detail, false, false));
             }
 
             Event::KeyPress(e) => {
@@ -969,7 +974,7 @@ impl Drop for X11Platform {
 }
 
 /// Core X11 represents wheel steps as button presses; releases are ignored.
-fn x11_button_event(detail: u8, pressed: bool) -> WindowEvent {
+fn x11_button_event(detail: u8, pressed: bool, shift: bool) -> WindowEvent {
     let delta = match detail {
         4 => Some((0.0, -1.0)),
         5 => Some((0.0, 1.0)),
@@ -994,7 +999,7 @@ fn x11_button_event(detail: u8, pressed: bool) -> WindowEvent {
     };
 
     if pressed {
-        WindowEvent::MouseButtonPressed { button }
+        WindowEvent::MouseButtonPressed { button, shift }
     } else {
         WindowEvent::MouseButtonReleased { button }
     }

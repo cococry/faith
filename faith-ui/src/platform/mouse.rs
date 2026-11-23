@@ -110,7 +110,7 @@ impl Mouse {
             // X11's implicit grab continues delivering drag events outside the
             // window. Leave invalidates hover but must not cancel that drag.
             WindowEvent::MouseLeft => self.cursor = None,
-            WindowEvent::MouseButtonPressed { button } if self.pressed.insert(button) => {
+            WindowEvent::MouseButtonPressed { button, .. } if self.pressed.insert(button) => {
                 self.went_down.insert(button);
             }
 
