@@ -29,7 +29,17 @@ supports concurrent networking, implements a custom binary protocol and uses TLS
 
 ## Current features 
 
-**UI related:**
+**UI (high level) related:**
+- All persistent storage is stored locally, never on servers
+- Create unlimited profiles, each with their own identity
+- Create disposable profiles with no public identifier
+- Store contacts locally 
+- Create conversations with many partners
+- Fully customize the application including the font, theme, corner rounding & much more
+- Zoom the UI dynamically with high performance
+- Use the *Quickshell* for fuzzy finding and running actions
+    
+**UI (low level) related:**
 - X11/Wayland windowing backend
 - Vulkan rendering backend
 - Modern OpenGL rendering backend
@@ -43,7 +53,7 @@ supports concurrent networking, implements a custom binary protocol and uses TLS
 - Style & Layout animations
 - Optimized rounded corners
 
-**Network related:**
+**Network/Server related:**
 - Concurrent server written in C
 - Scalable to many clients with `epoll()` mechanics
 - TCP transport secured with TLS via OpenSSL
