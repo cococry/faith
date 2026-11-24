@@ -97,6 +97,7 @@ impl Tab {
 #[derive(Clone, Copy, PartialEq)]
 enum SettingsItem {
     Appearance,
+    Conversations,
     Misc,
 }
 
@@ -257,6 +258,7 @@ enum Action {
     SmoothScrolling(bool),
     ZoomStep(u32),
     DefaultZoom(u32),
+    MessageTime24h(bool),
 }
 
 struct ProfileForm {
@@ -304,6 +306,9 @@ struct App {
     list_offset: usize,
     conversation: Option<faith_client::Id>,
     theme: String,
+    last_profile: Option<String>,
+    restore_startup_chat: bool,
+    focus_composer_on_entry: bool,
     themes: Catalog,
     font: Option<system_fonts::Family>,
     system_fonts: system_fonts::Catalog,
@@ -319,6 +324,7 @@ struct App {
     smooth_scrolling: bool,
     zoom_step: u32,
     default_zoom: u32,
+    message_time_24h: bool,
     settings: settings::Store,
     saved_at: Option<std::time::Instant>,
     copied_at: Option<std::time::Instant>,
@@ -433,31 +439,52 @@ impl App {
     fn save_settings(&mut self) {
         self.saved_at = None;
         self.settings_error.clear();
-        self.settings.save(settings::Settings {
-            theme: self.theme.clone(),
-            font: self.font.clone(),
-            rounded_corners: self.rounded,
-            animations: self.animations,
-            layout_morphing: self.layout_morphing,
-            morph_duration_ms: self.morph_duration_ms,
-            morph_curve: self.morph_curve,
-            morph_strength: self.morph_strength,
-            animation_curve: self.animation_curve,
-            smooth_scrolling: self.smooth_scrolling,
-            zoom_step: self.zoom_step,
-            default_zoom: self.default_zoom,
-        });
+        self.persist_settings(true);
+    }
+
+    fn persist_settings(&mut self, confirm: bool) {
+        self.settings.save(
+            settings::Settings {
+                theme: self.theme.clone(),
+                font: self.font.clone(),
+                rounded_corners: self.rounded,
+                animations: self.animations,
+                layout_morphing: self.layout_morphing,
+                morph_duration_ms: self.morph_duration_ms,
+                morph_curve: self.morph_curve,
+                morph_strength: self.morph_strength,
+                animation_curve: self.animation_curve,
+                smooth_scrolling: self.smooth_scrolling,
+                zoom_step: self.zoom_step,
+                default_zoom: self.default_zoom,
+                message_time_24h: self.message_time_24h,
+                last_profile: self.last_profile.clone(),
+            },
+            confirm,
+        );
+    }
+
+    fn remember_profile(&mut self) {
+        if let Some(profile) = &self.selected
+            && profile.path == self.root.join(&profile.alias)
+            && self.last_profile.as_deref() != Some(profile.alias.as_str())
+        {
+            self.last_profile = Some(profile.alias.clone());
+            self.persist_settings(false);
+        }
     }
 
     fn login(&mut self, profile: Profile, cli: &cli::Cli, platform: &Platform) {
         // Stop the old session before selecting another account.
         self.session = None;
         self.chat.reset();
+        self.restore_startup_chat = false;
         self.error.clear();
         self.conversation = None;
         self.list_offset = 0;
         self.page = Page::Conversations;
         self.selected = Some(profile.clone());
+        self.remember_profile();
 
         match Self::start_profile(&profile, None, cli, platform) {
             Ok(session) => self.session = Some(session),
@@ -523,6 +550,11 @@ impl App {
             if self.page.is_chat() {
                 self.page = Page::Accounts;
             }
+        }
+
+        if self.last_profile.as_deref() == Some(profile.alias.as_str()) {
+            self.last_profile = None;
+            self.persist_settings(false);
         }
 
         self.load_contact_usernames(None);
@@ -800,7 +832,9 @@ impl App {
                 if self.page == Page::CreateUsername {
                     self.session = Some(session);
                     self.selected = Some(profile);
+                    self.remember_profile();
                     self.chat.reset();
+                    self.restore_startup_chat = false;
                     self.error.clear();
                     self.conversation = None;
                     self.list_offset = 0;
@@ -888,12 +922,69 @@ impl App {
         }
 
         self.chat.snapshot = snapshot;
+        if std::mem::take(&mut self.restore_startup_chat) && self.page == Page::Conversations {
+            self.conversation = self.chat.snapshot.restored_conversation.filter(|id| {
+                self.chat.snapshot.selected == Some(*id)
+                    && self
+                        .chat
+                        .snapshot
+                        .conversations
+                        .iter()
+                        .any(|chat| chat.id == *id)
+            });
+            self.focus_composer_on_entry = self.conversation.is_some();
+        }
+
         if matches!(self.page, Page::Contacts(Some(_))) {
             self.refresh_contact_links();
         }
         if self.page == Page::PendingInvites && self.chat.snapshot.pending_invites.is_empty() {
             self.page = Page::Conversations;
             ui.navigation_changed();
+            self.focus_composer_on_entry = self.conversation.is_some();
+        }
+
+        self.mark_open_conversation_read();
+    }
+
+    fn focus_open_composer(&mut self, ui: &mut Framework) {
+        if self.focus_composer_on_entry
+            && self.page == Page::Conversations
+            && let Some(id) = self.conversation
+            && self
+                .chat
+                .snapshot
+                .conversations
+                .iter()
+                .any(|chat| chat.id == id)
+        {
+            ui.focus_input(&self.chat.composer_id(id));
+            self.focus_composer_on_entry = false;
+        }
+    }
+
+    fn mark_open_conversation_read(&mut self) {
+        let snapshot = &self.chat.snapshot;
+        if self.page == Page::Conversations
+            && let Some(id) = self.conversation
+            && snapshot.selected == Some(id)
+            && snapshot
+                .conversations
+                .iter()
+                .any(|chat| chat.id == id && chat.unread > 0)
+            && let Some(through) = snapshot.messages.iter().map(|message| message.row_id).max()
+        {
+            if self.chat.unread_boundary.is_none() {
+                self.chat.unread_boundary = snapshot
+                    .messages
+                    .iter()
+                    .find(|message| message.unread)
+                    .map(|message| message.row_id);
+            }
+
+            if let Err(error) = self.submit_chat(client::Command::MarkRead { id, through }) {
+                tracing::warn!("Could not mark conversation as read: {error}");
+            }
         }
     }
 
@@ -955,6 +1046,7 @@ impl App {
         let previous_contact_mode = self.contact_mode;
         let creating_profile = matches!(action, Action::Create(_));
         let begin_rename = matches!(action, Action::BeginConversationRename { .. });
+        let opening_conversation = matches!(action, Action::OpenConversation { .. });
         let focus_requested = matches!(
             action,
             Action::New
@@ -1162,6 +1254,7 @@ impl App {
             Action::OpenConversation { profile, id } => {
                 self.ensure_profile(profile, cli, platform)?;
                 self.submit_chat(client::Command::Select(id))?;
+                self.restore_startup_chat = false;
                 self.conversation = Some(id);
                 self.page = Page::Conversations;
                 self.error.clear();
@@ -1572,6 +1665,11 @@ impl App {
                 self.save_settings();
             }
 
+            Action::MessageTime24h(enabled) => {
+                self.message_time_24h = enabled;
+                self.save_settings();
+            }
+
             Action::SmoothScrolling(enabled) => {
                 self.smooth_scrolling = enabled;
                 ui.set_smooth_scrolling(enabled);
@@ -1667,6 +1765,20 @@ impl App {
         if record_history && self.location() != previous {
             self.back_history.push(previous);
             self.forward_history.clear();
+        }
+
+        if opening_conversation
+            || previous.page != self.page
+            || previous.conversation != self.conversation
+            || previous.chat_session != self.chat.session
+        {
+            self.focus_composer_on_entry =
+                self.page == Page::Conversations && self.conversation.is_some();
+        }
+
+        if previous.page != self.page || previous.conversation != self.conversation {
+            self.chat.unread_boundary = None;
+            self.mark_open_conversation_read();
         }
 
         platform.request_redraw()?;
@@ -2210,6 +2322,20 @@ fn settings_list(
     if row_button(
         ui,
         gpu,
+        "settings-conversations",
+        CHATS,
+        "Conversations",
+        app.settings_item == SettingsItem::Conversations,
+        false,
+    )? {
+        action = Action::SettingsItem(SettingsItem::Conversations);
+    }
+
+    ui.space(10.0);
+
+    if row_button(
+        ui,
+        gpu,
         "settings-misc",
         "\u{eb52}",
         "Misc",
@@ -2383,6 +2509,8 @@ fn item_list(
                 let (x, y) = ui.position();
                 if let Some(profile) = &app.selected {
                     let editing = app.chat.renaming == Some(id);
+                    let selected = app.conversation == Some(id) && app.page == Page::Conversations;
+                    let badge = (chat.unread != 0 && !selected).then(|| chat.unread.to_string());
                     let title = if editing {
                         std::borrow::Cow::Borrowed("")
                     } else {
@@ -2399,9 +2527,8 @@ fn item_list(
                             title: &title,
                             detail: &chat.last,
                             icon: GROUP,
-                            selected: app.conversation == Some(id)
-                                && app.page == Page::Conversations,
-                            badge: None,
+                            selected,
+                            badge: badge.as_deref(),
                         },
                     );
                     ui.pop_style();
@@ -3421,6 +3548,28 @@ fn settings_page(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::R
         return misc_settings_page(ui, gpu, app);
     }
 
+    if app.settings_item == SettingsItem::Conversations {
+        let width = (ui.div_width() - 64.0).max(1.0);
+        ui.set_position(32.0, 36.0);
+        ui.div_begin_id(
+            "conversation-settings",
+            DivOptions {
+                width: Some(width),
+                ..Default::default()
+            },
+        )?;
+        label(ui, gpu, "Conversations", 26, true, false, false)?;
+        ui.space(28.0);
+        let format = ui.checkbox(
+            gpu,
+            "settings-message-time-24h",
+            "Use 24-hour time for messages",
+            app.message_time_24h,
+        )?;
+        ui.div_end();
+        return Ok(format.map_or(Action::None, Action::MessageTime24h));
+    }
+
     let width = (ui.div_width() - 64.0).max(1.0);
     let height = (ui.div_height() - 72.0).max(1.0);
     ui.set_position(32.0, 36.0);
@@ -3831,6 +3980,9 @@ fn main() -> anyhow::Result<()> {
         list_offset: 0,
         conversation: None,
         theme: preferences.theme,
+        last_profile: preferences.last_profile,
+        restore_startup_chat: false,
+        focus_composer_on_entry: false,
         themes,
         system_fonts: system_fonts::Catalog::new(preferences.font.as_ref()),
         font: preferences.font,
@@ -3846,6 +3998,7 @@ fn main() -> anyhow::Result<()> {
         smooth_scrolling: preferences.smooth_scrolling,
         zoom_step: preferences.zoom_step,
         default_zoom: preferences.default_zoom,
+        message_time_24h: preferences.message_time_24h,
         settings: settings::Store::start(settings_path, platform.waker())?,
         saved_at: None,
         copied_at: None,
@@ -3865,7 +4018,7 @@ fn main() -> anyhow::Result<()> {
 
     app.load_contact_usernames(cli.profile.as_deref());
 
-    // Use an explicit profile, or automatically select the only account.
+    // Use an explicit profile, the last account, or the only account.
     if let Some(path) = &cli.profile {
         app.login(
             Profile {
@@ -3879,12 +4032,17 @@ fn main() -> anyhow::Result<()> {
             &cli,
             &platform,
         );
-    } else if app.profiles.len() == 1 {
-        app.login(app.profiles[0].clone(), &cli, &platform);
-    } else if !app.profiles.is_empty() {
-        app.page = Page::Accounts;
+    } else if let Some(profile) = app
+        .profiles
+        .iter()
+        .find(|profile| Some(profile.alias.as_str()) == app.last_profile.as_deref())
+        .or_else(|| (app.profiles.len() == 1).then(|| &app.profiles[0]))
+        .cloned()
+    {
+        app.login(profile, &cli, &platform);
     }
 
+    app.restore_startup_chat = app.session.is_some();
     platform.request_redraw()?;
     let mut logo = None;
     let mut quickshell = quickshell::Shell::default();
@@ -3899,6 +4057,10 @@ fn main() -> anyhow::Result<()> {
         app.refresh_chat(&mut ui);
         if app.system_fonts.poll(app.font.as_ref()) {
             quickshell.finish_font_picker(&app);
+        }
+
+        if !quickshell.is_open() && !popup.is_open() {
+            app.focus_open_composer(&mut ui);
         }
 
         events.retain(|event| {
@@ -3936,10 +4098,12 @@ fn main() -> anyhow::Result<()> {
         // Show confirmation only after the settings have reached disk.
         if let Some(result) = app.settings.poll() {
             match result {
-                Ok(saved) => {
+                Ok(Some(saved)) => {
                     app.saved_at = Some(saved);
                     app.settings_error.clear();
                 }
+
+                Ok(None) => {}
 
                 Err(error) => app.settings_error = error,
             }

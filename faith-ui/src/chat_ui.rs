@@ -27,6 +27,7 @@ pub struct State {
     pub disclose_username: Option<bool>,
     pub request_disclosure: HashMap<Id, bool>,
     pub session: u64,
+    pub unread_boundary: Option<i64>,
     pub footer_hover: RefCell<crate::ui::animation::Presence>,
     form: u64,
     history_layout: RefCell<Option<HistoryLayout>>,
@@ -44,6 +45,7 @@ impl Default for State {
             disclose_username: None,
             request_disclosure: HashMap::new(),
             session: 0,
+            unread_boundary: None,
             footer_hover: RefCell::default(),
             form: 0,
             history_layout: RefCell::new(None),
@@ -581,6 +583,9 @@ pub fn form_input(
     result
 }
 
+const COMMAND_BUTTON_FONT_SIZE: u32 = 13;
+const COMMAND_BUTTON_PADDING: f32 = 10.0;
+
 pub fn command_button(
     ui: &mut Framework,
     gpu: &mut Renderer,
@@ -594,9 +599,9 @@ pub fn command_button(
         enabled,
         focus_when_disabled: matches!(id, "chat-add-partner" | "chat-advance"),
         focus_outline: matches!(id, "chat-add-partner" | "chat-advance" | "chat-cancel"),
-        font_size: 13,
+        font_size: COMMAND_BUTTON_FONT_SIZE,
         icon_font_size: Some(15),
-        padding: 10.0,
+        padding: COMMAND_BUTTON_PADDING,
         radius: 20.0,
         center_button_content: true,
         background: Some(if primary && enabled {
@@ -1104,10 +1109,20 @@ pub fn conversation(
         }
         _ => None,
     };
-    let button_width = 108.0_f32.min(inner_width * 0.5);
+    let button_width = if let Some((label, _)) = &contact_action {
+        ui.push_style(Style {
+            font_size: COMMAND_BUTTON_FONT_SIZE,
+            ..ui.style()
+        });
+        let label_size = ui.text_size(label, Some(Font::Regular));
+        ui.pop_style();
+        (label_size?.0.ceil() + 2.0 * COMMAND_BUTTON_PADDING + 2.0).min(inner_width)
+    } else {
+        0.0
+    };
     let (x, y) = ui.position();
     let title_width = if contact_action.is_some() {
-        (inner_width - button_width - 8.0).max(1.0)
+        (inner_width - button_width - 12.0).max(1.0)
     } else {
         inner_width
     };
@@ -1127,7 +1142,8 @@ pub fn conversation(
         label(ui, gpu, &title, 20, true, false, false)?;
     }
     ui.pop_sizing();
-    if let Some(at) = ui.context_press([x, y, title_width, ui.position().1 - y]) {
+    let title_height = ui.position().1 - y;
+    if let Some(at) = ui.context_press([x, y, title_width, title_height]) {
         action = Action::OpenRowMenu(
             crate::RowMenu::Conversation {
                 profile: profile.clone(),
@@ -1137,11 +1153,16 @@ pub fn conversation(
         );
     }
 
-    if let Some((title, command)) = contact_action {
-        ui.set_position(inner_width - button_width, y);
+    if let Some((label, command)) = contact_action {
+        let row_height = title_height.max(32.0);
+        ui.set_position(
+            x + inner_width - button_width,
+            y + (row_height - 32.0) * 0.5,
+        );
         ui.push_sizing(Some(button_width), Some(32.0));
-        let save = command_button(ui, gpu, "conversation-contact", "", title, true, false);
+        let save = command_button(ui, gpu, "conversation-contact", "", label, true, false);
         ui.pop_sizing();
+        ui.set_position(x, y + row_height);
         if save? {
             action = command;
         }
@@ -1228,19 +1249,116 @@ pub fn conversation(
 
 const MESSAGE_ACTION_SIZE: f32 = 24.0;
 const MESSAGE_ACTION_GAP: f32 = 4.0;
+const DIVIDER_HEIGHT: f32 = 26.0;
+const TIME_GAP: f32 = 12.0;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct LocalDay {
+    year: i32,
+    month: usize,
+    day: i32,
+    weekday: usize,
+}
+
+impl LocalDay {
+    fn from_tm(time: &nix::libc::tm) -> Self {
+        Self {
+            year: time.tm_year + 1900,
+            month: time.tm_mon as usize,
+            day: time.tm_mday,
+            weekday: time.tm_wday as usize,
+        }
+    }
+
+    fn label(self) -> String {
+        const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+        const MONTHS: [&str; 12] = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ];
+        format!(
+            "{}, {} {}",
+            WEEKDAYS[self.weekday], MONTHS[self.month], self.day
+        )
+    }
+}
+
+fn local_time(seconds: i64) -> Option<nix::libc::tm> {
+    let mut local = std::mem::MaybeUninit::uninit();
+    let seconds = seconds as nix::libc::time_t;
+    unsafe {
+        (!nix::libc::localtime_r(&seconds, local.as_mut_ptr()).is_null())
+            .then(|| local.assume_init())
+    }
+}
+
+fn local_midnight(mut time: nix::libc::tm, day_offset: i32) -> i64 {
+    time.tm_mday += day_offset;
+    time.tm_hour = 0;
+    time.tm_min = 0;
+    time.tm_sec = 0;
+    time.tm_isdst = -1;
+    unsafe { nix::libc::mktime(&mut time) as i64 }
+}
+
+fn message_clock(time: &nix::libc::tm, twenty_four_hours: bool) -> String {
+    let (hour, minute) = (time.tm_hour, time.tm_min);
+    if twenty_four_hours {
+        format!("{hour:02}:{minute:02}")
+    } else {
+        let suffix = if hour < 12 {
+            "AM"
+        } else {
+            "PM"
+        };
+        format!("{}:{minute:02} {suffix}", (hour + 11) % 12 + 1)
+    }
+}
+
+fn history_divider(
+    ui: &mut Framework,
+    gpu: &mut Renderer,
+    width: f32,
+    y: f32,
+    text: &str,
+) -> anyhow::Result<()> {
+    ui.push_style(Style {
+        font_size: 11,
+        padding: 0.0,
+        color: ui.theme().muted,
+        ..ui.style()
+    });
+    let (_, text_height) = ui.text_size(text, None)?;
+    ui.set_position(0.0, y + (DIVIDER_HEIGHT - text_height) * 0.5);
+    ui.push_sizing(Some(width), None);
+    ui.text_centered(gpu, text, None)?;
+    ui.pop_sizing();
+    ui.pop_style();
+    Ok(())
+}
 
 struct Bubble {
+    start: f32,
     y: f32,
     height: f32,
     width: f32,
     actions: f32,
     view_contact: bool,
+    day: Option<LocalDay>,
+    date_divider: Option<String>,
+    unread_divider: Option<String>,
+    clock: String,
+    clock_width: f32,
+    author_width: f32,
 }
 
 struct HistoryLayout {
     messages: Arc<[client::Message]>,
     limit: f32,
     scale: f32,
+    today: Option<LocalDay>,
+    midnight: i64,
+    time_24h: bool,
+    unread_boundary: Option<i64>,
     extent: f32,
     bubbles: Vec<Bubble>,
 }
@@ -1251,14 +1369,69 @@ impl HistoryLayout {
         app: &App,
         chat: &client::Chat,
         limit: f32,
+        now: i64,
     ) -> anyhow::Result<Self> {
         let snapshot = &app.chat.snapshot;
         let padding = limit.min(20.0) * 0.5;
         let content = (limit - padding * 2.0).max(1.0);
         let mut extent = 0.0;
+        let local_now = local_time(now);
+        let today = local_now.as_ref().map(LocalDay::from_tm);
+        let yesterday = local_now
+            .and_then(|time| local_time(local_midnight(time, 0).saturating_sub(1)))
+            .as_ref()
+            .map(LocalDay::from_tm);
+        let midnight = local_now
+            .map(|time| local_midnight(time, 1))
+            .filter(|&midnight| midnight > now)
+            .unwrap_or(i64::MAX);
+        let mut previous_day = None;
         let group = chat.direct_partner().is_none();
         let mut bubbles = Vec::with_capacity(snapshot.messages.len());
         for message in snapshot.messages.iter() {
+            let start = extent;
+            let local = message
+                .sent_at_ms
+                .and_then(|ms| local_time(ms.div_euclid(1000)));
+            let day = local.as_ref().map(LocalDay::from_tm);
+            let date_divider = day.filter(|_| day != previous_day).map(|day| {
+                if Some(day) == today {
+                    "Today".into()
+                } else if Some(day) == yesterday {
+                    "Yesterday".into()
+                } else {
+                    day.label()
+                }
+            });
+            previous_day = day;
+            let clock = local.as_ref().map_or_else(String::new, |local| {
+                message_clock(local, app.message_time_24h)
+            });
+            let unread_divider = (app.chat.unread_boundary == Some(message.row_id)).then(|| {
+                if clock.is_empty() {
+                    "Unread messages".into()
+                } else {
+                    format!("Unread messages · {clock}")
+                }
+            });
+            extent += DIVIDER_HEIGHT
+                * (date_divider.is_some() as u8 + unread_divider.is_some() as u8) as f32;
+            ui.push_style(Style {
+                font_size: 11,
+                ..ui.style()
+            });
+            let clock_size = if clock.is_empty() {
+                (0.0, 0.0)
+            } else {
+                ui.text_size(&clock, None)?
+            };
+            ui.pop_style();
+            let clock_width = if clock.is_empty() {
+                0.0
+            } else {
+                clock_size.0.ceil() + TIME_GAP
+            };
+            let author_width = (content - clock_width).max(1.0);
             let author = author(app, message);
             ui.push_style(Style {
                 font_size: 14,
@@ -1277,22 +1450,31 @@ impl HistoryLayout {
                 font_size: 12,
                 ..ui.style()
             });
-            let name = ui.wrapped_text_size(author, Some(Font::Bold), (content - inset).max(1.0));
+            let name =
+                ui.wrapped_text_size(author, Some(Font::Bold), (author_width - inset).max(1.0));
             ui.pop_style();
             let (body, name) = (body?, name?);
-            let width = (body.0.max(name.0 + inset).ceil() + 2.0 * padding + 1.0).min(limit);
-            let height = body.1 + name.1 + 2.0 * padding;
+            let width =
+                (body.0.max(name.0 + inset + clock_width).ceil() + 2.0 * padding + 1.0).min(limit);
+            let height = body.1 + name.1.max(clock_size.1) + 2.0 * padding;
             let actions = if other && !view_contact && chat.members.contains(&message.sender) {
                 MESSAGE_ACTION_SIZE + MESSAGE_ACTION_GAP
             } else {
                 0.0
             };
             bubbles.push(Bubble {
+                start,
                 y: extent,
                 height,
                 width,
                 actions,
                 view_contact,
+                day,
+                date_divider,
+                unread_divider,
+                clock,
+                clock_width,
+                author_width: (width - 2.0 * padding - clock_width).max(1.0),
             });
             extent += height + actions + 8.0;
         }
@@ -1301,6 +1483,10 @@ impl HistoryLayout {
             messages: snapshot.messages.clone(),
             limit,
             scale: ui.layout_scale(),
+            today,
+            midnight,
+            time_24h: app.message_time_24h,
+            unread_boundary: app.chat.unread_boundary,
             extent,
             bubbles,
         })
@@ -1354,15 +1540,27 @@ fn messages(
         }
 
         let mut cache = app.chat.history_layout.borrow_mut();
+        let now = std::time::SystemTime::UNIX_EPOCH
+            .elapsed()
+            .unwrap_or_default()
+            .as_secs() as i64;
         if cache.as_ref().is_none_or(|layout| {
             layout.limit != limit
                 || layout.scale != ui.layout_scale()
+                || layout.time_24h != app.message_time_24h
+                || layout.unread_boundary != app.chat.unread_boundary
+                || now >= layout.midnight
                 || !Arc::ptr_eq(&layout.messages, &snapshot.messages)
         }) {
-            *cache = Some(HistoryLayout::measure(ui, app, chat, limit)?);
+            *cache = Some(HistoryLayout::measure(ui, app, chat, limit, now)?);
         }
 
         let layout = cache.as_ref().unwrap();
+        if layout.midnight != i64::MAX {
+            let remaining = std::time::Duration::from_secs((layout.midnight - now).max(1) as u64);
+            ui.animate_until(std::time::Instant::now() + remaining);
+        }
+
         let body_wrap_width = (limit - limit.min(20.0)).max(1.0);
         let top = ui.scroll_offset()[1];
         let start = layout
@@ -1370,13 +1568,22 @@ fn messages(
             .partition_point(|bubble| bubble.y + bubble.height + bubble.actions < top);
         let end = layout
             .bubbles
-            .partition_point(|bubble| bubble.y <= top + height);
+            .partition_point(|bubble| bubble.start <= top + height);
         ui.space(layout.extent);
         for (message, bubble) in snapshot.messages[start..end]
             .iter()
             .zip(&layout.bubbles[start..end])
         {
             let mine = snapshot.auth == Some(message.sender);
+            let mut divider_y = bubble.start;
+            for divider in [&bubble.date_divider, &bubble.unread_divider]
+                .into_iter()
+                .flatten()
+            {
+                history_divider(ui, gpu, available, divider_y, divider)?;
+                divider_y += DIVIDER_HEIGHT;
+            }
+
             ui.set_position(
                 if mine {
                     available - bubble.width
@@ -1409,47 +1616,54 @@ fn messages(
                 background: None,
                 ..ui.style()
             });
-            if mine {
-                ui.push_style(Style {
-                    font_size: 12,
-                    color: ui.theme().primary_text,
-                    ..ui.style()
-                });
-                ui.text(gpu, author(app, message), Some(Font::Bold))?;
-                ui.pop_style();
-                ui.push_style(Style {
-                    font_size: 14,
-                    color: ui.theme().primary_text,
-                    ..ui.style()
-                });
-                ui.message_text(gpu, message.row_id, &message.body, body_wrap_width)?;
-                ui.pop_style();
+            let foreground = if mine {
+                ui.theme().primary_text
             } else {
-                let name = author(app, message);
-                if bubble.view_contact {
-                    ui.push_style(Style {
-                        font_size: 12,
-                        color: ui.theme().muted,
-                        ..ui.style()
-                    });
-                    let clicked =
-                        ui.text_link(gpu, &format!("message-author-{row_id}"), name, Font::Bold);
-                    ui.pop_style();
-                    if clicked? {
-                        sender = Some(message.sender);
-                    }
-                } else {
-                    label(ui, gpu, name, 12, true, true, false)?;
+                ui.theme().muted
+            };
+            ui.push_style(Style {
+                font_size: 12,
+                color: foreground,
+                ..ui.style()
+            });
+            ui.push_sizing(Some(bubble.author_width), None);
+            let name = author(app, message);
+            if bubble.view_contact {
+                if ui.text_link(gpu, &format!("message-author-{row_id}"), name, Font::Bold)? {
+                    sender = Some(message.sender);
                 }
-
-                ui.push_style(Style {
-                    font_size: 14,
-                    ..ui.style()
-                });
-                ui.message_text(gpu, message.row_id, &message.body, body_wrap_width)?;
-                ui.pop_style();
+            } else {
+                ui.text(gpu, name, Some(Font::Bold))?;
             }
 
+            ui.pop_sizing();
+            ui.pop_style();
+            if !bubble.clock.is_empty() {
+                let (_, name_bottom) = ui.position();
+                ui.set_position(bubble.author_width + TIME_GAP, 0.0);
+                ui.push_style(Style {
+                    font_size: 11,
+                    color: foreground,
+                    ..ui.style()
+                });
+                ui.push_sizing(Some((bubble.clock_width - TIME_GAP).max(1.0)), None);
+                ui.text(gpu, &bubble.clock, None)?;
+                ui.pop_sizing();
+                ui.pop_style();
+                ui.set_position(0.0, name_bottom.max(ui.position().1));
+            }
+
+            ui.push_style(Style {
+                font_size: 14,
+                color: if mine {
+                    ui.theme().primary_text
+                } else {
+                    ui.theme().text
+                },
+                ..ui.style()
+            });
+            ui.message_text(gpu, message.row_id, &message.body, body_wrap_width)?;
+            ui.pop_style();
             ui.pop_style();
             ui.div_end();
             ui.pop_style();
@@ -1488,6 +1702,28 @@ fn messages(
                 }
             }
         }
+
+        if top + height < layout.extent - 1.0
+            && let Some(day) = layout.bubbles.get(start).and_then(|bubble| bubble.day)
+            && Some(day) != layout.today
+        {
+            let date = day.label();
+            ui.push_style(Style {
+                font_size: 11,
+                padding: 4.0,
+                color: ui.theme().text,
+                background: Some(ui.theme().surface),
+                border_color: Some(ui.theme().border),
+                radius: ui.corner_radii().badge,
+                ..ui.style()
+            });
+            let width = (ui.text_size(&date, None)?.0.ceil() + 18.0).min(available);
+            ui.set_position((available - width) * 0.5, top + 4.0);
+            ui.push_sizing(Some(width), None);
+            ui.text_centered(gpu, &date, None)?;
+            ui.pop_sizing();
+            ui.pop_style();
+        }
     }
 
     ui.div_end();
@@ -1497,6 +1733,21 @@ fn messages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn message_clock_handles_midnight_and_noon_in_both_formats() {
+        let mut time = local_time(0).unwrap();
+        time.tm_min = 7;
+        for (hour, twelve_hour, twenty_four_hour) in [
+            (0, "12:07 AM", "00:07"),
+            (12, "12:07 PM", "12:07"),
+            (15, "3:07 PM", "15:07"),
+        ] {
+            time.tm_hour = hour;
+            assert_eq!(message_clock(&time, false), twelve_hour);
+            assert_eq!(message_clock(&time, true), twenty_four_hour);
+        }
+    }
 
     #[test]
     fn contact_picker_toggles_recipients_and_keeps_membership_valid() {

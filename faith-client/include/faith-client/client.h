@@ -43,7 +43,7 @@ typedef struct faith_client faith_client_t;
 /* Return FAITH_OK only after an idempotent durable commit. The callback runs
  * on the reader thread. Key stored events by (auth_id, device_id, sequence).
  * A repeated sequence must not repeat application side effects.
- * GROUP_PACKET data is sender_auth_id[16] followed by faith_group encoded data.
+ * GROUP_PACKET data is a group event as decoded by faith_group_event_decode.
  * Validate the sender/membership against local conversation state before
  * applying it. A safely rejected packet may be recorded as handled to unblock
  * the queue. GROUP_RECEIVED notifications carry the same body in chat_message;

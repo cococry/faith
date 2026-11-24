@@ -80,3 +80,27 @@ faith_status_code_t faith_group_decode(const uint8_t *data, size_t size,
 
   return FAITH_OK;
 }
+
+faith_status_code_t faith_group_event_decode(const uint8_t *data, size_t size,
+                                             faith_group_packet_t *packet,
+                                             uint64_t *sent_at_ms) {
+  if (!data || !packet || !sent_at_ms || size < FAITH_GROUP_EVENT_SENDER_SIZE)
+    return FAITH_ERR_INVALID;
+
+  size_t offset = FAITH_GROUP_EVENT_SENDER_SIZE;
+  *sent_at_ms = 0;
+  faith_status_code_t rc = faith_group_decode(data + offset, size - offset, packet);
+
+  if (rc == FAITH_OK || size < offset + FAITH_GROUP_EVENT_TIMESTAMP_SIZE)
+    return rc;
+
+  size_t packet_end = size - FAITH_GROUP_EVENT_TIMESTAMP_SIZE;
+  _FH_CHECK_RETURN(faith_group_decode(data + offset, packet_end - offset, packet));
+
+  if (packet->kind != FAITH_GROUP_MESSAGE)
+    return FAITH_ERR_BAD_ENVELOPE;
+
+  FAITH_DECODE_U64_BE_RETURN(data, size, packet_end, *sent_at_ms);
+
+  return *sent_at_ms && *sent_at_ms <= INT64_MAX ? FAITH_OK : FAITH_ERR_BAD_ENVELOPE;
+}
