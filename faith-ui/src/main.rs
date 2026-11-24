@@ -1277,7 +1277,7 @@ impl App {
             }
 
             Action::DiscloseConversationUsername(value) => {
-                self.chat.disclose_username = Some(value);
+                self.chat.disclose_username = value;
             }
 
             Action::RequestDisclosure(id, value) => {

@@ -2285,7 +2285,7 @@ impl Framework {
         value: &str,
         font: Option<Font>,
     ) -> anyhow::Result<()> {
-        self.text_aligned(gpu, value, font, false)
+        self.text_aligned(gpu, value, font, false, None)
     }
 
     pub fn text_centered<G: GraphicsDevice>(
@@ -2294,7 +2294,16 @@ impl Framework {
         value: &str,
         font: Option<Font>,
     ) -> anyhow::Result<()> {
-        self.text_aligned(gpu, value, font, true)
+        self.text_aligned(gpu, value, font, true, None)
+    }
+
+    pub fn text_centered_at<G: GraphicsDevice>(
+        &mut self,
+        gpu: &mut G,
+        value: &str,
+        [x, y, width]: [f32; 3],
+    ) -> anyhow::Result<()> {
+        self.text_aligned(gpu, value, None, true, Some([x, y, width]))
     }
 
     fn text_aligned<G: GraphicsDevice>(
@@ -2303,12 +2312,15 @@ impl Framework {
         value: &str,
         font: Option<Font>,
         centered: bool,
+        position: Option<[f32; 3]>,
     ) -> anyhow::Result<()> {
         let font = self.font(font.unwrap_or_default())?;
         let s = self.style();
         let padding = s.padding.max(0.0);
         let margin = s.margin.max(0.0);
-        let fixed_width = self.sizing.last().unwrap().0;
+        let fixed_width = position
+            .map(|[_, _, width]| width)
+            .or(self.sizing.last().unwrap().0);
         let parent = self.layouts.last().unwrap();
         let available = (parent.bounds.x + parent.bounds.width - parent.x - 2.0 * margin).max(0.0);
         let outer_width = fixed_width.unwrap_or(available).max(0.0);
@@ -2329,7 +2341,17 @@ impl Framework {
             outer_width
         };
 
-        let b = self.place(text_width, layout.height + 2.0 * padding);
+        let height = layout.height + 2.0 * padding;
+        let b = if let Some([x, y, _]) = position {
+            Bounds {
+                x: parent.bounds.x + x,
+                y: parent.bounds.y + y,
+                width: text_width,
+                height,
+            }
+        } else {
+            self.place(text_width, height)
+        };
 
         if !self.visible(b) {
             return Ok(());

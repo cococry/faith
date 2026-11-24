@@ -134,6 +134,7 @@ pub struct PreservedLayout {
 pub struct PreservedLine {
     pub source: std::ops::Range<usize>,
     pub display: String,
+    hidden_prefix: usize,
     tabs: Vec<usize>,
     width: f32,
     runs: Arc<[ShapedTextRun]>,
@@ -141,8 +142,8 @@ pub struct PreservedLine {
 
 impl PreservedLine {
     pub fn display_offset(&self, source: usize) -> usize {
-        let offset = source - self.source.start;
-        offset + 3 * self.tabs.partition_point(|&tab| tab < offset)
+        let offset = source.saturating_sub(self.source.start + self.hidden_prefix);
+        (offset + 3 * self.tabs.partition_point(|&tab| tab < offset)).min(self.display.len())
     }
 
     pub fn source_offset(&self, mut display: usize) -> usize {
@@ -159,7 +160,7 @@ impl PreservedLine {
             display -= 3;
         }
 
-        self.source.start + display
+        self.source.start + self.hidden_prefix + display
     }
 }
 
@@ -1824,7 +1825,7 @@ impl TextRenderer {
             return Ok(Arc::clone(layout));
         }
 
-        let mut lines = Vec::new();
+        let mut lines: Vec<PreservedLine> = Vec::new();
         let (mut ascent, base_height) = self.line_metrics(font, &[])?;
         let mut below_baseline = base_height - ascent;
         let mut start = 0;
@@ -1874,11 +1875,28 @@ impl TextRenderer {
                 .collect();
             let mut first = 0;
             loop {
-                let mut last = first;
-                let mut word_break = first;
+                let mut visible_first = first;
+                if first > 0 {
+                    // Keep soft-wrap whitespace in the source range for editing and copying.
+                    while visible_first + 1 < stops.len()
+                        && matches!(
+                            &paragraph[stops[visible_first].0..stops[visible_first + 1].0],
+                            " " | "\t"
+                        )
+                    {
+                        visible_first += 1;
+                    }
+                    if visible_first + 1 == stops.len() {
+                        lines.last_mut().unwrap().source.end = end;
+                        break;
+                    }
+                }
+
+                let mut last = visible_first;
+                let mut word_break = visible_first;
                 while last + 1 < stops.len() {
-                    if last > first && stops[last + 1].1 - stops[first].1 > width {
-                        if word_break > first {
+                    if last > visible_first && stops[last + 1].1 - stops[visible_first].1 > width {
+                        if word_break > visible_first {
                             last = word_break;
                         }
 
@@ -1892,7 +1910,7 @@ impl TextRenderer {
                 }
 
                 loop {
-                    let range = stops[first].0..stops[last].0;
+                    let range = stops[visible_first].0..stops[last].0;
                     let source = &paragraph[range.clone()];
                     let display = source.replace('\t', "    ");
                     let runs = self.build_shaped_runs_cached(font, &display)?;
@@ -1903,13 +1921,14 @@ impl TextRenderer {
                         .sum::<f32>();
 
                     // shaping the line on its own can change kerning at the wrap
-                    if advance > width && last > first + 1 {
+                    if advance > width && last > visible_first + 1 {
                         last -= 1;
                         continue;
                     }
 
                     lines.push(PreservedLine {
-                        source: start + range.start..start + range.end,
+                        source: start + stops[first].0..start + range.end,
+                        hidden_prefix: range.start - stops[first].0,
                         tabs: source.match_indices('\t').map(|(byte, _)| byte).collect(),
                         width: advance,
                         display,
@@ -2267,6 +2286,31 @@ mod system_font_tests {
         let layout = renderer.preserved_layout(unbroken, font, 1.0)?;
         assert_eq!(layout.lines.len(), 3);
         assert!(layout.lines.iter().all(|line| line.display == "e\u{301}"));
+        Ok(())
+    }
+
+    #[test]
+    fn preserved_layout_hides_soft_wrap_indentation() -> anyhow::Result<()> {
+        let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
+        let mut renderer = TextRenderer::new()?;
+        let font = renderer.load_primary_font(&assets.join("NotoSans-Bold.ttf"), 16, 0)?;
+        let width = renderer.caret_x("hello", font, 5)? + 0.1;
+        let value = "hello  \thello\n x";
+        let layout = renderer.preserved_layout(value, font, width)?;
+        assert_eq!(layout.lines.len(), 3);
+        assert_eq!(layout.lines[0].display, "hello");
+        let wrapped = &layout.lines[1];
+        assert_eq!(wrapped.display, "hello");
+        assert_eq!(&value[wrapped.source.clone()], "  \thello");
+        assert_eq!(wrapped.display_offset(5), 0);
+        assert_eq!(wrapped.source_offset(0), 8);
+        assert_eq!(wrapped.display_offset(9), 1);
+        assert_eq!(layout.lines[2].display, " x");
+
+        let layout = renderer.preserved_layout("hello   ", font, width)?;
+        assert_eq!(layout.lines.len(), 1);
+        assert_eq!(layout.lines[0].source, 0..8);
+        assert_eq!(layout.lines[0].display_offset(8), 5);
         Ok(())
     }
 

@@ -11,6 +11,7 @@ use crate::{
 };
 
 pub const RENAME_INPUT: &str = "conversation-name";
+const DEFAULT_CONVERSATION_DISCLOSURE: bool = true;
 
 pub enum Submission {
     Create,
@@ -24,7 +25,7 @@ pub struct State {
     pub naming: bool,
     pub renaming: Option<Id>,
     pub require_username: bool,
-    pub disclose_username: Option<bool>,
+    pub disclose_username: bool,
     pub request_disclosure: HashMap<Id, bool>,
     pub session: u64,
     pub unread_boundary: Option<i64>,
@@ -41,8 +42,8 @@ impl Default for State {
             partners: Vec::new(),
             naming: false,
             renaming: None,
-            require_username: false,
-            disclose_username: None,
+            require_username: DEFAULT_CONVERSATION_DISCLOSURE,
+            disclose_username: DEFAULT_CONVERSATION_DISCLOSURE,
             request_disclosure: HashMap::new(),
             session: 0,
             unread_boundary: None,
@@ -107,8 +108,8 @@ impl State {
         self.clear_partner_inputs(ui);
         self.partners.clear();
         self.naming = false;
-        self.require_username = false;
-        self.disclose_username = None;
+        self.require_username = DEFAULT_CONVERSATION_DISCLOSURE;
+        self.disclose_username = DEFAULT_CONVERSATION_DISCLOSURE;
         self.form += 1;
     }
 
@@ -122,10 +123,7 @@ impl State {
     }
 
     pub fn discloses_username(&self) -> bool {
-        self.require_username
-            || self
-                .disclose_username
-                .unwrap_or(self.snapshot.auto_disclose)
+        self.require_username || self.disclose_username
     }
 
     pub fn shares_on_request(&self, id: Id) -> bool {
@@ -550,7 +548,7 @@ pub fn creation(ui: &mut Framework, gpu: &mut Renderer, app: &App) -> anyhow::Re
                 title: title.trim().to_owned(),
                 partners: form.partners.clone(),
                 policy: client::InvitationPolicy {
-                    required: form.require_username,
+                    required: form.snapshot.username.is_some() && form.require_username,
                     disclose: form.snapshot.username.is_some() && form.discloses_username(),
                 },
                 automatic_title: title.trim() == app.default_conversation_title(),
@@ -1249,6 +1247,7 @@ pub fn conversation(
 
 const MESSAGE_ACTION_SIZE: f32 = 24.0;
 const MESSAGE_ACTION_GAP: f32 = 4.0;
+const MESSAGE_GAP: f32 = 8.0;
 const DIVIDER_HEIGHT: f32 = 26.0;
 const TIME_GAP: f32 = 12.0;
 
@@ -1328,12 +1327,13 @@ fn history_divider(
         ..ui.style()
     });
     let (_, text_height) = ui.text_size(text, None)?;
-    ui.set_position(0.0, y + (DIVIDER_HEIGHT - text_height) * 0.5);
-    ui.push_sizing(Some(width), None);
-    ui.text_centered(gpu, text, None)?;
-    ui.pop_sizing();
+    let result = ui.text_centered_at(
+        gpu,
+        text,
+        [0.0, y + (DIVIDER_HEIGHT - text_height) * 0.5, width],
+    );
     ui.pop_style();
-    Ok(())
+    result
 }
 
 struct Bubble {
@@ -1389,7 +1389,6 @@ impl HistoryLayout {
         let group = chat.direct_partner().is_none();
         let mut bubbles = Vec::with_capacity(snapshot.messages.len());
         for message in snapshot.messages.iter() {
-            let start = extent;
             let local = message
                 .sent_at_ms
                 .and_then(|ms| local_time(ms.div_euclid(1000)));
@@ -1414,6 +1413,13 @@ impl HistoryLayout {
                     format!("Unread messages · {clock}")
                 }
             });
+            // Split the normal gap between bubbles around the divider rows.
+            let divider_inset = if unread_divider.is_some() && !bubbles.is_empty() {
+                MESSAGE_GAP * 0.5
+            } else {
+                0.0
+            };
+            let start = extent - divider_inset;
             extent += DIVIDER_HEIGHT
                 * (date_divider.is_some() as u8 + unread_divider.is_some() as u8) as f32;
             ui.push_style(Style {
@@ -1476,7 +1482,7 @@ impl HistoryLayout {
                 clock_width,
                 author_width: (width - 2.0 * padding - clock_width).max(1.0),
             });
-            extent += height + actions + 8.0;
+            extent += height + actions + MESSAGE_GAP;
         }
 
         Ok(Self {
@@ -1562,7 +1568,7 @@ fn messages(
         }
 
         let body_wrap_width = (limit - limit.min(20.0)).max(1.0);
-        let top = ui.scroll_offset()[1];
+        let [left, top] = ui.scroll_offset();
         let start = layout
             .bubbles
             .partition_point(|bubble| bubble.y + bubble.height + bubble.actions < top);
@@ -1718,11 +1724,13 @@ fn messages(
                 ..ui.style()
             });
             let width = (ui.text_size(&date, None)?.0.ceil() + 18.0).min(available);
-            ui.set_position((available - width) * 0.5, top + 4.0);
-            ui.push_sizing(Some(width), None);
-            ui.text_centered(gpu, &date, None)?;
-            ui.pop_sizing();
+            let result = ui.text_centered_at(
+                gpu,
+                &date,
+                [left + (available - width) * 0.5, top + 4.0, width],
+            );
             ui.pop_style();
+            result?;
         }
     }
 
