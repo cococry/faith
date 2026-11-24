@@ -329,6 +329,20 @@ impl Store {
             CREATE TABLE IF NOT EXISTS disclosed_usernames(conversation BLOB NOT NULL, member BLOB NOT NULL, username TEXT NOT NULL, PRIMARY KEY(conversation,member));
             CREATE TABLE IF NOT EXISTS chat_metadata(conversation BLOB PRIMARY KEY,data TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS messages_by_conversation ON messages(conversation);")?;
+        let has_timestamp: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('messages') WHERE name='sent_at_ms')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_timestamp {
+            db.execute("ALTER TABLE messages ADD COLUMN sent_at_ms INTEGER", [])?;
+        }
+
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS messages_by_conversation_time ON messages(conversation, sent_at_ms)",
+            [],
+        )?;
+
         if !has_table(&db, "conversation_reads")? {
             let tx = db.unchecked_transaction()?;
             tx.execute_batch(
@@ -392,13 +406,15 @@ impl Store {
     pub fn chats(&self, auth: Id) -> anyhow::Result<Vec<Chat>> {
         let db = self.db()?;
         let mut stmt = db.prepare_cached(
-            "SELECT c.id, m.data, c.members,
-                (SELECT body FROM messages WHERE conversation=c.id ORDER BY rowid DESC LIMIT 1),
+            "SELECT c.id, m.data, c.members, latest.body,
                 (SELECT COUNT(*) FROM messages
                  WHERE conversation=c.id AND rowid>COALESCE(r.through_row,0) AND sender!=?1)
              FROM conversations c LEFT JOIN chat_metadata m ON m.conversation=c.id
              LEFT JOIN conversation_reads r ON r.conversation=c.id
-             WHERE c.active ORDER BY c.rowid DESC",
+             LEFT JOIN messages latest ON latest.rowid=(
+                 SELECT rowid FROM messages WHERE conversation=c.id
+                 ORDER BY sent_at_ms DESC, rowid DESC LIMIT 1)
+             WHERE c.active ORDER BY latest.sent_at_ms DESC, latest.rowid DESC, c.rowid DESC",
         )?;
         let rows = stmt.query_map([auth.0], |row| {
             Ok((
@@ -502,9 +518,12 @@ impl Store {
     pub fn history(&self, chat: &Chat) -> anyhow::Result<Vec<Message>> {
         let db = self.db()?;
         let mut stmt = db.prepare_cached(
-            "SELECT m.sender,m.body,m.rowid,u.username FROM messages m
+            "SELECT m.sender,m.body,m.rowid,u.username,m.sent_at_ms,
+                    m.rowid>COALESCE(r.through_row,0)
+             FROM messages m
              LEFT JOIN disclosed_usernames u ON u.conversation=m.conversation AND u.member=m.sender
-             WHERE m.conversation=? ORDER BY m.rowid DESC LIMIT 100",
+             LEFT JOIN conversation_reads r ON r.conversation=m.conversation
+             WHERE m.conversation=? ORDER BY m.sent_at_ms DESC, m.rowid DESC LIMIT 100",
         )?;
         let mut messages = stmt
             .query_map([chat.id.0.as_slice()], |row| {
@@ -513,6 +532,8 @@ impl Store {
                 let disclosed: Option<String> = row.get(3)?;
                 Ok(Message {
                     row_id: row.get(2)?,
+                    sent_at_ms: row.get(4)?,
+                    unread: chat.own_auth != Some(sender) && row.get(5)?,
                     sender,
                     author: disclosed.unwrap_or_else(|| sender.to_string()),
                     body: body
@@ -766,9 +787,7 @@ impl Store {
         }
 
         if event.kind == faith_client::GROUP_PACKET_EVENT {
-            anyhow::ensure!(event.data.len() >= 16, "truncated group event");
-            let sender = Id(event.data[..16].try_into()?);
-            let packet = GroupPacket::decode(&event.data[16..])?;
+            let (sender, packet, sent_at_ms) = event.group()?;
             let old = conversation(&tx, packet.conversation)?;
             let accepted_invite: Option<Id> = tx
                 .query_row(
@@ -814,8 +833,17 @@ impl Store {
             {
                 if packet.kind == GroupKind::Message {
                     let text = std::str::from_utf8(&packet.text)?;
-                    tx.execute("INSERT OR IGNORE INTO messages(conversation,sender,id,body) VALUES(?,?,?,?)",
-                        params![packet.conversation.0.as_slice(),sender.0.as_slice(),packet.message.0.as_slice(),text])?;
+                    tx.execute(
+                        "INSERT OR IGNORE INTO messages(conversation,sender,id,body,sent_at_ms)
+                         VALUES(?,?,?,?,?)",
+                        params![
+                            packet.conversation.0,
+                            sender.0,
+                            packet.message.0,
+                            text,
+                            sent_at_ms
+                        ],
+                    )?;
                 } else {
                     tx.execute("INSERT INTO conversations(id,revision,members,active) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,members=excluded.members,active=excluded.active",
                         params![packet.conversation.0.as_slice(),packet.revision,pack(&packet.members),packet.members.contains(&event.auth)])?;
@@ -1004,6 +1032,73 @@ mod tests {
             chat_title(&db, chat, None, &[own, members[5]], Some(own))?,
             "Chat · 09090909"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn group_timestamps_order_chats_after_replay_and_reopen() -> anyhow::Result<()> {
+        let directory = std::env::temp_dir().join(format!("faith-test-{}", Id::random()?));
+        fs::DirBuilder::new().mode(0o700).create(&directory)?;
+        let result = (|| -> anyhow::Result<()> {
+            let store = Store::open(&directory)?;
+            let auth = Id([1; 16]);
+            let sender = Id([2; 16]);
+            let recent = Id([3; 16]);
+            let older = Id([4; 16]);
+            let legacy = Id([5; 16]);
+            for chat in [recent, older, legacy] {
+                store.accept_request(chat, sender, auth)?;
+            }
+
+            for (sequence, conversation, message, text, timestamp) in [
+                (1, recent, 1, "Recent message", Some(2000_i64)),
+                (2, older, 2, "Arrived late", Some(1000)),
+                (3, legacy, 3, "Legacy message", None),
+                (4, recent, 4, "Older recent message", Some(500)),
+                (5, older, 2, "Arrived late", Some(3000)),
+            ] {
+                let packet = GroupPacket {
+                    kind: GroupKind::Message,
+                    revision: 0,
+                    conversation,
+                    message: Id([message; 16]),
+                    members: vec![sender, auth],
+                    text: text.as_bytes().to_vec(),
+                };
+                let mut data = sender.0.to_vec();
+                data.extend(packet.encode()?);
+                if let Some(timestamp) = timestamp {
+                    data.extend(timestamp.to_be_bytes());
+                }
+
+                store.apply(StoredEvent {
+                    auth,
+                    device: Id([6; 16]),
+                    sequence,
+                    kind: faith_client::GROUP_PACKET_EVENT,
+                    data: &data,
+                })?;
+            }
+
+            drop(store);
+            let store = Store::open(&directory)?;
+            let chats = store.chats(auth)?;
+            assert_eq!(
+                chats.iter().map(|chat| chat.id).collect::<Vec<_>>(),
+                [recent, older, legacy]
+            );
+            assert_eq!(chats[0].last, "Recent message");
+            assert_eq!(chats[1].unread, 1);
+            let history = store.history(&chats[0])?;
+            assert_eq!(history[0].sent_at_ms, Some(500));
+            assert_eq!(history[1].sent_at_ms, Some(2000));
+            assert!(history.iter().all(|message| message.unread));
+            assert_eq!(store.history(&chats[2])?[0].sent_at_ms, None);
+            Ok(())
+        })();
+        let cleanup = fs::remove_dir_all(&directory);
+        result?;
+        cleanup?;
         Ok(())
     }
 

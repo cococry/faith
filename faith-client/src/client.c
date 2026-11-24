@@ -1076,11 +1076,10 @@ client_dispatch_event(faith_client_t               *client,
 
   switch (event->type) {
   case FAITH_EVENT_GROUP_PACKET: {
-    if (event->data_size < 16)
-      return FAITH_ERR_INVALID;
     faith_group_packet_t packet;
-    _FH_CHECK_RETURN(
-        faith_group_decode(event->data + 16, event->data_size - 16, &packet));
+    uint64_t sent_at_ms;
+    _FH_CHECK_RETURN(faith_group_event_decode(event->data, event->data_size,
+                                               &packet, &sent_at_ms));
 
     if (client->store_event) {
       _FH_CHECK_RETURN(client->store_event(

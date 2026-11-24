@@ -86,6 +86,8 @@ impl Chat {
 #[derive(Clone)]
 pub struct Message {
     pub row_id: i64,
+    pub sent_at_ms: Option<i64>,
+    pub unread: bool,
     pub sender: Id,
     pub author: String,
     pub body: String,

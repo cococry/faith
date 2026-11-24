@@ -103,6 +103,10 @@ impl GroupPacket {
     pub fn decode(data: &[u8]) -> Result<Self> {
         let mut raw = sys::faith_group_packet_t::default();
         status(unsafe { sys::faith_group_decode(data.as_ptr(), data.len(), &mut raw) })?;
+        Self::from_raw(&raw, data)
+    }
+
+    fn from_raw(raw: &sys::faith_group_packet_t, packet: &[u8]) -> Result<Self> {
         let kind = match raw.kind {
             sys::FAITH_GROUP_CREATE => GroupKind::Create,
             sys::FAITH_GROUP_UPDATE => GroupKind::Update,
@@ -118,7 +122,7 @@ impl GroupPacket {
                 .iter()
                 .map(|m| Id(m.bytes))
                 .collect(),
-            text: unsafe { std::slice::from_raw_parts(raw.text, raw.text_size as usize) }.to_vec(),
+            text: packet[packet.len() - raw.text_size as usize..].to_vec(),
         })
     }
 
@@ -164,6 +168,42 @@ pub struct StoredEvent<'a> {
     pub sequence: u64,
     pub kind: u32,
     pub data: &'a [u8],
+}
+
+impl StoredEvent<'_> {
+    /// Decode a group event and its server timestamp. Legacy events have no timestamp.
+    pub fn group(&self) -> Result<(Id, GroupPacket, Option<i64>)> {
+        if self.kind != GROUP_PACKET_EVENT {
+            return Err(Error::Invalid("expected a group event"));
+        }
+
+        let mut raw = sys::faith_group_packet_t::default();
+        let mut sent_at_ms = 0;
+        status(unsafe {
+            sys::faith_group_event_decode(
+                self.data.as_ptr(),
+                self.data.len(),
+                &mut raw,
+                &mut sent_at_ms,
+            )
+        })?;
+        let sender_size = sys::FAITH_GROUP_EVENT_SENDER_SIZE as usize;
+        let trailer_size = if sent_at_ms == 0 {
+            0
+        } else {
+            sys::FAITH_GROUP_EVENT_TIMESTAMP_SIZE as usize
+        };
+        let sender = Id(self.data[..sender_size].try_into().unwrap());
+        let packet = GroupPacket::from_raw(
+            &raw,
+            &self.data[sender_size..self.data.len() - trailer_size],
+        )?;
+        Ok((
+            sender,
+            packet,
+            (sent_at_ms != 0).then_some(sent_at_ms as i64),
+        ))
+    }
 }
 
 pub trait EventStore: Send + Sync + 'static {

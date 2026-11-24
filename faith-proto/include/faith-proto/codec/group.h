@@ -11,6 +11,8 @@
   (FAITH_GROUP_HEADER_SIZE + 16u * FAITH_GROUP_MAX_MEMBERS +                   \
    FAITH_GROUP_MAX_TEXT)
 #define FAITH_GROUP_PLAINTEXT_V1 1u
+#define FAITH_GROUP_EVENT_SENDER_SIZE 16u
+#define FAITH_GROUP_EVENT_TIMESTAMP_SIZE 8u
 
 typedef enum {
   FAITH_GROUP_CREATE = 1,
@@ -35,3 +37,8 @@ faith_status_code_t faith_group_encode(uint8_t *out, size_t cap, size_t *size,
 
 faith_status_code_t faith_group_decode(const uint8_t *data, size_t size,
                                        faith_group_packet_t *packet);
+
+/* group events carry the sender, packet, and an optional unix millisecond timestamp */
+faith_status_code_t faith_group_event_decode(const uint8_t *data, size_t size,
+                                             faith_group_packet_t *packet,
+                                             uint64_t *sent_at_ms);

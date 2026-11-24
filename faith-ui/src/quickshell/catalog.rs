@@ -58,6 +58,9 @@ impl Entry {
             Action::SmoothScrolling(_) => Some((SettingsItem::Misc, "settings-smooth-scrolling")),
             Action::ZoomStep(_) => Some((SettingsItem::Misc, "settings-zoom-step")),
             Action::DefaultZoom(_) => Some((SettingsItem::Misc, "settings-default-zoom")),
+            Action::MessageTime24h(_) => {
+                Some((SettingsItem::Conversations, "settings-message-time-24h"))
+            }
             _ => None,
         };
         let command = if let Some((section, control)) = setting {
@@ -452,6 +455,28 @@ pub fn build(app: &App, zoom: u32) -> Vec<Entry> {
         )
         .detail("Settings · Appearance")
         .priority(180),
+        Entry::new(
+            "settings-conversations",
+            "Conversation settings",
+            Kind::Settings,
+            Action::OpenSettings {
+                section: SettingsItem::Conversations,
+                control: None,
+            },
+        )
+        .search("conversation settings", &["chat preferences timestamps"])
+        .priority(175),
+        Entry::new(
+            "message-time-format",
+            if app.message_time_24h {
+                "Use 12-hour time for messages"
+            } else {
+                "Use 24-hour time for messages"
+            },
+            Kind::Settings,
+            Action::MessageTime24h(!app.message_time_24h),
+        )
+        .search("message time format", &["timestamp 12h 24h clock"]),
         Entry::new(
             "settings-misc",
             "Misc settings",

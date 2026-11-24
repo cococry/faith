@@ -35,6 +35,7 @@ pub struct Settings {
     pub smooth_scrolling: bool,
     pub zoom_step: u32,
     pub default_zoom: u32,
+    pub message_time_24h: bool,
     pub last_profile: Option<String>,
 }
 
@@ -207,6 +208,7 @@ impl Default for Settings {
             smooth_scrolling: false,
             zoom_step: 10,
             default_zoom: 110,
+            message_time_24h: false,
             last_profile: None,
         }
     }

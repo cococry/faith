@@ -1,5 +1,7 @@
 #include "conversation.h"
 #include <faith-proto/codec/group.h>
+#include <faith-proto/codec/helpers.h>
+#include <time.h>
 
 #include "../db/device_repo.h"
 #include "../delivery/events.h"
@@ -31,6 +33,7 @@ static faith_status_code_t _check_approvals(faith_db_t *db,
                                             const conversation_job_t *job);
 static faith_status_code_t _remove_members(faith_db_t *db,
                                            const conversation_job_t *job);
+static faith_status_code_t _stamp_message(conversation_job_t *job);
 static faith_status_code_t _create(faith_db_t *db, void *data);
 static void _complete(void *owner, void *data, faith_status_code_t status);
 static void _destroy(void *data);
@@ -118,6 +121,19 @@ static faith_status_code_t _remove_members(faith_db_t *db,
   return ok ? FAITH_OK : FAITH_ERR_IO;
 }
 
+static faith_status_code_t _stamp_message(conversation_job_t *job) {
+  struct timespec now;
+
+  if (clock_gettime(CLOCK_REALTIME, &now) != 0 || now.tv_sec <= 0)
+    return FAITH_ERR_IO;
+
+  uint64_t sent_at_ms = (uint64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+  size_t offset = job->payload_size - FAITH_GROUP_EVENT_TIMESTAMP_SIZE;
+  FAITH_ENCODE_U64_BE_RETURN(job->payload, job->payload_size, offset, sent_at_ms);
+
+  return FAITH_OK;
+}
+
 static faith_status_code_t _create(faith_db_t *db, void *data) {
   conversation_job_t *job = data;
 
@@ -126,8 +142,12 @@ static faith_status_code_t _create(faith_db_t *db, void *data) {
 
   faith_status_code_t rc = _check_approvals(db, job);
 
-  if (rc == FAITH_OK && job->kind != FAITH_GROUP_MESSAGE)
-    rc = _remove_members(db, job);
+  if (rc == FAITH_OK) {
+    if (job->kind == FAITH_GROUP_MESSAGE)
+      rc = _stamp_message(job);
+    else
+      rc = _remove_members(db, job);
+  }
 
   for (size_t target = 0; target < job->n_targets && rc == FAITH_OK; target++) {
     db_user_device_list_t devices = {0};
@@ -305,7 +325,11 @@ conv_handle_group_delivery(server_state_t *s, client_conn_t *cl,
 
   job->client_id = cl->conn.id;
   job->command_id = cmd->cmd_id;
-  job->payload_size = 16 + cmd->payload_size - offset;
+  job->payload_size = FAITH_GROUP_EVENT_SENDER_SIZE + cmd->payload_size - offset;
+
+  if (job->kind == FAITH_GROUP_MESSAGE)
+    job->payload_size += FAITH_GROUP_EVENT_TIMESTAMP_SIZE;
+
   job->payload = malloc(job->payload_size);
 
   if (!job->payload) {
@@ -314,8 +338,9 @@ conv_handle_group_delivery(server_state_t *s, client_conn_t *cl,
     return FAITH_ERR_NOMEM;
   }
 
-  memcpy(job->payload, cl->ident.auth_id.bytes, 16);
-  memcpy(job->payload + 16, cmd->payload + offset, cmd->payload_size - offset);
+  memcpy(job->payload, cl->ident.auth_id.bytes, FAITH_GROUP_EVENT_SENDER_SIZE);
+  memcpy(job->payload + FAITH_GROUP_EVENT_SENDER_SIZE, cmd->payload + offset,
+         cmd->payload_size - offset);
   db_async_job_t task = {
       .run = _create, .complete = _complete, .destroy = _destroy, .data = job};
 
