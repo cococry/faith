@@ -114,7 +114,7 @@ struct faith_client {
   uint16_t proto_ver;
 
   client_side_identity_t ident;
-  char username[FAITH_USERNAME_MAX + 1];
+  char                   username[FAITH_USERNAME_MAX + 1];
 
   faith_envl_stc_device_link_req_t *pending_device_link_req;
 
@@ -145,8 +145,8 @@ struct faith_client {
 static faith_status_code_t
             send_command_result_event(faith_client_t                        *client,
                                       const faith_envl_stc_command_result_t *res);
-static void _notify_command_result(faith_client_t                        *client,
-                          const faith_envl_stc_command_result_t *res) {
+static void _notify_command_result(faith_client_t *client,
+                                   const faith_envl_stc_command_result_t *res) {
   send_command_result_event(client, res);
 }
 
@@ -1077,9 +1077,9 @@ client_dispatch_event(faith_client_t               *client,
   switch (event->type) {
   case FAITH_EVENT_GROUP_PACKET: {
     faith_group_packet_t packet;
-    uint64_t sent_at_ms;
+    uint64_t             sent_at_ms;
     _FH_CHECK_RETURN(faith_group_event_decode(event->data, event->data_size,
-                                               &packet, &sent_at_ms));
+                                              &packet, &sent_at_ms));
 
     if (client->store_event) {
       _FH_CHECK_RETURN(client->store_event(
@@ -1113,7 +1113,8 @@ client_dispatch_event(faith_client_t               *client,
 
     if (force) {
       size_t size = event->data_size - FAITH_CONVERSATION_POLICY_REQUEST_SIZE;
-      const char *name = (const char *)event->data + FAITH_CONVERSATION_POLICY_REQUEST_SIZE;
+      const char *name =
+          (const char *)event->data + FAITH_CONVERSATION_POLICY_REQUEST_SIZE;
 
       if (!size || event->data[FAITH_CONVERSATION_REQUEST_SIZE] != 1 ||
           !faith_username_valid(name, size))
@@ -1134,10 +1135,13 @@ client_dispatch_event(faith_client_t               *client,
     }
 
     _FH_CHECK_RETURN(client_push_event_ex(
-        client, request ? FAITH_EVENT_CONVERSATION_REQUEST_RECEIVED
-                        : FAITH_EVENT_CONVERSATION_RESPONSE_RECEIVED,
-        event->seq_num, request ? force : event->data[FAITH_CONVERSATION_REQUEST_SIZE],
-        event->data, event->data + FAITH_CONVERSATION_ID_SIZE, inviter, NULL, 0));
+        client,
+        request ? FAITH_EVENT_CONVERSATION_REQUEST_RECEIVED
+                : FAITH_EVENT_CONVERSATION_RESPONSE_RECEIVED,
+        event->seq_num,
+        request ? force : event->data[FAITH_CONVERSATION_REQUEST_SIZE],
+        event->data, event->data + FAITH_CONVERSATION_ID_SIZE, inviter, NULL,
+        0));
     break;
   }
 
@@ -2371,9 +2375,8 @@ faith_client_t *faith_client_create(const faith_client_config_t *cfg) {
   if (!cfg || !cfg->host)
     return NULL;
 
-  size_t username_size = cfg->username
-                             ? strnlen(cfg->username, FAITH_USERNAME_MAX + 1)
-                             : 0;
+  size_t username_size =
+      cfg->username ? strnlen(cfg->username, FAITH_USERNAME_MAX + 1) : 0;
 
   if (!faith_username_valid(cfg->username, username_size))
     return NULL;
@@ -2891,11 +2894,12 @@ faith_status_code_t faith_client_identity(faith_client_t    *client,
   return FAITH_OK;
 }
 
-faith_status_code_t faith_client_request_conversation(
-    faith_client_t *client, const faith_conversation_id_t *conversation,
-    const faith_auth_id_t *recipient) {
-  return faith_client_request_conversation_with_policy(
-      client, conversation, recipient, false);
+faith_status_code_t
+faith_client_request_conversation(faith_client_t                *client,
+                                  const faith_conversation_id_t *conversation,
+                                  const faith_auth_id_t         *recipient) {
+  return faith_client_request_conversation_with_policy(client, conversation,
+                                                       recipient, false);
 }
 
 faith_status_code_t faith_client_request_conversation_with_policy(
@@ -2922,10 +2926,10 @@ faith_status_code_t faith_client_request_conversation_with_disclosure(
                                       : 0;
   payload[FAITH_CONVERSATION_REQUEST_SIZE] = flags;
 
-  return client_send_command(client, payload,
-                             flags ? sizeof(payload) : FAITH_CONVERSATION_REQUEST_SIZE,
-                             FAITH_COMMAND_CONVERSATION_REQUEST,
-                             _notify_command_result);
+  return client_send_command(
+      client, payload,
+      flags ? sizeof(payload) : FAITH_CONVERSATION_REQUEST_SIZE,
+      FAITH_COMMAND_CONVERSATION_REQUEST, _notify_command_result);
 }
 
 faith_status_code_t faith_client_respond_conversation(
@@ -2953,8 +2957,8 @@ faith_status_code_t faith_client_respond_conversation_with_policy(
   payload[FAITH_CONVERSATION_RESPONSE_SIZE + 1] = disclose_username;
 
   uint8_t msg[FAITH_SIGNATURE_CONVERSATION_POLICY_RESPONSE_SIZE];
-  size_t msg_size = FAITH_SIGNATURE_CONVERSATION_RESPONSE_SIZE;
-  size_t signature_offset = FAITH_CONVERSATION_RESPONSE_SIZE;
+  size_t  msg_size = FAITH_SIGNATURE_CONVERSATION_RESPONSE_SIZE;
+  size_t  signature_offset = FAITH_CONVERSATION_RESPONSE_SIZE;
 
   if (force_username_disclosure || disclose_username) {
     faith_gen_sign_buf_conversation_policy_response(
@@ -2967,9 +2971,9 @@ faith_status_code_t faith_client_respond_conversation_with_policy(
   }
 
   size_t signature_size = 0;
-  _FH_CHECK_RETURN(faith_gen_signature(
-      client->ident.keypair, payload + signature_offset,
-      &signature_size, msg, msg_size));
+  _FH_CHECK_RETURN(faith_gen_signature(client->ident.keypair,
+                                       payload + signature_offset,
+                                       &signature_size, msg, msg_size));
 
   return client_send_command(client, payload, signature_offset + signature_size,
                              FAITH_COMMAND_CONVERSATION_RESPONSE,
@@ -2992,7 +2996,8 @@ faith_client_deliver_group(faith_client_t             *client,
                                       sizeof(payload) - offset, &size, packet));
 
   return client_send_command(client, payload, offset + size,
-                             FAITH_COMMAND_GROUP_DELIVER, _notify_command_result);
+                             FAITH_COMMAND_GROUP_DELIVER,
+                             _notify_command_result);
 }
 
 faith_status_code_t faith_client_create_group(faith_client_t        *client,
@@ -3020,7 +3025,8 @@ faith_status_code_t faith_client_create_group(faith_client_t        *client,
     memcpy(conversation_id, id.bytes, sizeof(id.bytes));
 
     for (size_t i = 0; i < count; i++)
-      _FH_CHECK_RETURN(faith_client_request_conversation(client, &id, &peers[i]));
+      _FH_CHECK_RETURN(
+          faith_client_request_conversation(client, &id, &peers[i]));
 
     return FAITH_OK;
   }
